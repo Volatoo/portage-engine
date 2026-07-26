@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"time"
 )
 
@@ -14,6 +15,8 @@ var builderProxyClient = &http.Client{Timeout: 60 * time.Second}
 // getFromBuilder issues an authenticated GET to a builder endpoint, presenting
 // the shared builder token when one is configured.
 func (s *Server) getFromBuilder(url string) (*http.Response, error) {
+	// #nosec G704 -- the target originates from the authenticated builder
+	// registry, not from a request URL or request body.
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
@@ -21,6 +24,7 @@ func (s *Server) getFromBuilder(url string) (*http.Response, error) {
 	if s.config.BuilderToken != "" {
 		req.Header.Set("X-API-Key", s.config.BuilderToken)
 	}
+	// #nosec G704 -- the request target is the registered builder endpoint.
 	return builderProxyClient.Do(req)
 }
 
@@ -51,7 +55,7 @@ func (s *Server) handleArtifactInfo(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Proxy request to builder
-	infoURL := fmt.Sprintf("%s/api/v1/artifacts/info/%s", builderURL, jobID)
+	infoURL := fmt.Sprintf("%s/api/v1/artifacts/info/%s", builderURL, url.PathEscape(jobID))
 	resp, err := s.getFromBuilder(infoURL)
 	if err != nil {
 		s.metrics.IncHTTPRequestErrors()
@@ -98,7 +102,7 @@ func (s *Server) handleArtifactDownload(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// Proxy request to builder
-	downloadURL := fmt.Sprintf("%s/api/v1/artifacts/download/%s", builderURL, jobID)
+	downloadURL := fmt.Sprintf("%s/api/v1/artifacts/download/%s", builderURL, url.PathEscape(jobID))
 	resp, err := s.getFromBuilder(downloadURL)
 	if err != nil {
 		s.metrics.IncHTTPRequestErrors()
@@ -145,7 +149,7 @@ func (s *Server) getBuilderURLForJob(jobID string) (string, error) {
 		}
 		// Ensure the URL is normalized
 		builderURL = normalizeBuilderURL(builderURL)
-		statusURL := fmt.Sprintf("%s/api/v1/jobs/%s", builderURL, jobID)
+		statusURL := fmt.Sprintf("%s/api/v1/jobs/%s", builderURL, url.PathEscape(jobID))
 
 		resp, err := s.getFromBuilder(statusURL)
 		if err != nil {

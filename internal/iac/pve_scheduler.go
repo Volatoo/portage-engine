@@ -274,7 +274,7 @@ func (c *pveAPIClient) do(ctx context.Context, method, path string, form url.Val
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	}
 	if c.ticket != "" {
-		req.AddCookie(&http.Cookie{Name: "PVEAuthCookie", Value: c.ticket})
+		req.AddCookie(pveAuthCookie(c.ticket))
 		if method != http.MethodGet && method != http.MethodHead {
 			req.Header.Set("CSRFPreventionToken", c.csrf)
 		}
@@ -429,7 +429,7 @@ func fetchPVEClusterResources(endpoint string, auth PVEAuth) ([]pveClusterResour
 		if err != nil {
 			return nil, err
 		}
-		req.AddCookie(&http.Cookie{Name: "PVEAuthCookie", Value: ticket})
+		req.AddCookie(pveAuthCookie(ticket))
 	}
 
 	resp, err := pveHTTPClient(auth.Insecure).Do(req)
@@ -477,7 +477,7 @@ func WaitForPVEGuestIP(endpoint string, auth PVEAuth, node string, vmid string, 
 			return "", err
 		}
 		if ticket != "" {
-			req.AddCookie(&http.Cookie{Name: "PVEAuthCookie", Value: ticket})
+			req.AddCookie(pveAuthCookie(ticket))
 		} else {
 			req.Header.Set("Authorization", fmt.Sprintf("PVEAPIToken=%s=%s", auth.TokenID, auth.TokenSecret))
 		}
@@ -550,7 +550,7 @@ func PVEGuestExec(ctx context.Context, endpoint string, auth PVEAuth, node, vmid
 	}
 	authorize := func(request *http.Request) {
 		if ticket != "" {
-			request.AddCookie(&http.Cookie{Name: "PVEAuthCookie", Value: ticket})
+			request.AddCookie(pveAuthCookie(ticket))
 		} else {
 			request.Header.Set("Authorization", fmt.Sprintf("PVEAPIToken=%s=%s", auth.TokenID, auth.TokenSecret))
 		}
@@ -659,6 +659,16 @@ func WaitForPVEGuestHostKey(endpoint string, auth PVEAuth, node, vmid string, ti
 		time.Sleep(2 * time.Second)
 	}
 	return "", fmt.Errorf("guest ED25519 SSH host key was not available within %s: %w", timeout, lastErr)
+}
+
+func pveAuthCookie(ticket string) *http.Cookie {
+	return &http.Cookie{
+		Name:     "PVEAuthCookie",
+		Value:    ticket,
+		Secure:   true,
+		HttpOnly: true,
+		SameSite: http.SameSiteStrictMode,
+	}
 }
 
 // mapKeys returns the keys of a string set for error messages.

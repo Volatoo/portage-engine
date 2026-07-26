@@ -53,33 +53,8 @@ func PromoteRelease(candidateCatalogPath, bundleManifestPath, bundleSignaturePat
 	if err != nil || candidateDigest != plan.CandidateCatalogDigest {
 		return nil, fmt.Errorf("candidate catalog digest does not match promotion plan")
 	}
-	if len(candidate.Images) != len(plan.Evidence) || len(candidate.Profiles) != len(candidate.Images) {
-		return nil, fmt.Errorf("promotion requires evidence for every catalog image/profile")
-	}
-	for _, profile := range candidate.Profiles {
-		if profile.Channel != "candidate" {
-			return nil, fmt.Errorf("profile %q is not a candidate", profile.ID)
-		}
-	}
-	for _, repository := range candidate.Repositories {
-		if repository.Channel != "candidate" {
-			return nil, fmt.Errorf("repository %q is not a candidate", repository.ID)
-		}
-	}
-	for _, image := range candidate.Images {
-		if image.Channel != "candidate" {
-			return nil, fmt.Errorf("image %q is not a candidate", image.ID)
-		}
-	}
-	if len(candidate.MirrorBundles) != len(bundles) {
-		return nil, fmt.Errorf("candidate catalog does not contain exactly the verified bundle set")
-	}
-	for _, mirror := range candidate.MirrorBundles {
-		verified, ok := bundles[mirror.ID]
-		if !ok || mirror.Channel != "candidate" || mirror.Digest != verified.digest || !mirror.CreatedAt.Equal(verified.manifest.CreatedAt) ||
-			!mirror.FreshUntil.Equal(verified.manifest.FreshUntil) || mirror.AdvisoryWatermark != verified.manifest.AdvisoryWatermark {
-			return nil, fmt.Errorf("candidate mirror bundle does not match the signed bundle manifest")
-		}
+	if err := validatePromotionCatalog(candidate, plan, bundles); err != nil {
+		return nil, err
 	}
 	if inside, err := pathWithin(root, releasePrivateKeyPath); err != nil || inside {
 		return nil, fmt.Errorf("release signing private key must be outside the evidence root")
@@ -89,108 +64,9 @@ func PromoteRelease(candidateCatalogPath, bundleManifestPath, bundleSignaturePat
 			return nil, fmt.Errorf("release signing private key must be outside every offline root")
 		}
 	}
-	imageByID := make(map[string]catalog.ImageManifest, len(candidate.Images))
-	profileByID := make(map[string]catalog.ProfileDefinition, len(candidate.Profiles))
-	for _, image := range candidate.Images {
-		imageByID[image.ID] = image
-	}
-	for _, profile := range candidate.Profiles {
-		profileByID[profile.ID] = profile
-	}
-	seenEvidence := map[string]struct{}{}
-	promotedEvidence := make([]PromotedImageEvidence, 0, len(plan.Evidence))
-	for _, reference := range plan.Evidence {
-		if !validOperationsID(reference.ImageID) {
-			return nil, fmt.Errorf("invalid promotion evidence image ID")
-		}
-		if _, duplicate := seenEvidence[reference.ImageID]; duplicate {
-			return nil, fmt.Errorf("duplicate promotion evidence for %q", reference.ImageID)
-		}
-		seenEvidence[reference.ImageID] = struct{}{}
-		catalogImage, exists := imageByID[reference.ImageID]
-		if !exists {
-			return nil, fmt.Errorf("promotion evidence references unknown image %q", reference.ImageID)
-		}
-		manifestPath, err := confinedEvidencePath(root, reference.ImageManifest)
-		if err != nil {
-			return nil, err
-		}
-		smokePath, err := confinedEvidencePath(root, reference.SmokeResult)
-		if err != nil {
-			return nil, err
-		}
-		stampPath, err := confinedEvidencePath(root, reference.OutputStamp)
-		if err != nil {
-			return nil, err
-		}
-		manifest, err := LoadImageManifest(manifestPath)
-		if err != nil {
-			return nil, fmt.Errorf("load image evidence %q: %w", reference.ImageID, err)
-		}
-		profile, exists := profileByID[catalogImage.ProfileID]
-		verifiedBundle, bundleExists := bundles[manifest.MirrorBundleID]
-		if !exists || !bundleExists || profile.ImageID != catalogImage.ID || manifest.ImageID != catalogImage.ID || manifest.ProfileID != catalogImage.ProfileID ||
-			manifest.Generation != catalogImage.Generation || manifest.Template != catalogImage.Template || manifest.ImageDigest != catalogImage.Digest ||
-			manifest.Provider != catalogImage.Provider || manifest.Arch != catalogImage.Arch || manifest.BuildMode != catalogImage.BuildMode || manifest.RootfsSource != catalogImage.RootfsSource || manifest.DisplayModel != catalogImage.DisplayModel ||
-			manifest.RootfsManifestDigest != catalogImage.RootfsManifestDigest || !slices.Equal(manifest.PackageSets, catalogImage.PackageSetIDs) || manifest.PackageSetCatalogDigest != catalogImage.PackageSetCatalogDigest ||
-			profile.MirrorBundleID != manifest.MirrorBundleID || manifest.InputLockDigest != verifiedBundle.manifest.InputLockDigest || manifest.ProfilePath != profile.ProfilePath ||
-			!manifestProfileRepositoryMatches(manifest.ProfileRepository, profile.ProfileRepositoryID, candidate.Repositories) ||
-			!manifestParentsMatchProfile(manifest.ProfileParents, profile.Parents, candidate.Repositories) ||
-			!manifestRepositoriesMatchProfile(manifest.Repositories, profile.RepositoryIDs, candidate.Repositories) {
-			return nil, fmt.Errorf("image manifest %q does not match the candidate catalog", reference.ImageID)
-		}
-		var smoke SmokeResult
-		if err := decodeStrictFile(smokePath, &smoke); err != nil {
-			return nil, err
-		}
-		if smoke.SchemaVersion != 1 || smoke.Target != manifest.Target || smoke.CandidateManifest != filepath.Base(manifestPath) || smoke.InstanceName == "" || smoke.VMID == "" || smoke.Node == "" || smoke.GuestIP == "" ||
-			smoke.CloudInitRuns < 2 || !smoke.TerraformDestroyRequired || !smoke.TerraformDestroyed || !smoke.OutputProvenanceStamped || smoke.CompletedAt.IsZero() || smoke.CompletedAt.Before(manifest.CreatedAt) {
-			return nil, fmt.Errorf("smoke evidence for %q is incomplete", reference.ImageID)
-		}
-		var stamp OutputStampEvidence
-		if err := decodeStrictFile(stampPath, &stamp); err != nil {
-			return nil, err
-		}
-		manifestFileDigest, err := digestFile(manifestPath)
-		if err != nil {
-			return nil, err
-		}
-		if stamp.SchemaVersion != 1 || stamp.StampedAt.IsZero() || stamp.StampedAt.Before(smoke.CompletedAt) || stamp.Template != manifest.Template || stamp.ImageDigest != manifest.ImageDigest || stamp.ManifestDigest != "sha256:"+manifestFileDigest || !stamp.Verified {
-			return nil, fmt.Errorf("output stamp for %q does not bind the image manifest", reference.ImageID)
-		}
-		smokeDigest, err := digestFile(smokePath)
-		if err != nil {
-			return nil, err
-		}
-		stampDigest, err := digestFile(stampPath)
-		if err != nil {
-			return nil, err
-		}
-		desktopDigest := ""
-		if manifest.Target == "desktop-verifier" {
-			if reference.DesktopResult == "" {
-				return nil, fmt.Errorf("desktop promotion evidence for %q is missing", reference.ImageID)
-			}
-			desktopPath, err := confinedEvidencePath(root, reference.DesktopResult)
-			if err != nil {
-				return nil, err
-			}
-			if reference.DesktopScenarioID == "" {
-				return nil, fmt.Errorf("desktop promotion evidence for %q has no reviewed scenario ID", reference.ImageID)
-			}
-			if err := validateDesktopPromotionEvidence(desktopPath, manifest, reference.DesktopScenarioID, stamp.StampedAt); err != nil {
-				return nil, fmt.Errorf("desktop evidence for %q: %w", reference.ImageID, err)
-			}
-			digest, err := digestFile(desktopPath)
-			if err != nil {
-				return nil, err
-			}
-			desktopDigest = "sha256:" + digest
-		} else if reference.DesktopResult != "" || reference.DesktopScenarioID != "" {
-			return nil, fmt.Errorf("non-desktop image %q contains desktop promotion evidence", reference.ImageID)
-		}
-		promotedEvidence = append(promotedEvidence, PromotedImageEvidence{ImageID: reference.ImageID, ImageManifestDigest: "sha256:" + manifestFileDigest,
-			SmokeResultDigest: "sha256:" + smokeDigest, OutputStampDigest: "sha256:" + stampDigest, DesktopResultDigest: desktopDigest, CompletedAt: smoke.CompletedAt})
+	promotedEvidence, err := collectPromotionEvidence(plan, candidate, bundles, root)
+	if err != nil {
+		return nil, err
 	}
 	sort.Slice(promotedEvidence, func(i, j int) bool { return promotedEvidence[i].ImageID < promotedEvidence[j].ImageID })
 	stable, err := copyCatalog(candidate)
@@ -250,6 +126,182 @@ func PromoteRelease(candidateCatalogPath, bundleManifestPath, bundleSignaturePat
 	}
 	envelope := &SignedReleaseAlias{SchemaVersion: 1, Alias: *alias, Signature: *aliasSignature}
 	return &PromotionResult{Catalog: stable, Receipt: receipt, ReceiptSignature: receiptSignature, Alias: alias, AliasSignature: aliasSignature, AliasEnvelope: envelope}, nil
+}
+
+func validatePromotionCatalog(candidate *catalog.Catalog, plan PromotionPlan, bundles map[string]verifiedPromotionBundle) error {
+	if len(candidate.Images) != len(plan.Evidence) || len(candidate.Profiles) != len(candidate.Images) {
+		return fmt.Errorf("promotion requires evidence for every catalog image/profile")
+	}
+	for _, profile := range candidate.Profiles {
+		if profile.Channel != "candidate" {
+			return fmt.Errorf("profile %q is not a candidate", profile.ID)
+		}
+	}
+	for _, repository := range candidate.Repositories {
+		if repository.Channel != "candidate" {
+			return fmt.Errorf("repository %q is not a candidate", repository.ID)
+		}
+	}
+	for _, image := range candidate.Images {
+		if image.Channel != "candidate" {
+			return fmt.Errorf("image %q is not a candidate", image.ID)
+		}
+	}
+	if len(candidate.MirrorBundles) != len(bundles) {
+		return fmt.Errorf("candidate catalog does not contain exactly the verified bundle set")
+	}
+	for _, mirror := range candidate.MirrorBundles {
+		verified, ok := bundles[mirror.ID]
+		if !ok || mirror.Channel != "candidate" || mirror.Digest != verified.digest || !mirror.CreatedAt.Equal(verified.manifest.CreatedAt) ||
+			!mirror.FreshUntil.Equal(verified.manifest.FreshUntil) || mirror.AdvisoryWatermark != verified.manifest.AdvisoryWatermark {
+			return fmt.Errorf("candidate mirror bundle does not match the signed bundle manifest")
+		}
+	}
+	return nil
+}
+
+func collectPromotionEvidence(plan PromotionPlan, candidate *catalog.Catalog, bundles map[string]verifiedPromotionBundle, root string) ([]PromotedImageEvidence, error) {
+	imageByID := make(map[string]catalog.ImageManifest, len(candidate.Images))
+	profileByID := make(map[string]catalog.ProfileDefinition, len(candidate.Profiles))
+	for _, image := range candidate.Images {
+		imageByID[image.ID] = image
+	}
+	for _, profile := range candidate.Profiles {
+		profileByID[profile.ID] = profile
+	}
+	seen := make(map[string]struct{}, len(plan.Evidence))
+	result := make([]PromotedImageEvidence, 0, len(plan.Evidence))
+	for _, reference := range plan.Evidence {
+		if !validOperationsID(reference.ImageID) {
+			return nil, fmt.Errorf("invalid promotion evidence image ID")
+		}
+		if _, duplicate := seen[reference.ImageID]; duplicate {
+			return nil, fmt.Errorf("duplicate promotion evidence for %q", reference.ImageID)
+		}
+		seen[reference.ImageID] = struct{}{}
+		record, err := validatePromotionImageEvidence(reference, candidate, bundles, imageByID, profileByID, root)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, record)
+	}
+	return result, nil
+}
+
+func validatePromotionImageEvidence(reference PromotionEvidenceRef, candidate *catalog.Catalog,
+	bundles map[string]verifiedPromotionBundle, imageByID map[string]catalog.ImageManifest,
+	profileByID map[string]catalog.ProfileDefinition, root string) (PromotedImageEvidence, error) {
+	catalogImage, exists := imageByID[reference.ImageID]
+	if !exists {
+		return PromotedImageEvidence{}, fmt.Errorf("promotion evidence references unknown image %q", reference.ImageID)
+	}
+	manifestPath, err := confinedEvidencePath(root, reference.ImageManifest)
+	if err != nil {
+		return PromotedImageEvidence{}, err
+	}
+	smokePath, err := confinedEvidencePath(root, reference.SmokeResult)
+	if err != nil {
+		return PromotedImageEvidence{}, err
+	}
+	stampPath, err := confinedEvidencePath(root, reference.OutputStamp)
+	if err != nil {
+		return PromotedImageEvidence{}, err
+	}
+	manifest, err := LoadImageManifest(manifestPath)
+	if err != nil {
+		return PromotedImageEvidence{}, fmt.Errorf("load image evidence %q: %w", reference.ImageID, err)
+	}
+	profile, profileExists := profileByID[catalogImage.ProfileID]
+	verifiedBundle, bundleExists := bundles[manifest.MirrorBundleID]
+	if !profileExists || !bundleExists || !promotionManifestMatchesCatalog(manifest, catalogImage, profile, verifiedBundle, candidate.Repositories) {
+		return PromotedImageEvidence{}, fmt.Errorf("image manifest %q does not match the candidate catalog", reference.ImageID)
+	}
+	smoke, stamp, manifestDigest, err := loadPromotionSmokeAndStamp(reference.ImageID, manifestPath, smokePath, stampPath, manifest)
+	if err != nil {
+		return PromotedImageEvidence{}, err
+	}
+	smokeDigest, err := digestFile(smokePath)
+	if err != nil {
+		return PromotedImageEvidence{}, err
+	}
+	stampDigest, err := digestFile(stampPath)
+	if err != nil {
+		return PromotedImageEvidence{}, err
+	}
+	desktopDigest, err := promotionDesktopDigest(reference, manifest, root, stamp.StampedAt)
+	if err != nil {
+		return PromotedImageEvidence{}, err
+	}
+	return PromotedImageEvidence{
+		ImageID: reference.ImageID, ImageManifestDigest: "sha256:" + manifestDigest,
+		SmokeResultDigest: "sha256:" + smokeDigest, OutputStampDigest: "sha256:" + stampDigest,
+		DesktopResultDigest: desktopDigest, CompletedAt: smoke.CompletedAt,
+	}, nil
+}
+
+func promotionManifestMatchesCatalog(manifest *ImageManifest, image catalog.ImageManifest, profile catalog.ProfileDefinition,
+	bundle verifiedPromotionBundle, repositories []catalog.RepositoryDefinition) bool {
+	return profile.ImageID == image.ID && manifest.ImageID == image.ID && manifest.ProfileID == image.ProfileID &&
+		manifest.Generation == image.Generation && manifest.Template == image.Template && manifest.ImageDigest == image.Digest &&
+		manifest.Provider == image.Provider && manifest.Arch == image.Arch && manifest.BuildMode == image.BuildMode &&
+		manifest.RootfsSource == image.RootfsSource && manifest.DisplayModel == image.DisplayModel &&
+		manifest.RootfsManifestDigest == image.RootfsManifestDigest && slices.Equal(manifest.PackageSets, image.PackageSetIDs) &&
+		manifest.PackageSetCatalogDigest == image.PackageSetCatalogDigest && profile.MirrorBundleID == manifest.MirrorBundleID &&
+		manifest.InputLockDigest == bundle.manifest.InputLockDigest && manifest.ProfilePath == profile.ProfilePath &&
+		manifestProfileRepositoryMatches(manifest.ProfileRepository, profile.ProfileRepositoryID, repositories) &&
+		manifestParentsMatchProfile(manifest.ProfileParents, profile.Parents, repositories) &&
+		manifestRepositoriesMatchProfile(manifest.Repositories, profile.RepositoryIDs, repositories)
+}
+
+func loadPromotionSmokeAndStamp(imageID, manifestPath, smokePath, stampPath string, manifest *ImageManifest) (SmokeResult, OutputStampEvidence, string, error) {
+	var smoke SmokeResult
+	if err := decodeStrictFile(smokePath, &smoke); err != nil {
+		return smoke, OutputStampEvidence{}, "", err
+	}
+	if smoke.SchemaVersion != 1 || smoke.Target != manifest.Target || smoke.CandidateManifest != filepath.Base(manifestPath) ||
+		smoke.InstanceName == "" || smoke.VMID == "" || smoke.Node == "" || smoke.GuestIP == "" || smoke.CloudInitRuns < 2 ||
+		!smoke.TerraformDestroyRequired || !smoke.TerraformDestroyed || !smoke.OutputProvenanceStamped ||
+		smoke.CompletedAt.IsZero() || smoke.CompletedAt.Before(manifest.CreatedAt) {
+		return smoke, OutputStampEvidence{}, "", fmt.Errorf("smoke evidence for %q is incomplete", imageID)
+	}
+	var stamp OutputStampEvidence
+	if err := decodeStrictFile(stampPath, &stamp); err != nil {
+		return smoke, stamp, "", err
+	}
+	manifestDigest, err := digestFile(manifestPath)
+	if err != nil {
+		return smoke, stamp, "", err
+	}
+	if stamp.SchemaVersion != 1 || stamp.StampedAt.IsZero() || stamp.StampedAt.Before(smoke.CompletedAt) ||
+		stamp.Template != manifest.Template || stamp.ImageDigest != manifest.ImageDigest ||
+		stamp.ManifestDigest != "sha256:"+manifestDigest || !stamp.Verified {
+		return smoke, stamp, "", fmt.Errorf("output stamp for %q does not bind the image manifest", imageID)
+	}
+	return smoke, stamp, manifestDigest, nil
+}
+
+func promotionDesktopDigest(reference PromotionEvidenceRef, manifest *ImageManifest, root string, stampedAt time.Time) (string, error) {
+	if manifest.Target != "desktop-verifier" {
+		if reference.DesktopResult != "" || reference.DesktopScenarioID != "" {
+			return "", fmt.Errorf("non-desktop image %q contains desktop promotion evidence", reference.ImageID)
+		}
+		return "", nil
+	}
+	if reference.DesktopResult == "" || reference.DesktopScenarioID == "" {
+		return "", fmt.Errorf("desktop promotion evidence for %q is incomplete", reference.ImageID)
+	}
+	desktopPath, err := confinedEvidencePath(root, reference.DesktopResult)
+	if err != nil {
+		return "", err
+	}
+	if err := validateDesktopPromotionEvidence(desktopPath, manifest, reference.DesktopScenarioID, stampedAt); err != nil {
+		return "", fmt.Errorf("desktop evidence for %q: %w", reference.ImageID, err)
+	}
+	digest, err := digestFile(desktopPath)
+	if err != nil {
+		return "", err
+	}
+	return "sha256:" + digest, nil
 }
 
 func validateDesktopPromotionEvidence(path string, manifest *ImageManifest, scenarioID string, stampedAt time.Time) error {

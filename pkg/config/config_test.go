@@ -185,6 +185,27 @@ ALLOW_ANONYMOUS=false
 	}
 }
 
+func TestDashboardConfigValidatesBackendOrigin(t *testing.T) {
+	for _, valid := range []string{"http://server.internal:8080", "https://server.internal/"} {
+		cfg := &DashboardConfig{ServerURL: valid}
+		if err := cfg.Validate(); err != nil {
+			t.Errorf("Validate(%q) = %v, want success", valid, err)
+		}
+	}
+	for _, invalid := range []string{
+		"",
+		"file:///etc/passwd",
+		"http://user:password@server.internal",
+		"http://server.internal/api",
+		"http://server.internal?target=other",
+	} {
+		cfg := &DashboardConfig{ServerURL: invalid}
+		if err := cfg.Validate(); err == nil {
+			t.Errorf("Validate(%q) succeeded, want origin validation error", invalid)
+		}
+	}
+}
+
 // TestLoadBuilderConfig tests loading builder configuration.
 func TestLoadBuilderConfig(t *testing.T) {
 	tmpFile := "/tmp/test-builder.conf"

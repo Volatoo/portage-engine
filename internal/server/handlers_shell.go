@@ -112,5 +112,5 @@ func (s *Server) handleInstanceShell(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	_ = cmd.Wait()
-	log.Printf("shell session to %s (%s) closed", instanceID, strings.TrimSpace(ip))
+	log.Printf("shell session to %q (%q) closed", instanceID, strings.TrimSpace(ip)) // #nosec G706 -- values are safely quoted.
 }

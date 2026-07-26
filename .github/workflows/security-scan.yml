@@ -45,48 +45,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Excluded rules (see .gosec.json for the rationale):
-      #   G204 subprocess: all calls use argv form with validated inputs.
-      #   G304 file inclusion: paths come from operator config, not request bodies.
-      #   G401/G501/G505 weak crypto: SHA1/MD5 are MANDATED by the Portage
-      #     binary-package "Packages" index format; they are checksums, not a
-      #     security control.
-      #   G301/G302/G306 file perms: the binhost index, Portage config files
-      #     (binrepos.conf, make.conf), and the executable deploy script are
-      #     world-readable / owner-executable BY DESIGN — a binhost that emerge
-      #     cannot read is useless.
-      # Run gosec under the project's Go toolchain (installed via `go install`)
-      # rather than the securego/gosec Docker action, whose bundled Go (1.23) is
-      # too old to load a module requiring a newer Go — the image sets
-      # GOTOOLCHAIN=local, so it cannot download the required toolchain and every
-      # package fails to load. gosec is pinned to a release (not @latest) so new
-      # experimental rules do not spuriously break CI; -severity medium fails on
-      # real issues.
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
           go-version: '1.26.5'
+          cache: true
 
-      - name: Install gosec
-        run: go install github.com/securego/gosec/v2/cmd/gosec@v2.28.0
-
+      # Use the same analyzer, suppressions, and path exclusions as local lint.
+      # This keeps the dedicated security job aligned with pre-commit and the
+      # regular CI lint job while retaining G124/G703/G704 coverage.
       - name: Run gosec security scanner
-        run: gosec -severity=medium -exclude=G204,G304,G301,G302,G306,G401,G501,G505,G124,G703,G704 -conf .gosec.json -fmt=json -out gosec-results.json -stdout ./...
-
-      - name: Display gosec results
-        if: always()
-        run: |
-          if [ -f gosec-results.json ]; then
-            echo "=== GoSec Scan Results ==="
-            ISSUE_COUNT=$(cat gosec-results.json | jq '.Issues | length')
-            echo "Total Issues Found: $ISSUE_COUNT"
-            if [ "$ISSUE_COUNT" -gt 0 ]; then
-              echo "Showing first 20 issues:"
-              cat gosec-results.json | jq '.Issues[] | {Rule: .rule_id, File: .file, Line: .line, Severity: .severity, Details: .details}' | head -100
-            else
-              echo "No security issues found! ✓"
-            fi
-          fi
+        uses: golangci/golangci-lint-action@v7
+        with:
+          version: v2.7.2
+          args: --enable-only=gosec --timeout=5m -v
 
   codeql-analysis:
     name: CodeQL Analysis

@@ -154,47 +154,100 @@ type pveCleanupInput struct {
 }
 
 func CreatePBSSourceAttestation(request PBSAttestationRequest, now time.Time) (*PBSSourceAttestation, error) {
+	if err := validatePBSAttestationRequest(request); err != nil {
+		return nil, err
+	}
+	snapshot, vmid, err := loadPBSSnapshot(request.SnapshotPath)
+	if err != nil {
+		return nil, err
+	}
+	_, imageIndexes, err := loadPBSImageIndexes(request.IndexPath, snapshot)
+	if err != nil {
+		return nil, err
+	}
+	_, config, err := loadPBSQEMUConfig(request.QEMUConfigPath, imageIndexes)
+	if err != nil {
+		return nil, err
+	}
+	restore, err := loadPBSRestoreEvidence(request, vmid, config["name"])
+	if err != nil {
+		return nil, err
+	}
+	createdAt := now.UTC()
+	if createdAt.Before(time.Unix(snapshot.BackupTime, 0).UTC()) {
+		return nil, fmt.Errorf("attestation time precedes the PBS snapshot")
+	}
+	decodedIndex, err := digestEvidence(request.IndexPath)
+	if err != nil {
+		return nil, err
+	}
+	qemuConfig, err := digestEvidence(request.QEMUConfigPath)
+	if err != nil {
+		return nil, err
+	}
+	return &PBSSourceAttestation{
+		SchemaVersion: 1, CreatedAt: createdAt, PBSURL: request.PBSURL, CertificateFingerprint: request.CertificateFingerprint, Datastore: request.Datastore,
+		BackupType: snapshot.BackupType, BackupID: snapshot.BackupID, BackupTime: snapshot.BackupTime,
+		Snapshot: fmt.Sprintf("%s/%s/%s", snapshot.BackupType, snapshot.BackupID, time.Unix(snapshot.BackupTime, 0).UTC().Format("2006-01-02T15:04:05Z")),
+		Owner:    snapshot.Owner, Comment: snapshot.Comment, Protected: true, Verification: snapshot.Verification,
+		DecodedIndex: decodedIndex, QEMUConfig: qemuConfig, ImageIndexes: imageIndexes,
+		Template: PBSTemplateContract{VMID: vmid, Name: config["name"], Template: 1, CIUpgrade: 0, BIOS: config["bios"], Machine: config["machine"], Boot: config["boot"], Agent: config["agent"]},
+		RestoreGate: PBSRestoreGate{RestoreVMID: request.RestoreVMID, SmokeVMID: request.SmokeVMID, CloudInitRuns: 2, ImplicitEmergeSync: false, TemporaryVMsDestroyed: true,
+			OS: evidenceValue(restore.runtime.content, "OS="), Kernel: evidenceValue(restore.runtime.content, "KERNEL="), Profile: evidenceValue(restore.runtime.content, "PROFILE="), RootFS: evidenceValue(restore.runtime.content, "ROOT_FS="),
+			FirstBootEvidence: restore.firstBoot.digest, RuntimeEvidence: restore.runtime.digest, SecondCloudInitEvidence: restore.secondBoot.digest, CleanupEvidence: restore.cleanupDigest},
+	}, nil
+}
+
+func validatePBSAttestationRequest(request PBSAttestationRequest) error {
 	if request.RestoreVMID < 100 || request.SmokeVMID < 100 || request.RestoreVMID == request.SmokeVMID {
-		return nil, fmt.Errorf("restore and smoke VMIDs must be distinct PVE VMIDs")
+		return fmt.Errorf("restore and smoke VMIDs must be distinct PVE VMIDs")
 	}
 	parsedURL, err := url.Parse(request.PBSURL)
 	if err != nil || parsedURL.Scheme != "https" || parsedURL.Host == "" || parsedURL.User != nil || parsedURL.RawQuery != "" || parsedURL.Fragment != "" || parsedURL.Path != "" {
-		return nil, fmt.Errorf("pbs_url must be an HTTPS origin without path, credentials, query, or fragment")
+		return fmt.Errorf("pbs_url must be an HTTPS origin without path, credentials, query, or fragment")
 	}
 	if !pbsFingerprintPattern.MatchString(request.CertificateFingerprint) || !repoComponentPattern.MatchString(request.Datastore) {
-		return nil, fmt.Errorf("invalid PBS fingerprint or datastore")
+		return fmt.Errorf("invalid PBS fingerprint or datastore")
 	}
+	return nil
+}
+
+func loadPBSSnapshot(path string) (*pbsSnapshotInput, int, error) {
 	var snapshot pbsSnapshotInput
-	if err := decodeStrictFile(request.SnapshotPath, &snapshot); err != nil {
-		return nil, fmt.Errorf("load PBS snapshot evidence: %w", err)
+	if err := decodeStrictFile(path, &snapshot); err != nil {
+		return nil, 0, fmt.Errorf("load PBS snapshot evidence: %w", err)
 	}
 	if snapshot.BackupType != "vm" || snapshot.BackupTime <= 0 || !pbsOwnerPattern.MatchString(snapshot.Owner) || snapshot.Comment == "" || snapshot.Size <= 0 {
-		return nil, fmt.Errorf("PBS snapshot identity is incomplete")
+		return nil, 0, fmt.Errorf("PBS snapshot identity is incomplete")
 	}
 	vmid, err := strconv.Atoi(snapshot.BackupID)
 	if err != nil || vmid < 100 {
-		return nil, fmt.Errorf("PBS snapshot backup-id is not a PVE VMID")
+		return nil, 0, fmt.Errorf("PBS snapshot backup-id is not a PVE VMID")
 	}
 	if !snapshot.Protected {
-		return nil, fmt.Errorf("PBS source snapshot must be protected from prune before attestation")
+		return nil, 0, fmt.Errorf("PBS source snapshot must be protected from prune before attestation")
 	}
 	if snapshot.Verification.State != "ok" || !validVerifyUPID(snapshot.Verification.UPID, snapshot.Owner) {
-		return nil, fmt.Errorf("PBS snapshot lacks a successful server-side verification")
+		return nil, 0, fmt.Errorf("PBS snapshot lacks a successful server-side verification")
 	}
+	return &snapshot, vmid, nil
+}
+
+func loadPBSImageIndexes(path string, snapshot *pbsSnapshotInput) (*pbsIndexInput, []PBSImageIndex, error) {
 	var index pbsIndexInput
-	if err := decodeStrictFile(request.IndexPath, &index); err != nil {
-		return nil, fmt.Errorf("load decoded PBS index: %w", err)
+	if err := decodeStrictFile(path, &index); err != nil {
+		return nil, nil, fmt.Errorf("load decoded PBS index: %w", err)
 	}
 	if index.BackupType != snapshot.BackupType || index.BackupID != snapshot.BackupID || index.BackupTime != snapshot.BackupTime || index.Unprotected.Notes != snapshot.Comment || index.Unprotected.VerifyState != snapshot.Verification {
-		return nil, fmt.Errorf("decoded PBS index does not match snapshot identity and verification")
+		return nil, nil, fmt.Errorf("decoded PBS index does not match snapshot identity and verification")
 	}
 	snapshotFiles := make(map[string]pbsSnapshotFile, len(snapshot.Files))
 	for _, file := range snapshot.Files {
 		if file.Filename == "" {
-			return nil, fmt.Errorf("PBS snapshot contains an unnamed file")
+			return nil, nil, fmt.Errorf("PBS snapshot contains an unnamed file")
 		}
 		if _, duplicate := snapshotFiles[file.Filename]; duplicate {
-			return nil, fmt.Errorf("PBS snapshot contains duplicate file %q", file.Filename)
+			return nil, nil, fmt.Errorf("PBS snapshot contains duplicate file %q", file.Filename)
 		}
 		snapshotFiles[file.Filename] = file
 	}
@@ -203,15 +256,15 @@ func CreatePBSSourceAttestation(request PBSAttestationRequest, now time.Time) (*
 	seenIndexFiles := map[string]struct{}{}
 	for _, file := range index.Files {
 		if file.Filename == "" || file.Size <= 0 || !validSHA256(file.Checksum) || file.CryptMode != "none" {
-			return nil, fmt.Errorf("decoded PBS index contains invalid or encrypted file %q", file.Filename)
+			return nil, nil, fmt.Errorf("decoded PBS index contains invalid or encrypted file %q", file.Filename)
 		}
 		if _, duplicate := seenIndexFiles[file.Filename]; duplicate {
-			return nil, fmt.Errorf("decoded PBS index contains duplicate file %q", file.Filename)
+			return nil, nil, fmt.Errorf("decoded PBS index contains duplicate file %q", file.Filename)
 		}
 		seenIndexFiles[file.Filename] = struct{}{}
 		snapshotFile, exists := snapshotFiles[file.Filename]
 		if !exists || snapshotFile.Size != file.Size || snapshotFile.CryptMode != file.CryptMode {
-			return nil, fmt.Errorf("PBS snapshot metadata does not match index file %q", file.Filename)
+			return nil, nil, fmt.Errorf("PBS snapshot metadata does not match index file %q", file.Filename)
 		}
 		if file.Filename == "qemu-server.conf.blob" {
 			qemuConfigFound = true
@@ -223,26 +276,41 @@ func CreatePBSSourceAttestation(request PBSAttestationRequest, now time.Time) (*
 		}
 	}
 	if !qemuConfigFound || !diskIndexFound {
-		return nil, fmt.Errorf("decoded PBS index lacks QEMU config or disk image indexes")
+		return nil, nil, fmt.Errorf("decoded PBS index lacks QEMU config or disk image indexes")
 	}
 	sort.Slice(imageIndexes, func(i, j int) bool { return imageIndexes[i].Filename < imageIndexes[j].Filename })
-	configBytes, err := os.ReadFile(request.QEMUConfigPath) // #nosec G304 -- operator-selected evidence path.
+	return &index, imageIndexes, nil
+}
+
+func loadPBSQEMUConfig(path string, imageIndexes []PBSImageIndex) ([]byte, map[string]string, error) {
+	configBytes, err := os.ReadFile(path) // #nosec G304 -- operator-selected evidence path.
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	config, err := parsePVEQEMUConfig(string(configBytes))
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if config["template"] != "1" || config["ciupgrade"] != "0" || config["name"] == "" || config["bios"] != "ovmf" || config["machine"] != "q35" || config["boot"] != "order=scsi0" || config["agent"] != "enabled=1" {
-		return nil, fmt.Errorf("restored QEMU config violates the Gentoo seed contract")
+		return nil, nil, fmt.Errorf("restored QEMU config violates the Gentoo seed contract")
 	}
 	for _, image := range imageIndexes {
 		drive := strings.TrimSuffix(strings.TrimPrefix(image.Filename, "drive-"), ".img.fidx")
 		if !strings.Contains(string(configBytes), "#qmdump#map:"+drive+":") {
-			return nil, fmt.Errorf("QEMU config lacks qmdump mapping for %q", image.Filename)
+			return nil, nil, fmt.Errorf("QEMU config lacks qmdump mapping for %q", image.Filename)
 		}
 	}
+	return configBytes, config, nil
+}
+
+type pbsRestoreEvidence struct {
+	firstBoot     *evidenceContent
+	runtime       *evidenceContent
+	secondBoot    *evidenceContent
+	cleanupDigest PBSEvidenceDigest
+}
+
+func loadPBSRestoreEvidence(request PBSAttestationRequest, vmid int, templateName string) (*pbsRestoreEvidence, error) {
 	firstBoot, err := readRequiredEvidence(request.FirstBootLogPath, []string{"CLOUD_INIT_GATE=PASS", "IMPLICIT_EMERGE_SYNC=ABSENT", `"status": "done"`, `"errors": []`})
 	if err != nil {
 		return nil, fmt.Errorf("first boot gate: %w", err)
@@ -262,35 +330,15 @@ func CreatePBSSourceAttestation(request PBSAttestationRequest, now time.Time) (*
 	if err := decodeStrictFile(request.CleanupPath, &cleanup); err != nil {
 		return nil, fmt.Errorf("load PVE cleanup evidence: %w", err)
 	}
-	if len(cleanup.TemporaryVMIDsRemaining) != 0 || len(cleanup.Source) != 1 || cleanup.Source[0].VMID != vmid || cleanup.Source[0].Name != config["name"] || cleanup.Source[0].Status != "stopped" || cleanup.Source[0].Template != 1 {
+	if len(cleanup.TemporaryVMIDsRemaining) != 0 || len(cleanup.Source) != 1 || cleanup.Source[0].VMID != vmid || cleanup.Source[0].Name != templateName || cleanup.Source[0].Status != "stopped" || cleanup.Source[0].Template != 1 {
 		return nil, fmt.Errorf("PVE cleanup evidence does not preserve only the stopped source template")
-	}
-	createdAt := now.UTC()
-	if createdAt.Before(time.Unix(snapshot.BackupTime, 0).UTC()) {
-		return nil, fmt.Errorf("attestation time precedes the PBS snapshot")
-	}
-	decodedIndex, err := digestEvidence(request.IndexPath)
-	if err != nil {
-		return nil, err
-	}
-	qemuConfig, err := digestEvidence(request.QEMUConfigPath)
-	if err != nil {
-		return nil, err
 	}
 	cleanupDigest, err := digestEvidence(request.CleanupPath)
 	if err != nil {
 		return nil, err
 	}
-	return &PBSSourceAttestation{
-		SchemaVersion: 1, CreatedAt: createdAt, PBSURL: request.PBSURL, CertificateFingerprint: request.CertificateFingerprint, Datastore: request.Datastore,
-		BackupType: snapshot.BackupType, BackupID: snapshot.BackupID, BackupTime: snapshot.BackupTime,
-		Snapshot: fmt.Sprintf("%s/%s/%s", snapshot.BackupType, snapshot.BackupID, time.Unix(snapshot.BackupTime, 0).UTC().Format("2006-01-02T15:04:05Z")),
-		Owner:    snapshot.Owner, Comment: snapshot.Comment, Protected: true, Verification: snapshot.Verification,
-		DecodedIndex: decodedIndex, QEMUConfig: qemuConfig, ImageIndexes: imageIndexes,
-		Template: PBSTemplateContract{VMID: vmid, Name: config["name"], Template: 1, CIUpgrade: 0, BIOS: config["bios"], Machine: config["machine"], Boot: config["boot"], Agent: config["agent"]},
-		RestoreGate: PBSRestoreGate{RestoreVMID: request.RestoreVMID, SmokeVMID: request.SmokeVMID, CloudInitRuns: 2, ImplicitEmergeSync: false, TemporaryVMsDestroyed: true,
-			OS: evidenceValue(runtimeLog.content, "OS="), Kernel: evidenceValue(runtimeLog.content, "KERNEL="), Profile: evidenceValue(runtimeLog.content, "PROFILE="), RootFS: evidenceValue(runtimeLog.content, "ROOT_FS="),
-			FirstBootEvidence: firstBoot.digest, RuntimeEvidence: runtimeLog.digest, SecondCloudInitEvidence: secondBoot.digest, CleanupEvidence: cleanupDigest},
+	return &pbsRestoreEvidence{
+		firstBoot: firstBoot, runtime: runtimeLog, secondBoot: secondBoot, cleanupDigest: cleanupDigest,
 	}, nil
 }
 
@@ -404,17 +452,39 @@ func (a *PBSSourceAttestation) Validate() error {
 	if a == nil {
 		return fmt.Errorf("invalid PBS source attestation identity")
 	}
+	if err := a.validateIdentity(); err != nil {
+		return err
+	}
+	vmid, err := a.validateTemplateContract()
+	if err != nil {
+		return err
+	}
+	if err := a.validateEvidenceContract(vmid); err != nil {
+		return err
+	}
+	return a.validateImageIndexes()
+}
+
+func (a *PBSSourceAttestation) validateIdentity() error {
 	parsedURL, urlErr := url.Parse(a.PBSURL)
 	if a.SchemaVersion != 1 || a.CreatedAt.IsZero() || urlErr != nil || parsedURL.Scheme != "https" || parsedURL.Host == "" || parsedURL.User != nil || parsedURL.RawQuery != "" || parsedURL.Fragment != "" || parsedURL.Path != "" || !pbsFingerprintPattern.MatchString(a.CertificateFingerprint) || !repoComponentPattern.MatchString(a.Datastore) || a.BackupType != "vm" || a.BackupTime <= 0 || a.Snapshot == "" || !pbsOwnerPattern.MatchString(a.Owner) || a.Comment == "" || !a.Protected || a.Verification.State != "ok" || !validVerifyUPID(a.Verification.UPID, a.Owner) {
 		return fmt.Errorf("invalid PBS source attestation identity")
 	}
+	return nil
+}
+
+func (a *PBSSourceAttestation) validateTemplateContract() (int, error) {
 	vmid, err := strconv.Atoi(a.BackupID)
 	if err != nil || vmid != a.Template.VMID || a.Template.Name == "" || a.Template.Template != 1 || a.Template.CIUpgrade != 0 || a.Template.BIOS != "ovmf" || a.Template.Machine != "q35" || a.Template.Boot != "order=scsi0" || a.Template.Agent != "enabled=1" {
-		return fmt.Errorf("invalid PBS source template contract")
+		return 0, fmt.Errorf("invalid PBS source template contract")
 	}
 	if a.Snapshot != fmt.Sprintf("vm/%s/%s", a.BackupID, time.Unix(a.BackupTime, 0).UTC().Format("2006-01-02T15:04:05Z")) || a.CreatedAt.Before(time.Unix(a.BackupTime, 0).UTC()) {
-		return fmt.Errorf("PBS snapshot identity is inconsistent")
+		return 0, fmt.Errorf("PBS snapshot identity is inconsistent")
 	}
+	return vmid, nil
+}
+
+func (a *PBSSourceAttestation) validateEvidenceContract(vmid int) error {
 	for _, evidence := range []PBSEvidenceDigest{a.DecodedIndex, a.QEMUConfig, a.RestoreGate.FirstBootEvidence, a.RestoreGate.RuntimeEvidence, a.RestoreGate.SecondCloudInitEvidence, a.RestoreGate.CleanupEvidence} {
 		if evidence.Size <= 0 || !prefixedSHA256Pattern.MatchString(evidence.SHA256) {
 			return fmt.Errorf("PBS attestation contains invalid evidence digest")
@@ -423,6 +493,10 @@ func (a *PBSSourceAttestation) Validate() error {
 	if len(a.ImageIndexes) == 0 || a.RestoreGate.RestoreVMID < 100 || a.RestoreGate.SmokeVMID < 100 || a.RestoreGate.RestoreVMID == a.RestoreGate.SmokeVMID || a.RestoreGate.RestoreVMID == vmid || a.RestoreGate.SmokeVMID == vmid || a.RestoreGate.CloudInitRuns != 2 || a.RestoreGate.ImplicitEmergeSync || !a.RestoreGate.TemporaryVMsDestroyed || a.RestoreGate.OS != "Gentoo Linux" || a.RestoreGate.Kernel == "" || a.RestoreGate.Profile == "" || a.RestoreGate.RootFS == "" {
 		return fmt.Errorf("PBS restore gate is incomplete")
 	}
+	return nil
+}
+
+func (a *PBSSourceAttestation) validateImageIndexes() error {
 	seen := map[string]struct{}{}
 	for _, image := range a.ImageIndexes {
 		if !strings.HasSuffix(image.Filename, ".img.fidx") || image.Size <= 0 || !prefixedSHA256Pattern.MatchString(image.Checksum) || image.CryptMode != "none" {

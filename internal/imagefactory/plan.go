@@ -227,6 +227,20 @@ func LoadBuildPlan(path string) (*BuildPlan, error) {
 }
 
 func (p *BuildPlan) Validate() error {
+	for _, validate := range []func() error{
+		p.validateIdentityAndTarget,
+		p.validateSourceAndResources,
+		p.validateRepositories,
+		p.validatePackageSelection,
+	} {
+		if err := validate(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (p *BuildPlan) validateIdentityAndTarget() error {
 	if p.SchemaVersion != 1 || !objectIDPattern.MatchString(p.Target) || !objectIDPattern.MatchString(p.PlanObjectID) || !objectIDPattern.MatchString(p.ImageID) || !objectIDPattern.MatchString(p.Generation) || !objectIDPattern.MatchString(p.ProfileID) || !validProfilePath(p.ProfilePath) || !objectIDPattern.MatchString(p.MirrorBundleID) || !objectIDPattern.MatchString(p.SourceProvenanceObjectID) {
 		return fmt.Errorf("build plan has invalid IDs")
 	}
@@ -246,6 +260,10 @@ func (p *BuildPlan) Validate() error {
 	if p.DisplayModel != expectedDisplay {
 		return fmt.Errorf("display_model must be %q for target %q", expectedDisplay, p.Target)
 	}
+	return nil
+}
+
+func (p *BuildPlan) validateSourceAndResources() error {
 	if p.Target == "base-systemd" && p.RootfsSource != "approved-qcow2" && p.RootfsSource != "approved-qcow2-seed" && p.RootfsSource != "approved-pbs-snapshot" && p.RootfsSource != "catalyst-stage4-qcow2" && p.RootfsSource != "packer-base-image" {
 		return fmt.Errorf("base-systemd rootfs_source is not approved")
 	}
@@ -258,6 +276,10 @@ func (p *BuildPlan) Validate() error {
 	if p.Cores < 1 || p.Cores > 64 || p.Memory < 1024 || p.Memory > 524288 {
 		return fmt.Errorf("build plan resources are outside approved bounds")
 	}
+	return nil
+}
+
+func (p *BuildPlan) validateRepositories() error {
 	if (len(p.Repositories) != 1 && len(p.Repositories) != 2) || len(p.RepositoryObjectIDs) != len(p.Repositories) || len(p.RepositoryURIs) != len(p.Repositories) || !fullRevisionPattern.MatchString(p.Repositories["gentoo"]) {
 		return fmt.Errorf("build plan requires one or two fully pinned repositories")
 	}
@@ -321,6 +343,10 @@ func (p *BuildPlan) Validate() error {
 			return fmt.Errorf("repository %q lacks a full revision, locked object, or URI", name)
 		}
 	}
+	return nil
+}
+
+func (p *BuildPlan) validatePackageSelection() error {
 	if len(p.PackageSets) == 0 || len(p.PackageSets) > 32 || len(p.Packages) > 128 {
 		return fmt.Errorf("build plan package-set selection is empty or too large")
 	}
@@ -359,25 +385,9 @@ func PreparePlan(commonPath, planPath, lockPath, offlineRoot, packerManifestPath
 	if lock.BundleID != plan.MirrorBundleID {
 		return nil, nil, fmt.Errorf("input lock bundle %q does not match plan %q", lock.BundleID, plan.MirrorBundleID)
 	}
-	hosts := []string{}
-	endpoints := []struct{ name, raw string }{
-		{"proxmox_url", common.ProxmoxURL},
-		{"gentoo_mirror", plan.GentooMirror},
-		{"binhost", plan.Binhost},
-	}
-	for name, raw := range plan.RepositoryURIs {
-		endpoints = append(endpoints, struct{ name, raw string }{"repository_uri[" + name + "]", raw})
-	}
-	for _, endpoint := range endpoints {
-		name, raw := endpoint.name, endpoint.raw
-		if raw == "" {
-			continue
-		}
-		host, err := validateEndpoint(raw, lock.AllowedHosts)
-		if err != nil {
-			return nil, nil, fmt.Errorf("%s: %w", name, err)
-		}
-		hosts = append(hosts, host)
+	hosts, err := validatePlanEndpoints(common, plan, lock)
+	if err != nil {
+		return nil, nil, err
 	}
 	if info, err := os.Stat(common.SSHPrivateKeyFile); err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 {
 		return nil, nil, fmt.Errorf("ssh_private_key_file must be a regular owner-only file")
@@ -386,21 +396,9 @@ func PreparePlan(commonPath, planPath, lockPath, offlineRoot, packerManifestPath
 	if err != nil {
 		return nil, nil, err
 	}
-	repositoryNames := make([]string, 0, len(plan.Repositories))
-	for name := range plan.Repositories {
-		repositoryNames = append(repositoryNames, name)
-	}
-	sort.Strings(repositoryNames)
-	repositoryObjects := make(map[string]*InputObject, len(repositoryNames))
-	for _, name := range repositoryNames {
-		object, err := requiredObject(lock, plan.RepositoryObjectIDs[name], plan.Target)
-		if err != nil {
-			return nil, nil, err
-		}
-		if object.Kind != "repository-snapshot" {
-			return nil, nil, fmt.Errorf("repository object %q must have kind repository-snapshot", object.ID)
-		}
-		repositoryObjects[name] = object
+	repositoryNames, repositoryObjects, err := collectPlanRepositoryObjects(plan, lock)
+	if err != nil {
+		return nil, nil, err
 	}
 	manifestObject, err := uniqueObjectByKind(lock, "distfile-manifest", plan.Target)
 	if err != nil {
@@ -505,25 +503,8 @@ func PreparePlan(commonPath, planPath, lockPath, offlineRoot, packerManifestPath
 	if err != nil {
 		return nil, nil, fmt.Errorf("resolve package sets: %w", err)
 	}
-	var closure ClosureManifest
-	if err := decodeStrictFile(distfileManifestPath, &closure); err != nil {
-		return nil, nil, fmt.Errorf("load distfile closure: %w", err)
-	}
-	if closure.SchemaVersion != 1 || closure.Target != plan.Target || closure.RepositoryCommit != plan.Repositories["gentoo"] || len(closure.Objects) == 0 {
-		return nil, nil, fmt.Errorf("distfile closure does not match target and repository commit")
-	}
-	filenames := make(map[string]struct{}, len(closure.Objects))
-	for _, object := range closure.Objects {
-		if filepath.Base(object.Filename) != object.Filename || object.Size < 0 || !fullRevisionPattern.MatchString(object.SHA256) || len(object.SHA256) != 64 {
-			return nil, nil, fmt.Errorf("distfile closure contains invalid object %q", object.Filename)
-		}
-		if _, exists := filenames[object.Filename]; exists {
-			return nil, nil, fmt.Errorf("distfile closure contains duplicate filename %q", object.Filename)
-		}
-		filenames[object.Filename] = struct{}{}
-		if _, err := validateEndpoint(object.URI, lock.AllowedHosts); err != nil {
-			return nil, nil, fmt.Errorf("distfile %q: %w", object.Filename, err)
-		}
+	if err := validateDistfileClosure(distfileManifestPath, plan, lock); err != nil {
+		return nil, nil, err
 	}
 	planPath, err = filepath.Abs(planPath)
 	if err != nil {
@@ -548,24 +529,8 @@ func PreparePlan(commonPath, planPath, lockPath, offlineRoot, packerManifestPath
 	if sourceObject.Kind != expectedSourceKind {
 		return nil, nil, fmt.Errorf("source provenance object %q must have kind %s", plan.SourceProvenanceObjectID, expectedSourceKind)
 	}
-	if sourceObject.Kind == "image-manifest" {
-		if err := validateSourceImageManifest(filepath.Join(offlineRoot, sourceObject.Path), plan); err != nil {
-			return nil, nil, err
-		}
-	}
-	if sourceObject.Kind == "pbs-source-attestation" {
-		attestation, err := LoadPBSSourceAttestation(filepath.Join(offlineRoot, sourceObject.Path))
-		if err != nil {
-			return nil, nil, fmt.Errorf("load PBS source attestation: %w", err)
-		}
-		if err := attestation.ValidateForPlan(plan); err != nil {
-			return nil, nil, err
-		}
-	}
-	if sourceObject.Kind == "qcow2-manifest" {
-		if err := validateCatalystSourceManifest(filepath.Join(offlineRoot, sourceObject.Path), plan); err != nil {
-			return nil, nil, err
-		}
+	if err := validatePlanSourceObject(offlineRoot, sourceObject, plan); err != nil {
+		return nil, nil, err
 	}
 	if planDigest != planObject.SHA256 {
 		return nil, nil, fmt.Errorf("BuildPlan digest does not match locked object %q", plan.PlanObjectID)
@@ -608,6 +573,92 @@ func PreparePlan(commonPath, planPath, lockPath, offlineRoot, packerManifestPath
 		PackageSetCatalogID: packageSetObject.ID, PackageSetCatalogDigest: "sha256:" + packageSetObject.SHA256,
 		PackageSets: append([]string(nil), plan.PackageSets...)}
 	return vars, evidence, nil
+}
+
+func validatePlanEndpoints(common *CommonConfig, plan *BuildPlan, lock *InputLock) ([]string, error) {
+	endpoints := make([]struct{ name, raw string }, 0, 3+len(plan.RepositoryURIs))
+	endpoints = append(endpoints,
+		struct{ name, raw string }{"proxmox_url", common.ProxmoxURL},
+		struct{ name, raw string }{"gentoo_mirror", plan.GentooMirror},
+		struct{ name, raw string }{"binhost", plan.Binhost},
+	)
+	for name, raw := range plan.RepositoryURIs {
+		endpoints = append(endpoints, struct{ name, raw string }{"repository_uri[" + name + "]", raw})
+	}
+	hosts := make([]string, 0, len(endpoints))
+	for _, endpoint := range endpoints {
+		if endpoint.raw == "" {
+			continue
+		}
+		host, err := validateEndpoint(endpoint.raw, lock.AllowedHosts)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", endpoint.name, err)
+		}
+		hosts = append(hosts, host)
+	}
+	return hosts, nil
+}
+
+func collectPlanRepositoryObjects(plan *BuildPlan, lock *InputLock) ([]string, map[string]*InputObject, error) {
+	names := make([]string, 0, len(plan.Repositories))
+	for name := range plan.Repositories {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	objects := make(map[string]*InputObject, len(names))
+	for _, name := range names {
+		object, err := requiredObject(lock, plan.RepositoryObjectIDs[name], plan.Target)
+		if err != nil {
+			return nil, nil, err
+		}
+		if object.Kind != "repository-snapshot" {
+			return nil, nil, fmt.Errorf("repository object %q must have kind repository-snapshot", object.ID)
+		}
+		objects[name] = object
+	}
+	return names, objects, nil
+}
+
+func validateDistfileClosure(path string, plan *BuildPlan, lock *InputLock) error {
+	var closure ClosureManifest
+	if err := decodeStrictFile(path, &closure); err != nil {
+		return fmt.Errorf("load distfile closure: %w", err)
+	}
+	if closure.SchemaVersion != 1 || closure.Target != plan.Target || closure.RepositoryCommit != plan.Repositories["gentoo"] || len(closure.Objects) == 0 {
+		return fmt.Errorf("distfile closure does not match target and repository commit")
+	}
+	filenames := make(map[string]struct{}, len(closure.Objects))
+	for _, object := range closure.Objects {
+		if filepath.Base(object.Filename) != object.Filename || object.Size < 0 || !fullRevisionPattern.MatchString(object.SHA256) || len(object.SHA256) != 64 {
+			return fmt.Errorf("distfile closure contains invalid object %q", object.Filename)
+		}
+		if _, exists := filenames[object.Filename]; exists {
+			return fmt.Errorf("distfile closure contains duplicate filename %q", object.Filename)
+		}
+		filenames[object.Filename] = struct{}{}
+		if _, err := validateEndpoint(object.URI, lock.AllowedHosts); err != nil {
+			return fmt.Errorf("distfile %q: %w", object.Filename, err)
+		}
+	}
+	return nil
+}
+
+func validatePlanSourceObject(offlineRoot string, sourceObject *InputObject, plan *BuildPlan) error {
+	path := filepath.Join(offlineRoot, sourceObject.Path)
+	switch sourceObject.Kind {
+	case "image-manifest":
+		return validateSourceImageManifest(path, plan)
+	case "pbs-source-attestation":
+		attestation, err := LoadPBSSourceAttestation(path)
+		if err != nil {
+			return fmt.Errorf("load PBS source attestation: %w", err)
+		}
+		return attestation.ValidateForPlan(plan)
+	case "qcow2-manifest":
+		return validateCatalystSourceManifest(path, plan)
+	default:
+		return nil
+	}
 }
 
 func validateSourceImageManifest(path string, plan *BuildPlan) error {

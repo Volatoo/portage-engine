@@ -4,6 +4,7 @@ package config
 import (
 	"bufio"
 	"fmt"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -209,6 +210,12 @@ type DashboardConfig struct {
 // Validate checks the dashboard configuration for common misconfigurations.
 // Returns an error if a critical security issue is found.
 func (c *DashboardConfig) Validate() error {
+	serverURL, err := url.Parse(c.ServerURL)
+	if err != nil || (serverURL.Scheme != "http" && serverURL.Scheme != "https") ||
+		serverURL.Host == "" || serverURL.User != nil || serverURL.RawQuery != "" ||
+		serverURL.Fragment != "" || (serverURL.Path != "" && serverURL.Path != "/") {
+		return fmt.Errorf("SERVER_URL must be an HTTP or HTTPS origin without credentials, path, query, or fragment")
+	}
 	if c.AuthEnabled {
 		for _, insecure := range insecureJWTSecrets {
 			if c.JWTSecret == insecure {

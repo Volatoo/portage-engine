@@ -206,6 +206,20 @@ func LoadCatalystPlan(path string) (*CatalystPlan, error) {
 }
 
 func (p *CatalystPlan) Validate() error {
+	for _, validate := range []func() error{
+		p.validateIdentity,
+		p.validateProfileContract,
+		p.validateOutputContract,
+		p.validatePackageSelection,
+	} {
+		if err := validate(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (p *CatalystPlan) validateIdentity() error {
 	ids := []string{p.Target, p.PlanObjectID, p.RootfsID, p.Generation, p.ProfileID, p.MirrorBundleID, p.RepositoryObjectID, p.GentooRepositoryKeyObjectID,
 		p.Stage3ObjectID, p.Stage3DigestsObjectID, p.ReleaseKeyObjectID, p.CatalystRuntimeObjectID,
 		p.DistfileManifestObjectID, p.PackageSetCatalogObjectID}
@@ -226,6 +240,10 @@ func (p *CatalystPlan) Validate() error {
 	if !fullRevisionPattern.MatchString(p.Repositories["gentoo"]) {
 		return fmt.Errorf("catalyst plan requires a full Gentoo commit")
 	}
+	return nil
+}
+
+func (p *CatalystPlan) validateProfileContract() error {
 	switch p.Target {
 	case catalystTarget:
 		if p.ProfileRepository != "gentoo" || p.ProfilePath != catalystOfficialProfile || len(p.Repositories) != 1 || len(p.ProfileParents) != 0 || p.ProfileRepositoryObjectID != "" || p.ProfileRepositoryKeyObjectID != "" || p.RuntimeProfileRepositoryURI != "" {
@@ -256,6 +274,10 @@ func (p *CatalystPlan) Validate() error {
 			seenParents[line] = struct{}{}
 		}
 	}
+	return nil
+}
+
+func (p *CatalystPlan) validateOutputContract() error {
 	for _, value := range []string{p.VersionStamp, p.SnapshotID, p.SeedFilename, p.OutputFilename, p.QCOW2Filename} {
 		if !catalystNamePattern.MatchString(value) {
 			return fmt.Errorf("catalyst plan has invalid filename or stamp %q", value)
@@ -273,6 +295,10 @@ func (p *CatalystPlan) Validate() error {
 	if p.DiskSizeGiB < 8 || p.DiskSizeGiB > 512 || p.Jobs < 1 || p.Jobs > 64 || len(p.PackageSets) == 0 || len(p.PackageSets) > 32 || len(p.Packages) > 128 {
 		return fmt.Errorf("catalyst resources or package selection are outside approved bounds")
 	}
+	return nil
+}
+
+func (p *CatalystPlan) validatePackageSelection() error {
 	seen := map[string]struct{}{}
 	for _, id := range p.PackageSets {
 		if !objectIDPattern.MatchString(id) {
@@ -637,162 +663,12 @@ func GenerateCatalystRootfsManifest(planPath, lockPath, preparedPath, gatePath, 
 		!slices.Equal(prepared.ProfileParents, plan.ProfileParents) || !slices.Equal(prepared.PackageSets, plan.PackageSets) || !gate.Stage3SignatureVerified || !gate.RepositoryCommitVerified || !gate.ProfileCommitVerified || !gate.ProfileParentsVerified || !gate.NetworkNamespaceDenied || !gate.FreshWorkDirectory {
 		return nil, fmt.Errorf("catalyst execution evidence is incomplete or inconsistent")
 	}
-	generated := filepath.Join(prepared.WorkRoot, "generated")
-	expectedPreparedPaths := map[string]string{
-		prepared.RuntimeRoot:        filepath.Join(prepared.WorkRoot, "runtime"),
-		prepared.CatalystBinaryPath: filepath.Join(prepared.WorkRoot, "runtime", "bin", "catalyst"),
-		prepared.CatalystSharedir:   filepath.Join(prepared.WorkRoot, "runtime", "share", "catalyst"),
-		prepared.ConfigPath:         filepath.Join(generated, "catalyst.conf"),
-		prepared.SpecPath:           filepath.Join(generated, "stage4.spec"),
-		prepared.EnvscriptPath:      filepath.Join(generated, "offline.env"),
-		prepared.FSScriptPath:       filepath.Join(generated, "stage4-fsscript.sh"),
-		prepared.RootOverlayPath:    filepath.Join(generated, "root-overlay"),
-		prepared.PortageConfigPath:  filepath.Join(generated, "portage"),
-		prepared.StoreDir:           filepath.Join(prepared.WorkRoot, "storedir"),
-		prepared.ReposStoreDir:      filepath.Join(prepared.WorkRoot, "repos"),
-		prepared.DistDir:            filepath.Join(prepared.WorkRoot, "distfiles"),
-		prepared.SeedDestination:    filepath.Join(prepared.WorkRoot, "storedir", "builds", plan.RelType, plan.SeedFilename),
-		prepared.ExpectedRootfsPath: filepath.Join(prepared.WorkRoot, "storedir", "builds", plan.RelType, plan.OutputFilename),
-	}
-	if plan.Target == catalystProfileTarget {
-		expectedPreparedPaths[prepared.ProfileRepositorySourcePath] = filepath.Join(prepared.WorkRoot, "profile-repository")
-		if prepared.ProfileRepositoryCommit != plan.Repositories[plan.ProfileRepository] {
-			return nil, fmt.Errorf("catalyst external profile commit does not match the plan")
-		}
-	} else if prepared.ProfileRepositoryCommit != "" || prepared.ProfileRepositoryBundlePath != "" || prepared.ProfileRepositoryKeyPath != "" || prepared.ProfileRepositorySourcePath != "" {
-		return nil, fmt.Errorf("official Catalyst target contains unexpected external profile evidence")
-	}
-	if !generatedPathPattern.MatchString(prepared.WorkRoot) {
-		return nil, fmt.Errorf("catalyst prepared work root is unsafe")
-	}
-	for actual, expected := range expectedPreparedPaths {
-		if actual != expected {
-			return nil, fmt.Errorf("catalyst prepared path %q does not match work root", actual)
-		}
-	}
-	if report, err := Preflight(prepared.OfflineRoot, lock, plan.Target); err != nil || len(report.Missing) != 0 {
-		return nil, fmt.Errorf("catalyst locked inputs no longer pass preflight")
-	}
-	seenInputs := make(map[string]struct{}, len(prepared.Inputs))
-	for _, input := range prepared.Inputs {
-		if _, duplicate := seenInputs[input.ID]; duplicate {
-			return nil, fmt.Errorf("catalyst execution evidence contains duplicate input %q", input.ID)
-		}
-		seenInputs[input.ID] = struct{}{}
-		object, err := requiredObject(lock, input.ID, plan.Target)
-		if err != nil || object.Kind != input.Kind || object.Path != input.Path || object.Size != input.Size || "sha256:"+object.SHA256 != input.Digest {
-			return nil, fmt.Errorf("catalyst input evidence %q does not match the lock", input.ID)
-		}
-	}
-	expectedInputCount := 9
-	if plan.Target == catalystProfileTarget {
-		expectedInputCount = 11
-	}
-	if len(seenInputs) != expectedInputCount {
-		return nil, fmt.Errorf("catalyst input evidence is incomplete")
-	}
-	lockedPath := func(id string) (string, error) {
-		object, err := requiredObject(lock, id, plan.Target)
-		if err != nil {
-			return "", err
-		}
-		return filepath.Join(prepared.OfflineRoot, object.Path), nil
-	}
-	type lockedPathBinding struct{ id, actual string }
-	bindings := []lockedPathBinding{}
-	for id, actual := range map[string]string{plan.CatalystRuntimeObjectID: prepared.RuntimeArchivePath, plan.RepositoryObjectID: prepared.RepositoryBundlePath, plan.GentooRepositoryKeyObjectID: prepared.GentooRepositoryKeyPath,
-		plan.Stage3ObjectID: prepared.Stage3Path, plan.Stage3DigestsObjectID: prepared.Stage3DigestsPath, plan.ReleaseKeyObjectID: prepared.ReleaseKeyPath,
-		plan.DistfileManifestObjectID: prepared.DistfileManifestPath, plan.PackageSetCatalogObjectID: prepared.PackageSetCatalogPath} {
-		bindings = append(bindings, lockedPathBinding{id: id, actual: actual})
-	}
-	if plan.Target == catalystProfileTarget {
-		bindings = append(bindings,
-			lockedPathBinding{id: plan.ProfileRepositoryObjectID, actual: prepared.ProfileRepositoryBundlePath},
-			lockedPathBinding{id: plan.ProfileRepositoryKeyObjectID, actual: prepared.ProfileRepositoryKeyPath})
-	}
-	for _, binding := range bindings {
-		expected, err := lockedPath(binding.id)
-		if err != nil {
-			return nil, err
-		}
-		if binding.actual != expected {
-			return nil, fmt.Errorf("catalyst prepared input path %q does not match the lock", binding.actual)
-		}
-	}
-	catalog, err := LoadPackageSetCatalog(prepared.PackageSetCatalogPath)
+	effectivePackages, err := validateCatalystPreparedInputs(plan, lock, &prepared)
 	if err != nil {
-		return nil, fmt.Errorf("reload package-set catalog: %w", err)
-	}
-	effectivePackages, err := catalog.Resolve(plan.PackageSets, plan.Packages)
-	if err != nil || !slices.Equal(effectivePackages, prepared.Packages) {
-		return nil, fmt.Errorf("catalyst package expansion no longer matches the plan")
-	}
-	expectedPaths := map[string]string{
-		prepared.ConfigPath: prepared.GeneratedConfigDigest, prepared.SpecPath: prepared.GeneratedSpecDigest,
-		prepared.EnvscriptPath: prepared.GeneratedEnvDigest, prepared.FSScriptPath: prepared.GeneratedFSScriptDigest,
-	}
-	expectedContents := catalystGeneratedFileContents(plan, effectivePackages, prepared.RuntimeRoot, prepared.StoreDir, prepared.ReposStoreDir, prepared.DistDir,
-		filepath.Join(prepared.WorkRoot, "gentoo-repository.asc"), prepared.EnvscriptPath, prepared.FSScriptPath, prepared.ConfigPath, prepared.SpecPath,
-		prepared.RootOverlayPath, prepared.PortageConfigPath, prepared.ProfileRepositorySourcePath)
-	expectedDirModes := map[string]os.FileMode{
-		generated:                0o700,
-		prepared.RootOverlayPath: 0o755,
-		filepath.Join(prepared.RootOverlayPath, "etc"):                           0o755,
-		filepath.Join(prepared.RootOverlayPath, "etc", "portage"):                0o755,
-		filepath.Join(prepared.RootOverlayPath, "etc", "portage", "sets"):        0o755,
-		filepath.Join(prepared.RootOverlayPath, "etc", "portage", "repos.conf"):  0o755,
-		filepath.Join(prepared.RootOverlayPath, "etc", "portage", "package.use"): 0o755,
-		filepath.Join(prepared.RootOverlayPath, "etc", "cloud"):                  0o755,
-		filepath.Join(prepared.RootOverlayPath, "etc", "cloud", "cloud.cfg.d"):   0o755,
-		prepared.PortageConfigPath:                                               0o755,
-		filepath.Join(prepared.PortageConfigPath, "package.use"):                 0o755,
-	}
-	expectedFileModes := make(map[string]os.FileMode, len(expectedContents))
-	for path := range expectedContents {
-		expectedFileModes[path] = 0o600
-		if strings.HasPrefix(path, prepared.RootOverlayPath+string(filepath.Separator)) || strings.HasPrefix(path, prepared.PortageConfigPath+string(filepath.Separator)) {
-			expectedFileModes[path] = 0o644
-		}
-	}
-	expectedFileModes[prepared.FSScriptPath] = 0o700
-	if err := filepath.WalkDir(generated, func(path string, entry os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		info, err := entry.Info()
-		if err != nil {
-			return err
-		}
-		if entry.IsDir() {
-			expectedMode, expected := expectedDirModes[path]
-			if !expected || info.Mode().Perm() != expectedMode {
-				return fmt.Errorf("generated Catalyst directory %q has unexpected path or mode", path)
-			}
-			return nil
-		}
-		expectedMode, expected := expectedFileModes[path]
-		if _, hasContent := expectedContents[path]; !expected || !hasContent || !info.Mode().IsRegular() || info.Mode().Perm() != expectedMode {
-			return fmt.Errorf("generated Catalyst file %q has unexpected path, type, or mode", path)
-		}
-		return nil
-	}); err != nil {
 		return nil, err
 	}
-	for path, expectedContent := range expectedContents {
-		actual, err := os.ReadFile(path) // #nosec G304 -- paths were generated inside the fresh Catalyst work root.
-		if err != nil || string(actual) != expectedContent {
-			return nil, fmt.Errorf("generated Catalyst file %q no longer matches the locked plan", path)
-		}
-	}
-	for path, expected := range expectedPaths {
-		digest, err := digestFile(path)
-		if err != nil || "sha256:"+digest != expected {
-			return nil, fmt.Errorf("generated Catalyst file %q no longer matches prepared evidence", path)
-		}
-	}
-	overlayDigest, err := digestRegularDirectory(prepared.RootOverlayPath)
-	if err != nil || "sha256:"+overlayDigest != prepared.GeneratedOverlayDigest {
-		return nil, fmt.Errorf("generated Catalyst root overlay no longer matches prepared evidence")
+	if err := validateCatalystGeneratedFiles(plan, &prepared, effectivePackages); err != nil {
+		return nil, err
 	}
 	rootfsPath, err = filepath.Abs(rootfsPath)
 	if err != nil || rootfsPath != prepared.ExpectedRootfsPath || filepath.Base(rootfsPath) != plan.OutputFilename {
@@ -816,16 +692,201 @@ func GenerateCatalystRootfsManifest(planPath, lockPath, preparedPath, gatePath, 
 		QCOW2Filename: plan.QCOW2Filename, DiskSizeGiB: plan.DiskSizeGiB, Gate: gate}, nil
 }
 
+func validateCatalystPreparedInputs(plan *CatalystPlan, lock *InputLock, prepared *CatalystPrepared) ([]string, error) {
+	generated := filepath.Join(prepared.WorkRoot, "generated")
+	expectedPaths := map[string]string{
+		prepared.RuntimeRoot:        filepath.Join(prepared.WorkRoot, "runtime"),
+		prepared.CatalystBinaryPath: filepath.Join(prepared.WorkRoot, "runtime", "bin", "catalyst"),
+		prepared.CatalystSharedir:   filepath.Join(prepared.WorkRoot, "runtime", "share", "catalyst"),
+		prepared.ConfigPath:         filepath.Join(generated, "catalyst.conf"),
+		prepared.SpecPath:           filepath.Join(generated, "stage4.spec"),
+		prepared.EnvscriptPath:      filepath.Join(generated, "offline.env"),
+		prepared.FSScriptPath:       filepath.Join(generated, "stage4-fsscript.sh"),
+		prepared.RootOverlayPath:    filepath.Join(generated, "root-overlay"),
+		prepared.PortageConfigPath:  filepath.Join(generated, "portage"),
+		prepared.StoreDir:           filepath.Join(prepared.WorkRoot, "storedir"),
+		prepared.ReposStoreDir:      filepath.Join(prepared.WorkRoot, "repos"),
+		prepared.DistDir:            filepath.Join(prepared.WorkRoot, "distfiles"),
+		prepared.SeedDestination:    filepath.Join(prepared.WorkRoot, "storedir", "builds", plan.RelType, plan.SeedFilename),
+		prepared.ExpectedRootfsPath: filepath.Join(prepared.WorkRoot, "storedir", "builds", plan.RelType, plan.OutputFilename),
+	}
+	if plan.Target == catalystProfileTarget {
+		expectedPaths[prepared.ProfileRepositorySourcePath] = filepath.Join(prepared.WorkRoot, "profile-repository")
+		if prepared.ProfileRepositoryCommit != plan.Repositories[plan.ProfileRepository] {
+			return nil, fmt.Errorf("catalyst external profile commit does not match the plan")
+		}
+	} else if prepared.ProfileRepositoryCommit != "" || prepared.ProfileRepositoryBundlePath != "" ||
+		prepared.ProfileRepositoryKeyPath != "" || prepared.ProfileRepositorySourcePath != "" {
+		return nil, fmt.Errorf("official Catalyst target contains unexpected external profile evidence")
+	}
+	if !generatedPathPattern.MatchString(prepared.WorkRoot) {
+		return nil, fmt.Errorf("catalyst prepared work root is unsafe")
+	}
+	for actual, expected := range expectedPaths {
+		if actual != expected {
+			return nil, fmt.Errorf("catalyst prepared path %q does not match work root", actual)
+		}
+	}
+	if err := validateCatalystInputEvidence(plan, lock, prepared); err != nil {
+		return nil, err
+	}
+	catalog, err := LoadPackageSetCatalog(prepared.PackageSetCatalogPath)
+	if err != nil {
+		return nil, fmt.Errorf("reload package-set catalog: %w", err)
+	}
+	effectivePackages, err := catalog.Resolve(plan.PackageSets, plan.Packages)
+	if err != nil || !slices.Equal(effectivePackages, prepared.Packages) {
+		return nil, fmt.Errorf("catalyst package expansion no longer matches the plan")
+	}
+	return effectivePackages, nil
+}
+
+func validateCatalystInputEvidence(plan *CatalystPlan, lock *InputLock, prepared *CatalystPrepared) error {
+	if report, err := Preflight(prepared.OfflineRoot, lock, plan.Target); err != nil || len(report.Missing) != 0 {
+		return fmt.Errorf("catalyst locked inputs no longer pass preflight")
+	}
+	seenInputs := make(map[string]struct{}, len(prepared.Inputs))
+	for _, input := range prepared.Inputs {
+		if _, duplicate := seenInputs[input.ID]; duplicate {
+			return fmt.Errorf("catalyst execution evidence contains duplicate input %q", input.ID)
+		}
+		seenInputs[input.ID] = struct{}{}
+		object, err := requiredObject(lock, input.ID, plan.Target)
+		if err != nil || object.Kind != input.Kind || object.Path != input.Path || object.Size != input.Size ||
+			"sha256:"+object.SHA256 != input.Digest {
+			return fmt.Errorf("catalyst input evidence %q does not match the lock", input.ID)
+		}
+	}
+	expectedInputCount := 9
+	if plan.Target == catalystProfileTarget {
+		expectedInputCount = 11
+	}
+	if len(seenInputs) != expectedInputCount {
+		return fmt.Errorf("catalyst input evidence is incomplete")
+	}
+	bindings := map[string]string{
+		plan.CatalystRuntimeObjectID:     prepared.RuntimeArchivePath,
+		plan.RepositoryObjectID:          prepared.RepositoryBundlePath,
+		plan.GentooRepositoryKeyObjectID: prepared.GentooRepositoryKeyPath,
+		plan.Stage3ObjectID:              prepared.Stage3Path,
+		plan.Stage3DigestsObjectID:       prepared.Stage3DigestsPath,
+		plan.ReleaseKeyObjectID:          prepared.ReleaseKeyPath,
+		plan.DistfileManifestObjectID:    prepared.DistfileManifestPath,
+		plan.PackageSetCatalogObjectID:   prepared.PackageSetCatalogPath,
+	}
+	if plan.Target == catalystProfileTarget {
+		bindings[plan.ProfileRepositoryObjectID] = prepared.ProfileRepositoryBundlePath
+		bindings[plan.ProfileRepositoryKeyObjectID] = prepared.ProfileRepositoryKeyPath
+	}
+	for id, actual := range bindings {
+		object, err := requiredObject(lock, id, plan.Target)
+		if err != nil {
+			return err
+		}
+		if actual != filepath.Join(prepared.OfflineRoot, object.Path) {
+			return fmt.Errorf("catalyst prepared input path %q does not match the lock", actual)
+		}
+	}
+	return nil
+}
+
+func validateCatalystGeneratedFiles(plan *CatalystPlan, prepared *CatalystPrepared, effectivePackages []string) error {
+	generated := filepath.Join(prepared.WorkRoot, "generated")
+	expectedDigests := map[string]string{
+		prepared.ConfigPath: prepared.GeneratedConfigDigest, prepared.SpecPath: prepared.GeneratedSpecDigest,
+		prepared.EnvscriptPath: prepared.GeneratedEnvDigest, prepared.FSScriptPath: prepared.GeneratedFSScriptDigest,
+	}
+	expectedContents := catalystGeneratedFileContents(plan, effectivePackages, prepared.RuntimeRoot, prepared.StoreDir, prepared.ReposStoreDir, prepared.DistDir,
+		filepath.Join(prepared.WorkRoot, "gentoo-repository.asc"), prepared.EnvscriptPath, prepared.FSScriptPath, prepared.ConfigPath, prepared.SpecPath,
+		prepared.RootOverlayPath, prepared.PortageConfigPath, prepared.ProfileRepositorySourcePath)
+	expectedDirModes := map[string]os.FileMode{
+		generated:                0o700,
+		prepared.RootOverlayPath: 0o755,
+		filepath.Join(prepared.RootOverlayPath, "etc"):                           0o755,
+		filepath.Join(prepared.RootOverlayPath, "etc", "portage"):                0o755,
+		filepath.Join(prepared.RootOverlayPath, "etc", "portage", "sets"):        0o755,
+		filepath.Join(prepared.RootOverlayPath, "etc", "portage", "repos.conf"):  0o755,
+		filepath.Join(prepared.RootOverlayPath, "etc", "portage", "package.use"): 0o755,
+		filepath.Join(prepared.RootOverlayPath, "etc", "cloud"):                  0o755,
+		filepath.Join(prepared.RootOverlayPath, "etc", "cloud", "cloud.cfg.d"):   0o755,
+		prepared.PortageConfigPath:                                               0o755,
+		filepath.Join(prepared.PortageConfigPath, "package.use"):                 0o755,
+	}
+	expectedFileModes := make(map[string]os.FileMode, len(expectedContents))
+	for path := range expectedContents {
+		expectedFileModes[path] = 0o600
+		if strings.HasPrefix(path, prepared.RootOverlayPath+string(filepath.Separator)) ||
+			strings.HasPrefix(path, prepared.PortageConfigPath+string(filepath.Separator)) {
+			expectedFileModes[path] = 0o644
+		}
+	}
+	expectedFileModes[prepared.FSScriptPath] = 0o700
+	if err := validateCatalystGeneratedTree(generated, expectedContents, expectedDirModes, expectedFileModes); err != nil {
+		return err
+	}
+	for path, expected := range expectedDigests {
+		digest, err := digestFile(path)
+		if err != nil || "sha256:"+digest != expected {
+			return fmt.Errorf("generated Catalyst file %q no longer matches prepared evidence", path)
+		}
+	}
+	overlayDigest, err := digestRegularDirectory(prepared.RootOverlayPath)
+	if err != nil || "sha256:"+overlayDigest != prepared.GeneratedOverlayDigest {
+		return fmt.Errorf("generated Catalyst root overlay no longer matches prepared evidence")
+	}
+	return nil
+}
+
+func validateCatalystGeneratedTree(generated string, expectedContents map[string]string, expectedDirModes, expectedFileModes map[string]os.FileMode) error {
+	if err := filepath.WalkDir(generated, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			expectedMode, expected := expectedDirModes[path]
+			if !expected || info.Mode().Perm() != expectedMode {
+				return fmt.Errorf("generated Catalyst directory %q has unexpected path or mode", path)
+			}
+			return nil
+		}
+		expectedMode, expected := expectedFileModes[path]
+		if _, hasContent := expectedContents[path]; !expected || !hasContent || !info.Mode().IsRegular() || info.Mode().Perm() != expectedMode {
+			return fmt.Errorf("generated Catalyst file %q has unexpected path, type, or mode", path)
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	for path, expectedContent := range expectedContents {
+		actual, err := os.ReadFile(path) // #nosec G304 -- paths were generated inside the fresh Catalyst work root.
+		if err != nil || string(actual) != expectedContent {
+			return fmt.Errorf("generated Catalyst file %q no longer matches the locked plan", path)
+		}
+	}
+	return nil
+}
+
 func LoadCatalystRootfsManifest(path string) (*CatalystRootfsManifest, error) {
 	var manifest CatalystRootfsManifest
 	if err := decodeStrictFile(path, &manifest); err != nil {
 		return nil, err
 	}
+	if err := validateCatalystRootfsManifest(&manifest); err != nil {
+		return nil, err
+	}
+	return &manifest, nil
+}
+
+func validateCatalystRootfsManifest(manifest *CatalystRootfsManifest) error {
 	digests := []string{manifest.RootfsDigest, manifest.PlanDigest, manifest.InputLockDigest, manifest.PackageSetCatalogDigest, manifest.ConfigDigest,
 		manifest.SpecDigest, manifest.EnvscriptDigest, manifest.FSScriptDigest, manifest.RootOverlayDigest}
 	for _, digest := range digests {
 		if !prefixedSHA256Pattern.MatchString(digest) {
-			return nil, fmt.Errorf("catalyst rootfs manifest has an invalid digest")
+			return fmt.Errorf("catalyst rootfs manifest has an invalid digest")
 		}
 	}
 	expectedInputs := 9
@@ -842,9 +903,9 @@ func LoadCatalystRootfsManifest(path string) (*CatalystRootfsManifest, error) {
 		manifest.Gate.SchemaVersion != 1 || manifest.Gate.CompletedAt.IsZero() || manifest.Gate.Target != manifest.Target || manifest.Gate.PlanDigest != manifest.PlanDigest ||
 		manifest.Gate.InputLockDigest != manifest.InputLockDigest || manifest.Gate.RepositoryCommit != manifest.RepositoryCommit || manifest.Gate.SnapshotID != manifest.SnapshotID ||
 		!manifest.Gate.Stage3SignatureVerified || !manifest.Gate.RepositoryCommitVerified || !manifest.Gate.ProfileCommitVerified || !manifest.Gate.ProfileParentsVerified || !manifest.Gate.NetworkNamespaceDenied || !manifest.Gate.FreshWorkDirectory {
-		return nil, fmt.Errorf("catalyst rootfs manifest is incomplete")
+		return fmt.Errorf("catalyst rootfs manifest is incomplete")
 	}
-	return &manifest, nil
+	return nil
 }
 
 func GenerateQCOW2Manifest(rootfsManifestPath, qcow2Path, assemblerPath string, now time.Time) (*QCOW2Manifest, error) {

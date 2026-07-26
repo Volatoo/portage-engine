@@ -6,6 +6,26 @@ run:
 
 linters:
   settings:
+    cyclop:
+      # Dispatchers and validation-heavy supply-chain code need some branching,
+      # but values above this point should be split into auditable stages.
+      max-complexity: 45
+      package-average: 0.0
+    gocyclo:
+      # The second metric catches boolean-heavy validators that cyclop weighs
+      # differently. This gate targets only genuinely exceptional functions.
+      min-complexity: 50
+    gosec:
+      excludes:
+        # Executing reviewed command arrays and reading operator-selected,
+        # digest-bound paths are core engine behavior. G703 remains enabled for
+        # taint-aware traversal, while secret/public file modes are validated at
+        # their domain boundaries rather than by blanket 0600/0750 rules.
+        - G204
+        - G301
+        - G302
+        - G304
+        - G306
     revive:
       rules:
         # Public HTTP/JSON contracts use concise domain names; requiring a
@@ -26,12 +46,20 @@ linters:
     - gocritic
     - prealloc
     - bodyclose
+    - cyclop
     - errorlint
     - exhaustive
-  disable:
     - gosec
+    - gocyclo
   exclusions:
     rules:
+      # Tests deliberately construct invalid paths, credentials, and large
+      # branch matrices; production packages remain fully gated.
+      - linters:
+          - cyclop
+          - gocyclo
+          - gosec
+        path: '(^|/)(tests/.*|.*_test\.go)$'
       # Operator-facing errors intentionally start with proper protocol,
       # product, environment-variable, and milestone names (PVE, GPG,
       # BINPKG_PATH, IMG-2, and similar).

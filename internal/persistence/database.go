@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"net/url"
 	"strconv"
@@ -84,10 +85,16 @@ func Open(ctx context.Context, cfg config.DatabaseConfig) (*Database, error) {
 		return nil, fmt.Errorf("parse PostgreSQL configuration: %w", err)
 	}
 	if cfg.MaxConns > 0 {
-		poolCfg.MaxConns = int32(cfg.MaxConns)
+		poolCfg.MaxConns, err = checkedPoolSize("maximum", cfg.MaxConns)
+		if err != nil {
+			return nil, err
+		}
 	}
 	if cfg.MinConns >= 0 {
-		poolCfg.MinConns = int32(cfg.MinConns)
+		poolCfg.MinConns, err = checkedPoolSize("minimum", cfg.MinConns)
+		if err != nil {
+			return nil, err
+		}
 	}
 	poolCfg.ConnConfig.RuntimeParams["application_name"] = "portage-engine"
 
@@ -112,6 +119,13 @@ func Open(ctx context.Context, cfg config.DatabaseConfig) (*Database, error) {
 		healthTimeout = 2 * time.Second
 	}
 	return &Database{pool: pool, healthTimeout: healthTimeout}, nil
+}
+
+func checkedPoolSize(name string, value int) (int32, error) {
+	if value < 0 || int64(value) > math.MaxInt32 {
+		return 0, fmt.Errorf("PostgreSQL %s pool size %d is outside the supported range", name, value)
+	}
+	return int32(value), nil
 }
 
 // Pool exposes the narrow Querier interface for repository construction.

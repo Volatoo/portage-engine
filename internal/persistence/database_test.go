@@ -1,7 +1,9 @@
 package persistence
 
 import (
+	"math"
 	"net/url"
+	"strconv"
 	"testing"
 
 	"github.com/slchris/portage-engine/pkg/config"
@@ -67,4 +69,25 @@ func TestConnectionStringIPv6Host(t *testing.T) {
 	if parsed.Host != "[::1]:5432" {
 		t.Fatalf("host = %q", parsed.Host)
 	}
+}
+
+func TestCheckedPoolSizeRejectsOverflow(t *testing.T) {
+	if strconv.IntSize <= 32 {
+		t.Skip("int cannot represent a value above int32 on this platform")
+	}
+	if _, err := checkedPoolSize("maximum", int64ToInt(t, math.MaxInt32+1)); err == nil {
+		t.Fatal("checkedPoolSize accepted a value above int32")
+	}
+	if got, err := checkedPoolSize("minimum", 12); err != nil || got != 12 {
+		t.Fatalf("checkedPoolSize(12) = %d, %v", got, err)
+	}
+}
+
+func int64ToInt(t *testing.T, value int64) int {
+	t.Helper()
+	converted := int(value)
+	if int64(converted) != value {
+		t.Fatalf("test value %d does not fit int", value)
+	}
+	return converted
 }

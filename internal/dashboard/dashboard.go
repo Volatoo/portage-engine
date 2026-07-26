@@ -235,12 +235,15 @@ func (d *Dashboard) handleLoginSubmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// #nosec G124 -- Secure follows the actual transport so deployments on the
+	// explicitly supported trusted-LAN HTTP mode can still authenticate.
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookie,
 		Value:    token,
 		Path:     "/",
 		MaxAge:   int(ttl.Seconds()),
 		HttpOnly: true,
+		Secure:   r.TLS != nil,
 		SameSite: http.SameSiteLaxMode,
 	})
 
@@ -253,12 +256,14 @@ func (d *Dashboard) handleLoginSubmit(w http.ResponseWriter, r *http.Request) {
 
 // handleLogout clears the session cookie and returns to the landing page.
 func (d *Dashboard) handleLogout(w http.ResponseWriter, r *http.Request) {
+	// #nosec G124 -- Secure follows the actual transport for trusted-LAN HTTP.
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookie,
 		Value:    "",
 		Path:     "/",
 		MaxAge:   -1,
 		HttpOnly: true,
+		Secure:   r.TLS != nil,
 		SameSite: http.SameSiteLaxMode,
 	})
 	http.Redirect(w, r, "/", http.StatusFound)
@@ -460,6 +465,8 @@ func (d *Dashboard) handleCloudSettingsTestProxy(w http.ResponseWriter, r *http.
 // proxyServer forwards a request (with body) to the backend server, attaching
 // the server API key, and relays status + body back honestly.
 func (d *Dashboard) proxyServer(w http.ResponseWriter, r *http.Request, method, url string) {
+	// #nosec G704 -- url is assembled only from the startup-validated,
+	// operator-controlled SERVER_URL and fixed API paths.
 	req, err := http.NewRequestWithContext(r.Context(), method, url, r.Body)
 	if err != nil {
 		writeBackendError(w, err)
@@ -471,6 +478,7 @@ func (d *Dashboard) proxyServer(w http.ResponseWriter, r *http.Request, method, 
 	if d.config.ServerAPIKey != "" {
 		req.Header.Set("X-API-Key", d.config.ServerAPIKey)
 	}
+	// #nosec G704 -- the request target is the validated backend origin above.
 	resp, err := d.httpClient.Do(req)
 	if err != nil {
 		writeBackendError(w, err)
@@ -787,7 +795,7 @@ func (d *Dashboard) handleStatic(w http.ResponseWriter, r *http.Request) {
 	// Check for any attempt to traverse up (..)
 	if strings.Contains(requestPath, "..") || strings.HasPrefix(requestPath, "/") {
 		http.Error(w, "Forbidden", http.StatusForbidden)
-		log.Printf("Blocked path traversal attempt: %s", r.URL.Path)
+		log.Printf("Blocked path traversal attempt: %q", r.URL.Path) // #nosec G706 -- value is safely quoted.
 		return
 	}
 
@@ -812,7 +820,7 @@ func (d *Dashboard) handleStatic(w http.ResponseWriter, r *http.Request) {
 	// Ensure the file is within the static directory
 	if !strings.HasPrefix(absFullPath, absStaticRoot) {
 		http.Error(w, "Forbidden", http.StatusForbidden)
-		log.Printf("Blocked access outside static directory: %s -> %s", r.URL.Path, absFullPath)
+		log.Printf("Blocked access outside static directory: %q -> %q", r.URL.Path, absFullPath) // #nosec G706 -- values are safely quoted.
 		return
 	}
 
@@ -980,6 +988,8 @@ func writeBackendError(w http.ResponseWriter, err error) {
 // serverGet issues a GET to the backend server, attaching the configured
 // server API key so the dashboard works against a secured server.
 func (d *Dashboard) serverGet(url string) (*http.Response, error) {
+	// #nosec G704 -- callers build this URL from the startup-validated
+	// operator-controlled SERVER_URL and fixed API paths.
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
@@ -987,6 +997,7 @@ func (d *Dashboard) serverGet(url string) (*http.Response, error) {
 	if d.config.ServerAPIKey != "" {
 		req.Header.Set("X-API-Key", d.config.ServerAPIKey)
 	}
+	// #nosec G704 -- the request target is the validated backend origin above.
 	return d.httpClient.Do(req)
 }
 
@@ -1005,7 +1016,7 @@ func extractBearer(header string) string {
 // loggingMiddleware provides request logging.
 func (d *Dashboard) loggingMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		log.Printf("%s %s %s", r.Method, r.RequestURI, r.RemoteAddr)
+		log.Printf("%s %q %q", r.Method, r.RequestURI, r.RemoteAddr) // #nosec G706 -- values are safely quoted.
 		next.ServeHTTP(w, r)
 	})
 }

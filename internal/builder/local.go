@@ -408,7 +408,7 @@ func loadNotifier(cfg *config.BuilderConfig) *notification.Notifier {
 
 	notifyConfig, err := notification.LoadConfig(notifyConfigPath)
 	if err == nil {
-		log.Printf("Notification system loaded from %s", notifyConfigPath)
+		log.Printf("Notification system loaded from %q", notifyConfigPath) // #nosec G706 -- value is safely quoted.
 		return notification.NewNotifier(notifyConfig)
 	}
 	log.Printf("Notification config not loaded (optional): %v", err)

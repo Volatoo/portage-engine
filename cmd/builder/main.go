@@ -294,14 +294,14 @@ func setupHTTPHandlers(bldr *builder.LocalBuilder) *http.ServeMux {
 		}
 
 		// Get file info for headers
-		fileInfo, err := os.Stat(artifactPath)
+		fileInfo, err := os.Stat(artifactPath) // #nosec G703 -- builder path confinement resolves and verifies this artifact path.
 		if err != nil {
 			http.Error(w, "Failed to get file info", http.StatusInternalServerError)
 			return
 		}
 
 		// Open the file
-		file, err := os.Open(artifactPath)
+		file, err := os.Open(artifactPath) // #nosec G304,G703 -- builder path confinement resolves and verifies this artifact path.
 		if err != nil {
 			http.Error(w, "Failed to open artifact file", http.StatusInternalServerError)
 			return
@@ -369,7 +369,7 @@ func waitForShutdown(server *http.Server, bldr *builder.LocalBuilder) {
 func loggingMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
-		log.Printf("%s %s %s", r.Method, r.RequestURI, r.RemoteAddr)
+		log.Printf("%s %q %q", r.Method, r.RequestURI, r.RemoteAddr) // #nosec G706 -- request-derived values are safely quoted.
 		next.ServeHTTP(w, r)
 		log.Printf("Completed in %v", time.Since(start))
 	})

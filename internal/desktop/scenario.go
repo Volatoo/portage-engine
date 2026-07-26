@@ -92,68 +92,8 @@ func (s *Scenario) Validate() error {
 	seen := make(map[string]struct{}, len(s.Steps))
 	lifecycle := map[string]int{}
 	for index := range s.Steps {
-		step := &s.Steps[index]
-		if !scenarioIDPattern.MatchString(step.ID) {
-			return fmt.Errorf("step %d has invalid id", index)
-		}
-		if _, ok := seen[step.ID]; ok {
-			return fmt.Errorf("duplicate step id %q", step.ID)
-		}
-		seen[step.ID] = struct{}{}
-		allowed, ok := actionInputs[step.Action]
-		if !ok {
-			return fmt.Errorf("step %q has unsupported action %q", step.ID, step.Action)
-		}
-		if step.TimeoutSeconds < 0 || step.TimeoutSeconds > 300 {
-			return fmt.Errorf("step %q timeout must be at most 300 seconds", step.ID)
-		}
-		if step.Action == "restore" || step.Action == "start" || step.Action == "stop" {
-			lifecycle[step.Action]++
-		}
-		for key, value := range step.Input {
-			if _, accepted := allowed[key]; !accepted {
-				return fmt.Errorf("step %q action %q does not allow input %q", step.ID, step.Action, key)
-			}
-			if len(value) > 4096 || strings.ContainsRune(value, '\x00') {
-				return fmt.Errorf("step %q input %q is too large or contains NUL", step.ID, key)
-			}
-			lower := strings.ToLower(key)
-			if strings.Contains(lower, "password") || strings.Contains(lower, "secret") || strings.Contains(lower, "token") {
-				return fmt.Errorf("step %q must not carry secrets", step.ID)
-			}
-		}
-		for key, required := range allowed {
-			if required && strings.TrimSpace(step.Input[key]) == "" {
-				return fmt.Errorf("step %q action %q requires input %q", step.ID, step.Action, key)
-			}
-		}
-		if step.Action == "click" {
-			coordinates := step.Input["x"] != "" && step.Input["y"] != ""
-			selectors := 0
-			for _, key := range []string{"accessibility_id", "needle"} {
-				if step.Input[key] != "" {
-					selectors++
-				}
-			}
-			if coordinates {
-				selectors++
-			}
-			if selectors != 1 || (step.Input["x"] == "") != (step.Input["y"] == "") {
-				return fmt.Errorf("step %q click requires exactly one selector or an x/y pair", step.ID)
-			}
-		}
-		if step.Action == "collect_logs" {
-			scope := step.Input["scope"]
-			if scope != "application" && scope != "desktop" && scope != "system" {
-				return fmt.Errorf("step %q has unsupported log scope %q", step.ID, scope)
-			}
-			applicationID := strings.TrimSpace(step.Input["application_id"])
-			if scope == "application" && applicationID == "" {
-				return fmt.Errorf("step %q application logs require application_id", step.ID)
-			}
-			if scope != "application" && applicationID != "" {
-				return fmt.Errorf("step %q %s logs must not include application_id", step.ID, scope)
-			}
+		if err := validateScenarioStep(index, &s.Steps[index], seen, lifecycle); err != nil {
+			return err
 		}
 	}
 	if len(s.Steps) < 3 || s.Steps[0].Action != "restore" || s.Steps[1].Action != "start" || s.Steps[len(s.Steps)-1].Action != "stop" {
@@ -161,6 +101,83 @@ func (s *Scenario) Validate() error {
 	}
 	if lifecycle["restore"] != 1 || lifecycle["start"] != 1 || lifecycle["stop"] != 1 {
 		return fmt.Errorf("desktop scenario requires exactly one restore, start, and stop action")
+	}
+	return nil
+}
+
+func validateScenarioStep(index int, step *Step, seen map[string]struct{}, lifecycle map[string]int) error {
+	if !scenarioIDPattern.MatchString(step.ID) {
+		return fmt.Errorf("step %d has invalid id", index)
+	}
+	if _, ok := seen[step.ID]; ok {
+		return fmt.Errorf("duplicate step id %q", step.ID)
+	}
+	seen[step.ID] = struct{}{}
+	allowed, ok := actionInputs[step.Action]
+	if !ok {
+		return fmt.Errorf("step %q has unsupported action %q", step.ID, step.Action)
+	}
+	if step.TimeoutSeconds < 0 || step.TimeoutSeconds > 300 {
+		return fmt.Errorf("step %q timeout must be at most 300 seconds", step.ID)
+	}
+	if step.Action == "restore" || step.Action == "start" || step.Action == "stop" {
+		lifecycle[step.Action]++
+	}
+	if err := validateScenarioInputs(step, allowed); err != nil {
+		return err
+	}
+	return validateScenarioAction(step)
+}
+
+func validateScenarioInputs(step *Step, allowed map[string]bool) error {
+	for key, value := range step.Input {
+		if _, accepted := allowed[key]; !accepted {
+			return fmt.Errorf("step %q action %q does not allow input %q", step.ID, step.Action, key)
+		}
+		if len(value) > 4096 || strings.ContainsRune(value, '\x00') {
+			return fmt.Errorf("step %q input %q is too large or contains NUL", step.ID, key)
+		}
+		lower := strings.ToLower(key)
+		if strings.Contains(lower, "password") || strings.Contains(lower, "secret") || strings.Contains(lower, "token") {
+			return fmt.Errorf("step %q must not carry secrets", step.ID)
+		}
+	}
+	for key, required := range allowed {
+		if required && strings.TrimSpace(step.Input[key]) == "" {
+			return fmt.Errorf("step %q action %q requires input %q", step.ID, step.Action, key)
+		}
+	}
+	return nil
+}
+
+func validateScenarioAction(step *Step) error {
+	switch step.Action {
+	case "click":
+		coordinates := step.Input["x"] != "" && step.Input["y"] != ""
+		selectors := 0
+		for _, key := range []string{"accessibility_id", "needle"} {
+			if step.Input[key] != "" {
+				selectors++
+			}
+		}
+		if coordinates {
+			selectors++
+		}
+		if selectors != 1 || (step.Input["x"] == "") != (step.Input["y"] == "") {
+			return fmt.Errorf("step %q click requires exactly one selector or an x/y pair", step.ID)
+		}
+	case "collect_logs":
+		scope := step.Input["scope"]
+		if scope != "application" && scope != "desktop" && scope != "system" {
+			return fmt.Errorf("step %q has unsupported log scope %q", step.ID, scope)
+		}
+		applicationID := strings.TrimSpace(step.Input["application_id"])
+		if scope == "application" && applicationID == "" {
+			return fmt.Errorf("step %q application logs require application_id", step.ID)
+		}
+		if scope != "application" && applicationID != "" {
+			return fmt.Errorf("step %q %s logs must not include application_id", step.ID, scope)
+		}
 	}
 	return nil
 }

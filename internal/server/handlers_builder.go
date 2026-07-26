@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -29,6 +30,13 @@ func (s *Server) handleBuilderRegister(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
 		return
 	}
+	endpoint, err := validatedBuilderEndpoint(info.Endpoint)
+	if err != nil || strings.TrimSpace(info.ID) == "" {
+		s.metrics.IncHTTPRequestErrors()
+		http.Error(w, "Invalid builder ID or endpoint", http.StatusBadRequest)
+		return
+	}
+	info.Endpoint = endpoint
 
 	// Register the builder
 	s.builderRegistry.Register(&info)
@@ -39,6 +47,17 @@ func (s *Server) handleBuilderRegister(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(response)
+}
+
+func validatedBuilderEndpoint(raw string) (string, error) {
+	endpoint, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || (endpoint.Scheme != "http" && endpoint.Scheme != "https") ||
+		endpoint.Host == "" || endpoint.User != nil || endpoint.RawQuery != "" ||
+		endpoint.Fragment != "" || (endpoint.Path != "" && endpoint.Path != "/") {
+		return "", fmt.Errorf("builder endpoint must be an HTTP or HTTPS origin")
+	}
+	endpoint.Path = ""
+	return strings.TrimRight(endpoint.String(), "/"), nil
 }
 
 // handleBuildersList returns the list of all registered builders.

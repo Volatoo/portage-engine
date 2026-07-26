@@ -3165,7 +3165,7 @@ func (m *Manager) ServeVerificationBinhost(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	root := filepath.Join(m.artifactQuarantineBase(), token)
-	marker, err := os.ReadFile(filepath.Join(root, verificationCapabilityFile))
+	marker, err := os.ReadFile(filepath.Join(root, verificationCapabilityFile)) // #nosec G703 -- token is regex-validated and confined to the quarantine base.
 	if err != nil {
 		http.NotFound(w, r)
 		return
@@ -3183,14 +3183,14 @@ func (m *Manager) ServeVerificationBinhost(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	file := filepath.Join(root, filepath.FromSlash(rel))
-	info, err := os.Lstat(file)
+	info, err := os.Lstat(file) // #nosec G703 -- token and cleaned relative path are confined to the quarantine root above.
 	if err != nil || !info.Mode().IsRegular() {
 		http.NotFound(w, r)
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	http.ServeFile(w, r, file)
+	http.ServeFile(w, r, file) // #nosec G703 -- regular-file and quarantine-root confinement checks passed above.
 }
 
 func (m *Manager) cleanupArtifactQuarantine(jobID string) {

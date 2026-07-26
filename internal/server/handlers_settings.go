@@ -47,7 +47,7 @@ func redactedCloudSettings(cs *config.CloudSettings) cloudSettingsResponse {
 	return resp
 }
 
-var cloudSettingSecretRefs = map[string]string{
+var cloudSettingSecretRefs = map[string]string{ // #nosec G101 -- values are environment-variable references, not credentials.
 	"pve_token_secret": "env:CLOUD_PVE_TOKEN_SECRET",
 	"pve_password":     "env:CLOUD_PVE_PASSWORD",
 	"aws_secret_key":   "env:CLOUD_AWS_SECRET_KEY",
@@ -248,7 +248,7 @@ func (s *Server) updateCloudSettings(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.builder.UpdateCloudSettings(&in)
-		log.Printf("Cloud settings version %d updated via API (provider=%s, pve_endpoint=%s)", version, in.Provider, in.PVEEndpoint)
+		log.Printf("Cloud settings version %d updated via API (provider=%q, pve_endpoint=%q)", version, in.Provider, in.PVEEndpoint) // #nosec G706 -- values are safely quoted.
 		resp := redactedCloudSettings(&in)
 		resp.SecretValuesManagedExternally = true
 		writeJSON(w, resp)
@@ -273,7 +273,7 @@ func (s *Server) updateCloudSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Printf("Cloud settings updated via API (provider=%s, pve_endpoint=%s)", in.Provider, in.PVEEndpoint)
+	log.Printf("Cloud settings updated via API (provider=%q, pve_endpoint=%q)", in.Provider, in.PVEEndpoint) // #nosec G706 -- values are safely quoted.
 	writeJSON(w, redactedCloudSettings(&in))
 }
 

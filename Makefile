@@ -1,4 +1,4 @@
-.PHONY: all build clean test run-server run-dashboard run-builder run-client build-image-factory build-desktop-runner build-migrate build-signer
+.PHONY: all build clean test run-server run-dashboard run-builder run-client build-image-factory build-desktop-runner build-migrate build-signer lint lint-security lint-complexity
 
 # Variables
 BINARY_SERVER=bin/portage-server
@@ -114,6 +114,14 @@ fmt:
 lint:
 	@echo "Linting code..."
 	golangci-lint run ./...
+
+lint-security:
+	@echo "Running gosec security checks..."
+	golangci-lint run --enable-only=gosec ./...
+
+lint-complexity:
+	@echo "Checking function complexity..."
+	golangci-lint run --enable-only=cyclop,gocyclo ./...
 
 # Install binaries
 install: build

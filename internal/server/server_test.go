@@ -449,6 +449,15 @@ func TestHandleBuilderRegister(t *testing.T) {
 			expectedStatus: http.StatusOK,
 		},
 		{
+			name:   "reject endpoint with credentials and path",
+			method: http.MethodPost,
+			body: builder.BuilderInfo{
+				ID:       "builder-ssrf",
+				Endpoint: "http://user:password@localhost:9090/metadata",
+			},
+			expectedStatus: http.StatusBadRequest,
+		},
+		{
 			name:           "method not allowed",
 			method:         http.MethodGet,
 			body:           nil,

@@ -254,7 +254,7 @@ func seedNativeMakeConf(configRoot string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(destinationDir, "make.conf"), content, 0o644)
+	return os.WriteFile(filepath.Join(destinationDir, "make.conf"), content, 0o644) // #nosec G703 -- destinationDir is the builder-owned isolated config root.
 }
 
 func prepareNativeProfile(bundle *ConfigBundle, configRoot string) (string, error) {

@@ -23,67 +23,42 @@ func main() {
 		usage()
 		os.Exit(2)
 	}
-	switch os.Args[1] {
-	case "preflight":
-		runPreflight(os.Args[2:])
-	case "lock-materialize":
-		runLockMaterialize(os.Args[2:])
-	case "plan":
-		runPlan(os.Args[2:])
-	case "source-check":
-		runSourceCheck(os.Args[2:])
-	case "pbs-attest":
-		runPBSAttest(os.Args[2:])
-	case "pbs-stamp-source":
-		runPBSStampSource(os.Args[2:])
-	case "manifest":
-		runManifest(os.Args[2:])
-	case "catalog-assemble":
-		runCatalogAssemble(os.Args[2:])
-	case "smoke-config":
-		runSmokeConfig(os.Args[2:])
-	case "guest-ip":
-		runGuestIP(os.Args[2:])
-	case "guest-host-key":
-		runGuestHostKey(os.Args[2:])
-	case "stamp-output":
-		runStampOutput(os.Args[2:])
-	case "catalyst-plan":
-		runCatalystPlan(os.Args[2:])
-	case "catalyst-gate":
-		runCatalystGate(os.Args[2:])
-	case "catalyst-manifest":
-		runCatalystManifest(os.Args[2:])
-	case "qcow2-manifest":
-		runQCOW2Manifest(os.Args[2:])
-	case "qcow2-check":
-		runQCOW2Check(os.Args[2:])
-	case "ops-keygen":
-		runOpsKeygen(os.Args[2:])
-	case "bundle-seal":
-		runBundleSeal(os.Args[2:])
-	case "bundle-verify":
-		runBundleVerify(os.Args[2:])
-	case "ops-digest":
-		runOpsDigest(os.Args[2:])
-	case "promote":
-		runPromote(os.Args[2:])
-	case "rollback":
-		runRollback(os.Args[2:])
-	case "cleanup-plan":
-		runCleanupPlan(os.Args[2:])
-	case "state-sign":
-		runStateSign(os.Args[2:])
-	case "rebuild-plan":
-		runRebuildPlan(os.Args[2:])
-	case "status-compile":
-		runStatusCompile(os.Args[2:])
-	case "package-sets":
-		runPackageSets(os.Args[2:])
-	default:
+	commands := map[string]func([]string){
+		"preflight":         runPreflight,
+		"lock-materialize":  runLockMaterialize,
+		"plan":              runPlan,
+		"source-check":      runSourceCheck,
+		"pbs-attest":        runPBSAttest,
+		"pbs-stamp-source":  runPBSStampSource,
+		"manifest":          runManifest,
+		"catalog-assemble":  runCatalogAssemble,
+		"smoke-config":      runSmokeConfig,
+		"guest-ip":          runGuestIP,
+		"guest-host-key":    runGuestHostKey,
+		"stamp-output":      runStampOutput,
+		"catalyst-plan":     runCatalystPlan,
+		"catalyst-gate":     runCatalystGate,
+		"catalyst-manifest": runCatalystManifest,
+		"qcow2-manifest":    runQCOW2Manifest,
+		"qcow2-check":       runQCOW2Check,
+		"ops-keygen":        runOpsKeygen,
+		"bundle-seal":       runBundleSeal,
+		"bundle-verify":     runBundleVerify,
+		"ops-digest":        runOpsDigest,
+		"promote":           runPromote,
+		"rollback":          runRollback,
+		"cleanup-plan":      runCleanupPlan,
+		"state-sign":        runStateSign,
+		"rebuild-plan":      runRebuildPlan,
+		"status-compile":    runStatusCompile,
+		"package-sets":      runPackageSets,
+	}
+	command, ok := commands[os.Args[1]]
+	if !ok {
 		usage()
 		os.Exit(2)
 	}
+	command(os.Args[2:])
 }
 
 func runPackageSets(args []string) {

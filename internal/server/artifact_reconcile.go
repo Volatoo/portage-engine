@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"io"
+	"io/fs"
 	"log"
 	"os"
 	"path/filepath"
@@ -19,8 +20,13 @@ func (s *Server) reconcileArtifacts() error {
 		return nil
 	}
 	root := filepath.Clean(s.binpkgRoot)
+	artifactRoot, err := os.OpenRoot(root)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = artifactRoot.Close() }()
 	var inventory []persistence.ArtifactInventory
-	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+	err = fs.WalkDir(artifactRoot.FS(), ".", func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
@@ -31,7 +37,7 @@ func (s *Server) reconcileArtifacts() error {
 		if !strings.HasSuffix(name, ".gpkg.tar") && !strings.HasSuffix(name, ".tbz2") {
 			return nil
 		}
-		file, err := os.Open(path)
+		file, err := artifactRoot.Open(path)
 		if err != nil {
 			return err
 		}
@@ -44,12 +50,8 @@ func (s *Server) reconcileArtifacts() error {
 		if closeErr != nil {
 			return closeErr
 		}
-		rel, err := filepath.Rel(root, path)
-		if err != nil {
-			return err
-		}
 		inventory = append(inventory, persistence.ArtifactInventory{
-			Location: "/binpkgs/" + filepath.ToSlash(rel),
+			Location: "/binpkgs/" + filepath.ToSlash(path),
 			Digest:   hex.EncodeToString(hash.Sum(nil)), SizeBytes: size,
 		})
 		return nil
