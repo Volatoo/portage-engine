@@ -22,53 +22,57 @@ var insecureJWTSecrets = []string{
 
 // ServerConfig represents the server configuration.
 type ServerConfig struct {
-	Port                 int
-	BinpkgPath           string
-	MaxWorkers           int
-	BuildMode            string
-	StorageType          string
-	StorageLocalDir      string
-	StorageS3Bucket      string
-	StorageS3Region      string
-	StorageS3Prefix      string
-	StorageHTTPBase      string
-	GPGEnabled           bool
-	GPGKeyID             string
-	GPGKeyPath           string
-	GPGAutoCreate        bool   // Auto-create GPG key if not exists
-	GPGKeyName           string // Name for auto-generated key
-	GPGKeyEmail          string // Email for auto-generated key
-	GPGHome              string // Custom GNUPGHOME directory
-	GPGPublicKeyPath     string // Path to export public key
-	CloudProvider        string
-	CloudAliyunRegion    string
-	CloudAliyunZone      string
-	CloudAliyunAK        string
-	CloudAliyunSK        string
-	CloudGCPProject      string
-	CloudGCPRegion       string
-	CloudGCPZone         string
-	CloudGCPKeyFile      string
-	CloudGCPMachineType  string
-	CloudGCPDiskSizeGB   int
-	CloudGCPDiskType     string
-	CloudGCPImageFamily  string
-	CloudGCPImageProject string
-	CloudGCPNetwork      string
-	CloudGCPSubnetwork   string
-	CloudGCPPreemptible  bool
-	CloudGCPStateDir     string
-	CloudGCPAllowedIPs   []string
-	CloudInstanceTTL     int // Instance TTL in minutes, 0 means no auto-termination
-	CloudAWSRegion       string
-	CloudAWSZone         string
-	CloudAWSAccessKey    string
-	CloudAWSSecretKey    string
+	Port                     int
+	ControlPlaneID           string
+	BinpkgPath               string
+	MaxWorkers               int
+	BuildMode                string
+	StorageType              string
+	StorageLocalDir          string
+	StorageS3Bucket          string
+	StorageS3Region          string
+	StorageS3Prefix          string
+	StorageHTTPBase          string
+	GPGEnabled               bool
+	GPGKeyID                 string
+	GPGKeyPath               string
+	GPGAutoCreate            bool   // Auto-create GPG key if not exists
+	GPGKeyName               string // Name for auto-generated key
+	GPGKeyEmail              string // Email for auto-generated key
+	GPGHome                  string // Custom GNUPGHOME directory
+	GPGPublicKeyPath         string // Path to export public key
+	SignerWaitTimeoutSeconds int
+	CloudProvider            string
+	CloudAliyunRegion        string
+	CloudAliyunZone          string
+	CloudAliyunAK            string
+	CloudAliyunSK            string
+	CloudGCPProject          string
+	CloudGCPRegion           string
+	CloudGCPZone             string
+	CloudGCPKeyFile          string
+	CloudGCPMachineType      string
+	CloudGCPDiskSizeGB       int
+	CloudGCPDiskType         string
+	CloudGCPImageFamily      string
+	CloudGCPImageProject     string
+	CloudGCPNetwork          string
+	CloudGCPSubnetwork       string
+	CloudGCPPreemptible      bool
+	CloudGCPStateDir         string
+	CloudGCPAllowedIPs       []string
+	CloudInstanceTTL         int // Instance TTL in minutes, 0 means no auto-termination
+	CloudAWSRegion           string
+	CloudAWSZone             string
+	CloudAWSAccessKey        string
+	CloudAWSSecretKey        string
 	// PVE (Proxmox VE) configuration
 	CloudPVEEndpoint    string   // PVE API endpoint (e.g., https://pve.example.com:8006)
 	CloudPVENode        string   // Default PVE node name
 	CloudPVETokenID     string   // API token ID (user@realm!tokenname)
 	CloudPVETokenSecret string   // API token secret
+	CloudPVEUsername    string   // Alternative password-auth user
+	CloudPVEPassword    string   // Alternative password-auth secret
 	CloudPVEInsecure    bool     // Skip TLS verification
 	CloudPVEStorage     string   // Default storage pool
 	CloudPVENetwork     string   // Default network bridge
@@ -86,19 +90,60 @@ type ServerConfig struct {
 	ServerCallbackURL       string
 	// Builder binary delivery for cloud instances: a local linux binary scp'd
 	// during deployment, or a URL the instance downloads from (path wins).
-	CloudBuilderBinaryPath string
-	CloudBuilderBinaryURL  string
-	RemoteBuilders         []string
+	CloudBuilderBinaryPath   string
+	CloudBuilderBinaryURL    string
+	CloudBuilderBinarySHA256 string
+	RemoteBuilders           []string
 	// Security settings
-	APIKey              string   // API key for authenticating requests (empty = auth disabled)
-	BuilderToken        string   // Shared secret the server presents to remote builders (empty = no builder auth)
-	CORSAllowedOrigins  []string // Allowed CORS origins (empty = allow all for backward compatibility)
-	MaxRequestBodyBytes int64    // Maximum request body size in bytes (0 = default 10MB)
+	APIKey                 string   // API key for authenticating requests (empty = auth disabled)
+	BuilderToken           string   // Shared secret the server presents to remote builders (empty = no builder auth)
+	CORSAllowedOrigins     []string // Allowed CORS origins (empty = allow all for backward compatibility)
+	MaxRequestBodyBytes    int64    // Maximum request body size in bytes (0 = default 10MB)
+	CatalogPath            string   // Server-owned profile/repository/image catalog JSON (empty = compatibility catalog)
+	ImageFactoryStatusPath string   // Optional read-only image-factory milestone/evidence status JSON
 	// Data persistence
-	DataDir         string // Directory for persisting server state (empty = /var/lib/portage-engine/server)
+	DataDir  string // Directory for persisting legacy server state (empty = /var/lib/portage-engine/server)
+	Database DatabaseConfig
+	Cache    CacheConfig
+
 	MetricsEnabled  bool
 	MetricsPort     string
 	MetricsPassword string
+}
+
+// DatabaseConfig controls the PostgreSQL control-plane connection. When
+// enabled, PostgreSQL is the authoritative job/scheduler/runtime store; the
+// JSON store is only used by database-disabled standalone compatibility mode.
+type DatabaseConfig struct {
+	Enabled               bool
+	Required              bool
+	URL                   string
+	Host                  string
+	Port                  int
+	Name                  string
+	User                  string
+	Password              string
+	SSLMode               string
+	MaxConns              int
+	MinConns              int
+	ConnectTimeoutSeconds int
+	HealthTimeoutSeconds  int
+}
+
+// CacheConfig controls Redis-backed ephemeral coordination. PostgreSQL remains
+// the correctness authority; Redis accelerates wakeups, presence, rate limits,
+// and live event fan-out.
+type CacheConfig struct {
+	Enabled            bool
+	Required           bool
+	Host               string
+	Port               int
+	Password           string
+	DB                 int
+	TLSEnabled         bool
+	KeyPrefix          string
+	RateLimitPerMinute int
+	RateLimitBurst     int
 }
 
 // Validate checks the server configuration for common misconfigurations.
@@ -116,6 +161,30 @@ func (c *ServerConfig) Validate() []string {
 	}
 	if c.MaxWorkers <= 0 {
 		warnings = append(warnings, "CONFIG: MAX_WORKERS must be > 0")
+	}
+	if c.Database.Required && !c.Database.Enabled {
+		warnings = append(warnings, "CONFIG: DATABASE_REQUIRED requires DATABASE_ENABLED")
+	}
+	if c.GPGEnabled && (!c.Database.Enabled || !c.Database.Required) {
+		warnings = append(warnings, "CONFIG: GPG_ENABLED requires DATABASE_ENABLED=true and DATABASE_REQUIRED=true for the isolated signing queue")
+	}
+	if c.GPGEnabled && c.GPGPublicKeyPath == "" {
+		warnings = append(warnings, "CONFIG: GPG_ENABLED requires GPG_PUBLIC_KEY_PATH for isolated signer public-key distribution")
+	}
+	if c.Database.Enabled && c.Database.URL == "" && c.Database.SSLMode == "disable" {
+		warnings = append(warnings, "SECURITY: PGSSLMODE=disable sends database traffic without TLS; use only on a trusted private network")
+	}
+	if c.Database.Enabled && (c.Database.MaxConns <= 0 || c.Database.MinConns < 0 || c.Database.MinConns > c.Database.MaxConns) {
+		warnings = append(warnings, "CONFIG: database pool requires 0 <= DATABASE_MIN_CONNS <= DATABASE_MAX_CONNS")
+	}
+	if c.Cache.Required && !c.Cache.Enabled {
+		warnings = append(warnings, "CONFIG: REDIS_REQUIRED requires REDIS_ENABLED")
+	}
+	if c.Cache.Enabled && (c.Cache.Port <= 0 || c.Cache.Port > 65535) {
+		warnings = append(warnings, "CONFIG: REDIS_PORT must be in 1-65535")
+	}
+	if c.Cache.Enabled && c.Cache.Password == "" {
+		warnings = append(warnings, "SECURITY: Redis has no password configured; bind it to a private network and enable authentication")
 	}
 
 	return warnings
@@ -172,31 +241,27 @@ func (c *DashboardConfig) Validate() error {
 
 // BuilderConfig represents the builder configuration.
 type BuilderConfig struct {
-	Port               int
-	AuthToken          string // Shared secret required on build/job endpoints (empty = auth disabled)
-	Workers            int
-	InstanceID         string
-	Architecture       string
-	UseDocker          bool
-	ContainerRuntime   string // Container runtime: "docker" or "podman" (default: "docker")
-	DockerImage        string // Docker image for builds (e.g., gentoo/stage3:latest)
+	Port         int
+	AuthToken    string // Shared secret required on build/job endpoints (empty = auth disabled)
+	Workers      int
+	InstanceID   string
+	Architecture string
+	// NativeJobPolicy controls reuse of the native Gentoo root. "single-use"
+	// (default) persistently drains the builder as soon as one BuildJob is
+	// accepted; only an external VM/snapshot/rootfs reset may make it clean
+	// again. "unsafe-reuse" preserves the legacy mutable-host behavior and is
+	// intended only for disposable development environments.
+	NativeJobPolicy    string
 	WorkDir            string
 	ArtifactDir        string
 	DataDir            string
 	PersistenceEnabled bool
 	RetentionDays      int
-	GPGEnabled         bool
-	GPGKeyID           string
-	GPGKeyPath         string
-	GPGAutoSync        bool   // Auto-sync GPG key from server
-	GPGHome            string // Custom GNUPGHOME directory
 	// BinpkgFormat selects the binary package format Portage produces: "gpkg"
-	// (modern, GPG-signable) or "xpak" (legacy .tbz2, deprecated). Defaults to
-	// "gpkg"; only GPKG supports native OpenPGP signing/verification.
+	// (modern) or "xpak" (legacy .tbz2, deprecated). Builders always emit
+	// unsigned packages; portage-signer owns OpenPGP signing.
 	BinpkgFormat string
-	// BuildFeatures is appended to the build container's make.conf FEATURES.
-	// Docker builds need "-userpriv -usersandbox" (no unshare/privilege drop);
-	// a full Gentoo VM would leave this empty. WebUI-configurable.
+	// BuildFeatures is appended to the native build root's make.conf FEATURES.
 	BuildFeatures   string
 	StorageType     string
 	StorageLocalDir string
@@ -216,11 +281,11 @@ type BuilderConfig struct {
 	MetricsPort     string
 	MetricsPassword string
 
-	// Portage mirror settings (for Gentoo builds in Docker)
+	// Portage mirror settings.
 	SyncMirror      string // Mirror URL for portage sync (rsync or git)
 	DistfilesMirror string // Mirror URL for distfiles download
 
-	// Portage paths on host (mounted into Docker container)
+	// Portage paths on the native Gentoo build root.
 	PortageReposPath string // Path to portage repos (default: /var/db/repos)
 	PortageConfPath  string // Path to portage config (default: /etc/portage)
 	MakeConfPath     string // Path to make.conf (default: /etc/portage/make.conf)
@@ -239,8 +304,12 @@ func (c *BuilderConfig) Validate() []string {
 	if c.AuthToken == "" {
 		warnings = append(warnings, "SECURITY: BUILDER_TOKEN is not set — the build endpoint is unauthenticated and allows arbitrary remote builds")
 	}
-	if c.UseDocker && c.DockerImage == "" {
-		warnings = append(warnings, "CONFIG: USE_DOCKER is true but DOCKER_IMAGE is empty")
+	switch c.NativeJobPolicy {
+	case "", "single-use":
+	case "unsafe-reuse":
+		warnings = append(warnings, "SECURITY: native unsafe-reuse allows package/VDB/postinst state to leak across jobs; use single-use plus an external snapshot/VM reset")
+	default:
+		warnings = append(warnings, fmt.Sprintf("CONFIG: NATIVE_JOB_POLICY %q is invalid; use single-use or unsafe-reuse", c.NativeJobPolicy))
 	}
 	if c.WorkDir == "" {
 		warnings = append(warnings, "CONFIG: BUILD_WORK_DIR is not set")
@@ -364,6 +433,7 @@ func LoadServerConfig(path string) (*ServerConfig, error) {
 	}
 
 	config.Port = getEnvInt(env, "SERVER_PORT", config.Port)
+	config.ControlPlaneID = getEnvString(env, "CONTROL_PLANE_ID", "")
 	config.BinpkgPath = getEnvString(env, "BINPKG_PATH", config.BinpkgPath)
 	config.MaxWorkers = getEnvInt(env, "MAX_WORKERS", config.MaxWorkers)
 	config.BuildMode = getEnvString(env, "BUILD_MODE", config.BuildMode)
@@ -383,6 +453,7 @@ func LoadServerConfig(path string) (*ServerConfig, error) {
 	config.GPGKeyEmail = getEnvString(env, "GPG_KEY_EMAIL", "portage@localhost")
 	config.GPGHome = getEnvString(env, "GPG_HOME", "/var/lib/portage-engine/gpg")
 	config.GPGPublicKeyPath = getEnvString(env, "GPG_PUBLIC_KEY_PATH", "/var/lib/portage-engine/gpg/public.asc")
+	config.SignerWaitTimeoutSeconds = getEnvInt(env, "SIGNER_WAIT_TIMEOUT_SECONDS", 600)
 
 	config.CloudProvider = getEnvString(env, "CLOUD_DEFAULT_PROVIDER", config.CloudProvider)
 	config.CloudAliyunRegion = getEnvString(env, "CLOUD_ALIYUN_REGION", "cn-hangzhou")
@@ -419,6 +490,8 @@ func LoadServerConfig(path string) (*ServerConfig, error) {
 	config.CloudPVENode = getEnvString(env, "CLOUD_PVE_NODE", "pve")
 	config.CloudPVETokenID = getEnvString(env, "CLOUD_PVE_TOKEN_ID", "")
 	config.CloudPVETokenSecret = getEnvString(env, "CLOUD_PVE_TOKEN_SECRET", "")
+	config.CloudPVEUsername = getEnvString(env, "CLOUD_PVE_USERNAME", "")
+	config.CloudPVEPassword = getEnvString(env, "CLOUD_PVE_PASSWORD", "")
 	config.CloudPVEInsecure = getEnvBool(env, "CLOUD_PVE_INSECURE", false)
 	config.CloudPVEStorage = getEnvString(env, "CLOUD_PVE_STORAGE", "local-lvm")
 	config.CloudPVENetwork = getEnvString(env, "CLOUD_PVE_NETWORK", "vmbr0")
@@ -443,6 +516,7 @@ func LoadServerConfig(path string) (*ServerConfig, error) {
 	config.ServerCallbackURL = getEnvString(env, "SERVER_CALLBACK_URL", "")
 	config.CloudBuilderBinaryPath = getEnvString(env, "CLOUD_BUILDER_BINARY_PATH", "")
 	config.CloudBuilderBinaryURL = getEnvString(env, "CLOUD_BUILDER_BINARY_URL", "")
+	config.CloudBuilderBinarySHA256 = getEnvString(env, "CLOUD_BUILDER_BINARY_SHA256", "")
 
 	config.MetricsEnabled = getEnvBool(env, "METRICS_ENABLED", false)
 	config.MetricsPort = getEnvString(env, "METRICS_PORT", "2112")
@@ -462,6 +536,37 @@ func LoadServerConfig(path string) (*ServerConfig, error) {
 	config.CORSAllowedOrigins = getEnvStringSlice(env, "CORS_ALLOWED_ORIGINS", nil)
 	config.MaxRequestBodyBytes = int64(getEnvInt(env, "MAX_REQUEST_BODY_BYTES", 10*1024*1024)) // Default 10MB
 	config.DataDir = getEnvString(env, "DATA_DIR", "/var/lib/portage-engine/server")
+	config.CatalogPath = getEnvString(env, "CATALOG_PATH", "")
+	config.ImageFactoryStatusPath = getEnvString(env, "IMAGE_FACTORY_STATUS_PATH", "")
+	config.Database.Enabled = getEnvBool(env, "DATABASE_ENABLED", false)
+	config.Database.Required = getEnvBool(env, "DATABASE_REQUIRED", false)
+	if config.Database.Required {
+		config.Database.Enabled = true
+	}
+	config.Database.URL = getEnvString(env, "DATABASE_URL", "")
+	config.Database.Host = getEnvString(env, "PGHOST", "127.0.0.1")
+	config.Database.Port = getEnvInt(env, "PGPORT", 5432)
+	config.Database.Name = getEnvString(env, "PGDATABASE", "portage_engine")
+	config.Database.User = getEnvString(env, "PGUSER", "portage")
+	config.Database.Password = getEnvString(env, "PGPASSWORD", "")
+	config.Database.SSLMode = getEnvString(env, "PGSSLMODE", "verify-full")
+	config.Database.MaxConns = getEnvInt(env, "DATABASE_MAX_CONNS", 10)
+	config.Database.MinConns = getEnvInt(env, "DATABASE_MIN_CONNS", 1)
+	config.Database.ConnectTimeoutSeconds = getEnvInt(env, "DATABASE_CONNECT_TIMEOUT_SECONDS", 10)
+	config.Database.HealthTimeoutSeconds = getEnvInt(env, "DATABASE_HEALTH_TIMEOUT_SECONDS", 2)
+	config.Cache.Enabled = getEnvBool(env, "REDIS_ENABLED", false)
+	config.Cache.Required = getEnvBool(env, "REDIS_REQUIRED", false)
+	if config.Cache.Required {
+		config.Cache.Enabled = true
+	}
+	config.Cache.Host = getEnvString(env, "REDIS_HOST", "127.0.0.1")
+	config.Cache.Port = getEnvInt(env, "REDIS_PORT", 6379)
+	config.Cache.Password = getEnvString(env, "REDIS_PASSWORD", "")
+	config.Cache.DB = getEnvInt(env, "REDIS_DB", 0)
+	config.Cache.TLSEnabled = getEnvBool(env, "REDIS_TLS_ENABLED", false)
+	config.Cache.KeyPrefix = getEnvString(env, "REDIS_KEY_PREFIX", "portage-engine")
+	config.Cache.RateLimitPerMinute = getEnvInt(env, "RATE_LIMIT_PER_MINUTE", 120)
+	config.Cache.RateLimitBurst = getEnvInt(env, "RATE_LIMIT_BURST", 30)
 
 	return config, nil
 }
@@ -513,14 +618,12 @@ func LoadBuilderConfig(path string) (*BuilderConfig, error) {
 	config := &BuilderConfig{
 		Port:               9090,
 		Workers:            2,
-		UseDocker:          true,
-		DockerImage:        "gentoo/stage3:latest",
+		NativeJobPolicy:    "single-use",
 		WorkDir:            "/var/tmp/portage-builds",
 		ArtifactDir:        "/var/tmp/portage-artifacts",
 		DataDir:            "/var/lib/portage-engine",
 		PersistenceEnabled: true,
 		RetentionDays:      7,
-		GPGEnabled:         false,
 		BinpkgFormat:       "gpkg",
 		StorageType:        "local",
 		StorageLocalDir:    "/var/binpkgs",
@@ -547,22 +650,18 @@ func LoadBuilderConfig(path string) (*BuilderConfig, error) {
 	config.Workers = getEnvInt(env, "BUILDER_WORKERS", config.Workers)
 	config.InstanceID = getEnvString(env, "INSTANCE_ID", "")
 	config.Architecture = getEnvString(env, "ARCHITECTURE", "")
-	config.UseDocker = getEnvBool(env, "USE_DOCKER", config.UseDocker)
-	config.ContainerRuntime = getEnvString(env, "CONTAINER_RUNTIME", "docker")
-	config.DockerImage = getEnvString(env, "DOCKER_IMAGE", config.DockerImage)
+	if getEnvBool(env, "USE_DOCKER", false) {
+		return nil, fmt.Errorf("USE_DOCKER=true is no longer supported; deploy the builder in a disposable native Gentoo root or VM")
+	}
+	config.NativeJobPolicy = getEnvString(env, "NATIVE_JOB_POLICY", config.NativeJobPolicy)
 	config.WorkDir = getEnvString(env, "BUILD_WORK_DIR", config.WorkDir)
 	config.ArtifactDir = getEnvString(env, "BUILD_ARTIFACT_DIR", config.ArtifactDir)
 	config.DataDir = getEnvString(env, "DATA_DIR", config.DataDir)
 	config.PersistenceEnabled = getEnvBool(env, "PERSISTENCE_ENABLED", config.PersistenceEnabled)
 	config.RetentionDays = getEnvInt(env, "RETENTION_DAYS", config.RetentionDays)
 
-	config.GPGEnabled = getEnvBool(env, "GPG_ENABLED", config.GPGEnabled)
-	config.GPGKeyID = getEnvString(env, "GPG_KEY_ID", "")
-	config.GPGKeyPath = getEnvString(env, "GPG_KEY_PATH", "")
-	config.GPGAutoSync = getEnvBool(env, "GPG_AUTO_SYNC", false)
-	config.GPGHome = getEnvString(env, "GPG_HOME", "/var/lib/portage-engine/gpg")
 	config.BinpkgFormat = getEnvString(env, "BINPKG_FORMAT", config.BinpkgFormat)
-	config.BuildFeatures = getEnvString(env, "BUILD_FEATURES", "-userpriv -usersandbox")
+	config.BuildFeatures = getEnvString(env, "BUILD_FEATURES", "")
 
 	config.StorageType = getEnvString(env, "STORAGE_TYPE", config.StorageType)
 	config.StorageLocalDir = getEnvString(env, "STORAGE_LOCAL_DIR", config.StorageLocalDir)

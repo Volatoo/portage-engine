@@ -76,11 +76,13 @@ Run 'portage-client <command> -h' for command-specific flags.
 
 Examples:
   # One-time: configure the consume path, then install natively.
-  sudo portage-client configure -server=http://binhost:8080
+  sudo portage-client configure -server=http://binhost:8080 \
+    -profile-id=pe/amd64/glibc/systemd/base-v1
   emerge --getbinpkg dev-lang/python
 
   # Ask the server to build a package with specific USE flags, and wait.
-  portage-client build -package=dev-lang/python -version=3.11 -use=ssl,threads -wait
+  portage-client build -package=dev-lang/python -version=3.11 \
+    -profile-id=pe/amd64/glibc/systemd/base-v1 -use=ssl,threads -wait
 
   # Check a job later.
   portage-client status -job=<job-id>
@@ -92,6 +94,7 @@ Examples:
 func runConfigure(args []string) {
 	fs := flag.NewFlagSet("configure", flag.ExitOnError)
 	server := fs.String("server", "http://localhost:8080", "Server URL (binhost base)")
+	profileID := fs.String("profile-id", "", "Catalog profile ID (default profile when omitted)")
 	name := fs.String("name", "portage-engine", "binrepo name")
 	priority := fs.Int("priority", 1, "binrepo priority")
 	out := fs.String("out", "/etc/portage/binrepos.conf/portage-engine.conf", "Output binrepos.conf path")
@@ -99,8 +102,12 @@ func runConfigure(args []string) {
 	_ = fs.Parse(args)
 
 	base := strings.TrimRight(*server, "/")
-	content := fmt.Sprintf("[%s]\npriority = %d\nsync-uri = %s/binpkgs\nverify-signature = %t\n",
-		*name, *priority, base, *verify)
+	selected, err := fetchBinhostProfile(&http.Client{Timeout: httpTimeout}, base, *profileID)
+	if err != nil {
+		log.Fatalf("failed to resolve binhost profile: %v", err)
+	}
+	content := fmt.Sprintf("[%s]\npriority = %d\nsync-uri = %s%s\nverify-signature = %t\n",
+		*name, *priority, base, selected.SyncPath, *verify)
 
 	// binrepos.conf lives under /etc/portage and must be world-readable so
 	// Portage (and emerge run as any user) can read the binhost definition.
@@ -112,9 +119,49 @@ func runConfigure(args []string) {
 	}
 
 	fmt.Printf("Wrote %s:\n\n%s\n", *out, content)
+	fmt.Printf("Selected profile %s (%s), binhost path %s\n", selected.ProfileID, selected.Arch, selected.BinhostPath)
 	fmt.Println("Next: enable binary fetching, then install as usual, e.g.:")
 	fmt.Println("  emerge --getbinpkg <pkg>")
 	fmt.Println("  # or add to /etc/portage/make.conf:  FEATURES=\"getbinpkg\"")
+}
+
+type binhostProfile struct {
+	ProfileID   string `json:"profile_id"`
+	Arch        string `json:"arch"`
+	BinhostPath string `json:"binhost_path"`
+	Default     bool   `json:"default"`
+	SyncPath    string `json:"sync_path"`
+}
+
+func fetchBinhostProfile(client *http.Client, base, profileID string) (*binhostProfile, error) {
+	response, err := client.Get(base + "/api/v1/binhosts")
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = response.Body.Close() }()
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
+		return nil, fmt.Errorf("server returned %s: %s", response.Status, strings.TrimSpace(string(body)))
+	}
+	var inventory struct {
+		Binhosts []binhostProfile `json:"binhosts"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&inventory); err != nil {
+		return nil, fmt.Errorf("decode binhost inventory: %w", err)
+	}
+	for i := range inventory.Binhosts {
+		item := &inventory.Binhosts[i]
+		if (profileID != "" && item.ProfileID == profileID) || (profileID == "" && item.Default) {
+			if !strings.HasPrefix(item.SyncPath, "/binpkgs/") || item.BinhostPath == "" {
+				return nil, fmt.Errorf("server returned an invalid binhost path for profile %q", item.ProfileID)
+			}
+			return item, nil
+		}
+	}
+	if profileID != "" {
+		return nil, fmt.Errorf("profile %q was not published by the server", profileID)
+	}
+	return nil, fmt.Errorf("server did not publish a default binhost profile")
 }
 
 func dirOf(path string) string {
@@ -137,7 +184,10 @@ func runBuild(args []string) {
 	configFile := fs.String("config", "", "Portage configuration file (JSON)")
 	portageDir := fs.String("portage-dir", "", "Read configuration from a Portage directory (e.g., /etc/portage)")
 	arch := fs.String("arch", "amd64", "Target architecture")
-	profile := fs.String("profile", "default/linux/amd64/23.0", "Portage profile")
+	profileID := fs.String("profile-id", "", "Server catalog profile ID")
+	profile := fs.String("profile", "", "Legacy Portage profile path (catalog compatibility mapping)")
+	repositoryIDs := fs.String("repositories", "", "Approved repository IDs (comma-separated)")
+	resourceClass := fs.String("resource-class", "", "Server catalog resource class")
 	userID := fs.String("user", "default", "User ID")
 	description := fs.String("desc", "", "Build description")
 	wait := fs.Bool("wait", false, "Wait for the build to complete")
@@ -149,14 +199,22 @@ func runBuild(args []string) {
 
 	config := loadPortageConfig(*portageDir, *configFile)
 	specs := createPackageSpecs(*packageName, *packageVersion, parseCSV(*useFlags), parseCSV(*keywords))
-	bundle := createConfigBundle(config, specs, *userID, *arch, *profile, *description)
+	bundle := createConfigBundle(config, specs, *userID, *arch, *profileID, *profile, *description)
 
 	base := strings.TrimRight(*server, "/")
 	client := &http.Client{Timeout: httpTimeout}
 
 	var failures int
 	for _, pkg := range bundle.Packages.Packages {
-		req := &builder.LocalBuildRequest{PackageName: pkg.Atom, Version: pkg.Version, ConfigBundle: bundle}
+		req := &builder.LocalBuildRequest{
+			PackageName:   pkg.Atom,
+			Version:       pkg.Version,
+			Arch:          *arch,
+			ProfileID:     *profileID,
+			RepositoryIDs: parseCSV(*repositoryIDs),
+			ResourceClass: *resourceClass,
+			ConfigBundle:  bundle,
+		}
 		jobID, err := postSubmit(client, base, *apiKey, req)
 		if err != nil {
 			log.Printf("build submit failed for %s: %v", pkg.Atom, err)
@@ -213,7 +271,8 @@ func runBundle(args []string) {
 	configFile := fs.String("config", "", "Portage configuration file (JSON)")
 	portageDir := fs.String("portage-dir", "", "Read configuration from a Portage directory")
 	arch := fs.String("arch", "amd64", "Target architecture")
-	profile := fs.String("profile", "default/linux/amd64/23.0", "Portage profile")
+	profileID := fs.String("profile-id", "", "Server catalog profile ID")
+	profile := fs.String("profile", "", "Legacy Portage profile path (catalog compatibility mapping)")
 	userID := fs.String("user", "default", "User ID")
 	description := fs.String("desc", "", "Build description")
 	out := fs.String("out", "", "Output bundle path (required)")
@@ -225,7 +284,7 @@ func runBundle(args []string) {
 
 	config := loadPortageConfig(*portageDir, *configFile)
 	specs := createPackageSpecs(*packageName, *packageVersion, parseCSV(*useFlags), parseCSV(*keywords))
-	bundle := createConfigBundle(config, specs, *userID, *arch, *profile, *description)
+	bundle := createConfigBundle(config, specs, *userID, *arch, *profileID, *profile, *description)
 
 	transfer := builder.NewConfigTransfer("")
 	if err := transfer.ExportBundle(bundle, *out); err != nil {
@@ -289,11 +348,12 @@ func createPackageSpecs(name, version string, useFlags, keywords []string) []bui
 	}}
 }
 
-func createConfigBundle(config *builder.PortageConfig, specs []builder.PackageSpec, userID, arch, profile, desc string) *builder.ConfigBundle {
+func createConfigBundle(config *builder.PortageConfig, specs []builder.PackageSpec, userID, arch, profileID, profile, desc string) *builder.ConfigBundle {
 	packages := &builder.BuildPackageSpec{Packages: specs}
 	metadata := builder.BundleMetadata{
 		UserID:      userID,
 		TargetArch:  arch,
+		ProfileID:   profileID,
 		Profile:     profile,
 		CreatedAt:   time.Now().Format(time.RFC3339),
 		Description: desc,

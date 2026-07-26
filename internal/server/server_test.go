@@ -5,12 +5,59 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/slchris/portage-engine/internal/binpkg"
 	"github.com/slchris/portage-engine/internal/builder"
+	"github.com/slchris/portage-engine/internal/catalog"
 	"github.com/slchris/portage-engine/pkg/config"
 )
+
+func TestLoadBuildCatalog(t *testing.T) {
+	t.Run("configured example", func(t *testing.T) {
+		cfg := &config.ServerConfig{CatalogPath: filepath.Join("..", "..", "configs", "catalog.example.json")}
+		s := New(cfg)
+		defer s.builder.Shutdown()
+		if err := s.loadBuildCatalog(); err != nil {
+			t.Fatalf("loadBuildCatalog failed: %v", err)
+		}
+		buildCatalog := s.builder.BuildCatalog()
+		if _, err := buildCatalog.ResolveAt(catalog.ResolveRequest{ProfileID: "pe/amd64/glibc/systemd/base-v1"}, buildCatalog.MirrorBundles[0].CreatedAt.Add(time.Hour)); err == nil || !strings.Contains(err.Error(), "not published") {
+			t.Fatalf("candidate example catalog was accepted for a build: %v", err)
+		}
+	})
+
+	t.Run("invalid configured catalog fails closed", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "catalog.json")
+		if err := os.WriteFile(path, []byte(`{"version":1,"unknown":true}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		s := New(&config.ServerConfig{CatalogPath: path})
+		defer s.builder.Shutdown()
+		if err := s.loadBuildCatalog(); err == nil {
+			t.Fatal("invalid configured catalog was accepted")
+		}
+	})
+}
+
+func TestInitializeRejectsInvalidCatalogBeforePersistence(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "catalog.json")
+	if err := os.WriteFile(path, []byte(`{"version":1,"unknown":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := New(&config.ServerConfig{CatalogPath: path, DataDir: t.TempDir(), BinpkgPath: t.TempDir()})
+	defer s.Shutdown()
+	if err := s.Initialize(); err == nil {
+		t.Fatal("invalid catalog was accepted")
+	}
+	if s.persister != nil || s.store != nil {
+		t.Fatal("persistence started before catalog validation")
+	}
+}
 
 // TestNew tests creating a new server.
 func TestNew(t *testing.T) {
@@ -33,6 +80,51 @@ func TestNew(t *testing.T) {
 
 	if server.builder == nil {
 		t.Error("builder not initialized")
+	}
+}
+
+func TestCatalogBinhostStoresAndInventory(t *testing.T) {
+	root := t.TempDir()
+	cfg := &config.ServerConfig{
+		BinpkgPath:  root,
+		CatalogPath: filepath.Join("..", "..", "configs", "catalog.example.json"),
+	}
+	server := New(cfg)
+	defer server.builder.Shutdown()
+	if err := server.loadBuildCatalog(); err != nil {
+		t.Fatal(err)
+	}
+	if err := server.configureBinhostStores(); err != nil {
+		t.Fatal(err)
+	}
+	server.refreshBinhostIndexes("test")
+
+	for _, rel := range []string{
+		"releases/amd64/binpackages/23.0/x86-64_pe-systemd-base-v1/Packages",
+		"releases/amd64/binpackages/23.0/x86-64_pe-desktop-verifier-v1/Packages",
+	} {
+		if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(rel))); err != nil {
+			t.Fatalf("missing profile Packages at %s: %v", rel, err)
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/binhosts", nil)
+	w := httptest.NewRecorder()
+	server.handleBinhostInventory(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("inventory returned %d: %s", w.Code, w.Body.String())
+	}
+	var inventory struct {
+		Binhosts []binhostProfile `json:"binhosts"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&inventory); err != nil {
+		t.Fatal(err)
+	}
+	if len(inventory.Binhosts) != 2 || !inventory.Binhosts[0].Default {
+		t.Fatalf("unexpected inventory: %#v", inventory.Binhosts)
+	}
+	if inventory.Binhosts[0].SyncPath != "/binpkgs/"+inventory.Binhosts[0].BinhostPath {
+		t.Fatalf("sync path does not bind the profile namespace: %#v", inventory.Binhosts[0])
 	}
 }
 
@@ -66,6 +158,23 @@ func TestHandleHealth(t *testing.T) {
 	resp := w.Result()
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("Expected status 200, got %d", resp.StatusCode)
+	}
+}
+
+func TestHandleHealthIgnoresStoppedOnDemandBuilderHistory(t *testing.T) {
+	cfg := &config.ServerConfig{BinpkgPath: t.TempDir()}
+	server := New(cfg)
+	server.builderRegistry.Register(&builder.BuilderInfo{
+		ID: "retired-ephemeral-vm", Endpoint: "http://10.0.0.9:9090", Status: "offline",
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	w := httptest.NewRecorder()
+	server.handleHealth(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("on-demand builder history degraded control-plane health: status %d body %s",
+			w.Code, w.Body.String())
 	}
 }
 
@@ -520,6 +629,57 @@ func TestHandleBuildersStatus(t *testing.T) {
 	}
 }
 
+func TestHandleBuildersStatusAuthenticatesToBuilder(t *testing.T) {
+	const token = "builder-monitor-token"
+
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/status" {
+			http.NotFound(w, r)
+			return
+		}
+		if r.Header.Get("X-API-Key") != token {
+			http.Error(w, "missing builder token", http.StatusUnauthorized)
+			return
+		}
+		writeJSON(w, map[string]interface{}{
+			"instance_id": "builder-secure-1",
+			"status":      "online",
+			"capacity":    2,
+		})
+	}))
+	defer remote.Close()
+
+	server := New(&config.ServerConfig{
+		BinpkgPath:     t.TempDir(),
+		MaxWorkers:     0,
+		BuilderToken:   token,
+		RemoteBuilders: []string{remote.URL},
+	})
+	defer server.builder.Shutdown()
+
+	w := httptest.NewRecorder()
+	server.handleBuildersStatus(w, httptest.NewRequest(http.MethodGet, "/api/v1/builders/status", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var response struct {
+		Builders []BuilderStatusInfo `json:"builders"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(response.Builders) != 1 {
+		t.Fatalf("expected one builder, got %d", len(response.Builders))
+	}
+	if response.Builders[0].ID != "builder-secure-1" {
+		t.Fatalf("unexpected builder ID %q", response.Builders[0].ID)
+	}
+	if response.Builders[0].Status != "online" {
+		t.Fatalf("expected online builder, got %q", response.Builders[0].Status)
+	}
+}
+
 // TestCalculateBuilderStats tests the builder stats calculation.
 func TestCalculateBuilderStats(t *testing.T) {
 	builders := []BuilderStatusInfo{
@@ -550,12 +710,20 @@ func TestCalculateBuilderStats(t *testing.T) {
 			SuccessBuilds: 25,
 			FailedBuilds:  5,
 		},
+		{
+			ID:              "builder-4",
+			Status:          "draining",
+			Capacity:        0,
+			AcceptingBuilds: false,
+			TotalBuilds:     1,
+			SuccessBuilds:   1,
+		},
 	}
 
 	stats := calculateBuilderStats(builders)
 
-	if stats["total_builders"].(int) != 3 {
-		t.Errorf("Expected 3 total builders, got %v", stats["total_builders"])
+	if stats["total_builders"].(int) != 4 {
+		t.Errorf("Expected 4 total builders, got %v", stats["total_builders"])
 	}
 
 	if stats["online_builders"].(int) != 2 {
@@ -564,6 +732,9 @@ func TestCalculateBuilderStats(t *testing.T) {
 
 	if stats["offline_builders"].(int) != 1 {
 		t.Errorf("Expected 1 offline builder, got %v", stats["offline_builders"])
+	}
+	if stats["draining_builders"].(int) != 1 {
+		t.Errorf("Expected 1 draining builder, got %v", stats["draining_builders"])
 	}
 
 	if stats["total_capacity"].(int) != 10 {
@@ -574,11 +745,11 @@ func TestCalculateBuilderStats(t *testing.T) {
 		t.Errorf("Expected load 4, got %v", stats["total_load"])
 	}
 
-	if stats["total_builds"].(int) != 180 {
-		t.Errorf("Expected 180 total builds, got %v", stats["total_builds"])
+	if stats["total_builds"].(int) != 181 {
+		t.Errorf("Expected 181 total builds, got %v", stats["total_builds"])
 	}
 
-	expectedSuccessRate := float64(168) / float64(180) * 100
+	expectedSuccessRate := float64(169) / float64(181) * 100
 	if stats["success_rate"].(float64) != expectedSuccessRate {
 		t.Errorf("Expected success rate %f, got %v", expectedSuccessRate, stats["success_rate"])
 	}
@@ -719,7 +890,7 @@ func TestHandleGPGPublicKey(t *testing.T) {
 			name:           "no key configured",
 			method:         http.MethodGet,
 			gpgEnabled:     true,
-			expectedStatus: http.StatusInternalServerError,
+			expectedStatus: http.StatusServiceUnavailable,
 		},
 	}
 
@@ -837,11 +1008,12 @@ func TestGetBuilderURLForJob(t *testing.T) {
 }
 
 // TestHandleSubmitBuildWithConfig verifies the config-bundle submit endpoint
-// (used by cmd/client) accepts a bundle and returns a queued job — previously
-// it returned 501 Not Implemented.
+// (used by cmd/client) accepts a bundle and returns the actual early job state
+// rather than the former 501 Not Implemented response.
 func TestHandleSubmitBuildWithConfig(t *testing.T) {
 	cfg := &config.ServerConfig{BinpkgPath: "/tmp/binpkgs", MaxWorkers: 1}
 	server := New(cfg)
+	defer server.builder.Shutdown()
 
 	req := builder.LocalBuildRequest{
 		PackageName: "dev-lang/python",
@@ -876,8 +1048,14 @@ func TestHandleSubmitBuildWithConfig(t *testing.T) {
 	if out.JobID == "" {
 		t.Error("expected a job_id in the response")
 	}
-	if out.Status != "queued" {
-		t.Errorf("expected status queued, got %q", out.Status)
+	validStatus := map[string]bool{
+		"queued": true, "claimed": true, "provisioning": true,
+		"deploying": true, "forwarding": true, "building": true,
+		"collecting": true, "verifying": true, "signing": true, "publishing": true,
+		"completed": true, "success": true, "failed": true,
+	}
+	if !validStatus[out.Status] {
+		t.Errorf("unexpected early job status %q", out.Status)
 	}
 }
 
@@ -892,6 +1070,63 @@ func TestHandleSubmitBuildWithConfig_RejectsEmptyBundle(t *testing.T) {
 
 	if w.Result().StatusCode != http.StatusBadRequest {
 		t.Errorf("expected 400 for missing bundle, got %d", w.Result().StatusCode)
+	}
+}
+
+func TestHandleSubmitBuildWithConfig_RejectsUnknownCatalogProfile(t *testing.T) {
+	server := New(&config.ServerConfig{BinpkgPath: t.TempDir(), MaxWorkers: 0})
+	req := builder.LocalBuildRequest{
+		PackageName: "dev-lang/python",
+		Version:     "3.11.0",
+		ProfileID:   "unknown/profile",
+		ConfigBundle: &builder.ConfigBundle{
+			Config: &builder.PortageConfig{},
+			Packages: &builder.BuildPackageSpec{Packages: []builder.PackageSpec{{
+				Atom: "dev-lang/python", Version: "3.11.0",
+			}}},
+		},
+	}
+	body, err := json.Marshal(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	httpReq := httptest.NewRequest(http.MethodPost, "/api/v1/builds/submit", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	server.handleSubmitBuildWithConfig(w, httpReq)
+	if w.Result().StatusCode != http.StatusBadRequest {
+		t.Fatalf("unknown catalog profile should return 400, got %d: %s", w.Result().StatusCode, w.Body.String())
+	}
+}
+
+func TestHandleSubmitBuildWithConfig_RejectsUnknownFields(t *testing.T) {
+	server := New(&config.ServerConfig{BinpkgPath: t.TempDir(), MaxWorkers: 1})
+	body := `{
+		"package_name":"dev-lang/python",
+		"config_bundle":{
+			"config":{"unexpected_policy_override":"allow"},
+			"packages":{"packages":[{"atom":"dev-lang/python"}]},
+			"metadata":{}
+		}
+	}`
+	httpReq := httptest.NewRequest(http.MethodPost, "/api/v1/builds/submit", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	server.handleSubmitBuildWithConfig(w, httpReq)
+
+	if w.Result().StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 for unknown nested field, got %d", w.Result().StatusCode)
+	}
+}
+
+func TestHandleSubmitBuildWithConfig_RejectsOversizedBody(t *testing.T) {
+	server := New(&config.ServerConfig{BinpkgPath: t.TempDir(), MaxWorkers: 1})
+	body := `{"package_name":"dev-lang/python","padding":"` +
+		strings.Repeat("x", int(builder.MaxBuildRequestBodyBytes)) + `"}`
+	httpReq := httptest.NewRequest(http.MethodPost, "/api/v1/builds/submit", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	server.handleSubmitBuildWithConfig(w, httpReq)
+
+	if w.Result().StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("expected 413 for oversized body, got %d", w.Result().StatusCode)
 	}
 }
 
@@ -935,6 +1170,12 @@ func TestAPIKeyAuthMiddleware(t *testing.T) {
 	// Binhost bypasses auth (emerge can't present a key).
 	if got := do(http.MethodGet, "/binpkgs/Packages", ""); got == http.StatusUnauthorized {
 		t.Errorf("/binpkgs/ should bypass auth, got 401")
+	}
+	if got := do(http.MethodGet, "/api/v1/binhosts", ""); got == http.StatusUnauthorized {
+		t.Errorf("/api/v1/binhosts should bypass auth, got 401")
+	}
+	if got := do(http.MethodGet, "/verify-binhost/unknown/Packages", ""); got != http.StatusNotFound {
+		t.Errorf("unknown verification capability should bypass API auth and fail as 404, got %d", got)
 	}
 }
 

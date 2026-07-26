@@ -2,6 +2,8 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"sort"
 	"strconv"
@@ -30,13 +32,26 @@ func (s *Server) handlePackageQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Query binpkg store
+	store, profile, ok := s.binhostStoreForProfile(req.ProfileID)
+	if !ok {
+		s.metrics.IncHTTPRequestErrors()
+		http.Error(w, "Unknown profile_id", http.StatusBadRequest)
+		return
+	}
+	if req.Arch != "" && profile.Arch != "" && req.Arch != profile.Arch {
+		s.metrics.IncHTTPRequestErrors()
+		http.Error(w, "Requested arch does not match profile", http.StatusBadRequest)
+		return
+	}
+
+	// Query only the selected profile's PKGDIR. Cross-profile fallback could
+	// silently install ABI-incompatible packages, so it is deliberately absent.
 	s.metrics.IncStorageReads()
-	pkg, found := s.binpkgStore.Query(&req)
+	pkg, found := store.Query(&req)
 
 	response := binpkg.QueryResponse{
-		Found:   found,
-		Package: pkg,
+		Found: found, Package: pkg, ProfileID: profile.ID,
+		BinhostPath: profile.BinhostPath,
 	}
 
 	s.metrics.RecordHTTPLatency("/api/v1/packages/query", time.Since(start))
@@ -57,9 +72,9 @@ func (s *Server) handleBuildRequest(w http.ResponseWriter, r *http.Request) {
 
 	// Support both formats: {"package_name":"cat/pkg"} and {"category":"cat","package":"pkg"}
 	var rawReq map[string]interface{}
-	if err := json.NewDecoder(r.Body).Decode(&rawReq); err != nil {
+	if err := decodeBuildJSON(w, r, &rawReq, false); err != nil {
 		s.metrics.IncHTTPRequestErrors()
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		writeBuildDecodeError(w, err)
 		return
 	}
 
@@ -84,9 +99,23 @@ func (s *Server) handleBuildRequest(w http.ResponseWriter, r *http.Request) {
 	if req.Arch == "" {
 		req.Arch = "amd64"
 	}
+	req.IdempotencyKey = r.Header.Get("Idempotency-Key")
 
 	if provider, ok := rawReq["cloud_provider"].(string); ok {
 		req.CloudProvider = provider
+	}
+	if profileID, ok := rawReq["profile_id"].(string); ok {
+		req.ProfileID = profileID
+	}
+	if resourceClass, ok := rawReq["resource_class"].(string); ok {
+		req.ResourceClass = resourceClass
+	}
+	if repositoryIDs, ok := rawReq["repository_ids"].([]interface{}); ok {
+		for _, value := range repositoryIDs {
+			if id, ok := value.(string); ok {
+				req.RepositoryIDs = append(req.RepositoryIDs, id)
+			}
+		}
 	}
 
 	if useFlags, ok := rawReq["use_flags"].([]interface{}); ok {
@@ -110,7 +139,16 @@ func (s *Server) handleBuildRequest(w http.ResponseWriter, r *http.Request) {
 	jobID, err := s.builder.SubmitBuild(&req)
 	if err != nil {
 		s.metrics.IncHTTPRequestErrors()
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		status := http.StatusInternalServerError
+		switch {
+		case builder.IsIdempotencyConflict(err):
+			status = http.StatusConflict
+		case builder.IsRequestError(err):
+			status = http.StatusBadRequest
+		case builder.IsLedgerError(err):
+			status = http.StatusServiceUnavailable
+		}
+		http.Error(w, err.Error(), status)
 		return
 	}
 
@@ -119,6 +157,9 @@ func (s *Server) handleBuildRequest(w http.ResponseWriter, r *http.Request) {
 	response := builder.BuildResponse{
 		JobID:  jobID,
 		Status: "queued",
+	}
+	if status, statusErr := s.builder.GetStatus(jobID); statusErr == nil {
+		response.Status = status.Status
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -161,8 +202,8 @@ func (s *Server) handleSubmitBuildWithConfig(w http.ResponseWriter, r *http.Requ
 	}
 
 	var req builder.LocalBuildRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
+	if err := decodeBuildJSON(w, r, &req, true); err != nil {
+		writeBuildDecodeError(w, err)
 		return
 	}
 
@@ -180,10 +221,14 @@ func (s *Server) handleSubmitBuildWithConfig(w http.ResponseWriter, r *http.Requ
 	// Translate to a Manager BuildRequest carrying the full bundle, which is
 	// forwarded verbatim to a remote builder so the exact configuration is used.
 	buildReq := &builder.BuildRequest{
-		PackageName:  req.PackageName,
-		Version:      req.Version,
-		Arch:         req.Arch,
-		ConfigBundle: req.ConfigBundle,
+		PackageName:    req.PackageName,
+		Version:        req.Version,
+		Arch:           req.Arch,
+		ProfileID:      req.ProfileID,
+		RepositoryIDs:  req.RepositoryIDs,
+		ResourceClass:  req.ResourceClass,
+		ConfigBundle:   req.ConfigBundle,
+		IdempotencyKey: r.Header.Get("Idempotency-Key"),
 	}
 	if buildReq.PackageName == "" && len(req.ConfigBundle.Packages.Packages) > 0 {
 		buildReq.PackageName = req.ConfigBundle.Packages.Packages[0].Atom
@@ -193,13 +238,53 @@ func (s *Server) handleSubmitBuildWithConfig(w http.ResponseWriter, r *http.Requ
 	jobID, err := s.builder.SubmitBuild(buildReq)
 	if err != nil {
 		s.metrics.IncHTTPRequestErrors()
-		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		status := http.StatusServiceUnavailable
+		if builder.IsIdempotencyConflict(err) {
+			status = http.StatusConflict
+		} else if builder.IsRequestError(err) {
+			status = http.StatusBadRequest
+		}
+		http.Error(w, err.Error(), status)
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
-	_ = json.NewEncoder(w).Encode(builder.BuildResponse{JobID: jobID, Status: "queued"})
+	status := "queued"
+	if snapshot, statusErr := s.builder.GetStatus(jobID); statusErr == nil {
+		status = snapshot.Status
+	}
+	_ = json.NewEncoder(w).Encode(builder.BuildResponse{JobID: jobID, Status: status})
+}
+
+// decodeBuildJSON applies the public request-size limit before decoding. The
+// typed ConfigBundle endpoint additionally rejects unknown fields so clients
+// cannot believe a misspelled security-relevant field was applied.
+func decodeBuildJSON(w http.ResponseWriter, r *http.Request, dst any, strict bool) error {
+	r.Body = http.MaxBytesReader(w, r.Body, builder.MaxBuildRequestBodyBytes)
+	decoder := json.NewDecoder(r.Body)
+	if strict {
+		decoder.DisallowUnknownFields()
+	}
+	if err := decoder.Decode(dst); err != nil {
+		return err
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		if err == nil {
+			return errors.New("request body must contain one JSON value")
+		}
+		return err
+	}
+	return nil
+}
+
+func writeBuildDecodeError(w http.ResponseWriter, err error) {
+	var maxBytesErr *http.MaxBytesError
+	if errors.As(err, &maxBytesErr) {
+		http.Error(w, "Request body too large", http.StatusRequestEntityTooLarge)
+		return
+	}
+	http.Error(w, "Invalid request body", http.StatusBadRequest)
 }
 
 // handleBuildsList returns all build jobs.
@@ -269,12 +354,74 @@ func (s *Server) handleBuildLogs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	response := map[string]interface{}{
-		"job_id": jobID,
-		"logs":   logs,
+		"job_id":       jobID,
+		"logs":         logs,
+		"generated_at": time.Now().UTC(),
+		"bytes":        len(logs),
+		"truncated":    strings.Contains(logs, "[... log truncated: middle omitted ...]"),
+		"stages":       summarizeBuildLogStages(logs),
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(response)
+}
+
+type buildLogStageSummary struct {
+	ID          string     `json:"id"`
+	LineCount   int        `json:"line_count"`
+	StartedAt   *time.Time `json:"started_at,omitempty"`
+	UpdatedAt   *time.Time `json:"updated_at,omitempty"`
+	LastMessage string     `json:"last_message,omitempty"`
+}
+
+var buildLogStages = []string{"queued", "provision", "deploy", "build", "collect", "verify", "sign", "publish", "cleanup"}
+
+// summarizeBuildLogStages turns the bounded raw log into a small, stable
+// structure for the dashboard. The raw log remains available for diagnostics;
+// this summary lets the UI show stage counts and timing without guessing from
+// a truncated browser-side string.
+func summarizeBuildLogStages(logs string) []buildLogStageSummary {
+	summaries := make([]buildLogStageSummary, len(buildLogStages))
+	index := make(map[string]int, len(buildLogStages))
+	for i, id := range buildLogStages {
+		summaries[i].ID = id
+		index[id] = i
+	}
+	for _, line := range strings.Split(logs, "\n") {
+		stage := ""
+		for _, id := range buildLogStages {
+			if strings.Contains(line, "["+id+"]") {
+				stage = id
+				break
+			}
+		}
+		if stage == "" {
+			continue
+		}
+		summary := &summaries[index[stage]]
+		summary.LineCount++
+		if fields := strings.Fields(line); len(fields) > 0 {
+			if timestamp, err := time.Parse(time.RFC3339Nano, fields[0]); err == nil {
+				if summary.StartedAt == nil {
+					startedAt := timestamp
+					summary.StartedAt = &startedAt
+				}
+				updatedAt := timestamp
+				summary.UpdatedAt = &updatedAt
+			}
+		}
+		summary.LastMessage = truncateLogSummary(line, 320)
+	}
+	return summaries
+}
+
+func truncateLogSummary(value string, limit int) string {
+	value = strings.TrimSpace(value)
+	runes := []rune(value)
+	if len(runes) <= limit {
+		return value
+	}
+	return string(runes[:limit]) + "…"
 }
 
 // handleSchedulerStatus returns scheduler status with task assignments.
@@ -306,6 +453,47 @@ func (s *Server) handleBuildDelete(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]string{"deleted": jobID})
+}
+
+func (s *Server) handleBuildCancel(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	jobID := r.URL.Query().Get("job_id")
+	if jobID == "" {
+		http.Error(w, "Missing job_id parameter", http.StatusBadRequest)
+		return
+	}
+	reason := strings.TrimSpace(r.URL.Query().Get("reason"))
+	if len(reason) > 512 {
+		http.Error(w, "cancel reason is too long", http.StatusBadRequest)
+		return
+	}
+	if err := s.builder.CancelJob(jobID, reason); err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{"job_id": jobID, "status": "canceled"})
+}
+
+func (s *Server) handleBuildRetry(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	jobID := r.URL.Query().Get("job_id")
+	if jobID == "" {
+		http.Error(w, "Missing job_id parameter", http.StatusBadRequest)
+		return
+	}
+	if err := s.builder.RetryJob(jobID); err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{"job_id": jobID, "status": "queued"})
 }
 
 // handleBuildsCleanupFailed removes every failed job record.

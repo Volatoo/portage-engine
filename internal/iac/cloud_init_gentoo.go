@@ -7,15 +7,12 @@ import (
 
 // cloud_init_gentoo.go generates the deployment script for a NATIVE Gentoo VM
 // (cloned from the Gentoo cloud-init template) — no Docker. It configures
-// make.conf for the build (mirror binhost + gpkg signing), sets up the signing
-// trust store with the getuto + check-trustdb + chown-nobody recipe that makes
-// portage's post-sign self-verification pass on a real VM (it cannot inside a
-// container), then installs and starts the builder in native mode.
+// make.conf for the build and installs the builder in native mode. The node is
+// an unsigned trust domain and never receives the binhost signing key.
 
 // GenerateGentooNativeScript returns the bootstrap script for a native Gentoo
-// build node. The builder binary and (optionally) the signing secret key are
-// staged by deployBuilder at /opt/portage-builder/portage-builder and
-// /tmp/pe-gpg-secret.asc before this runs.
+// build node. The builder binary is either staged by deployBuilder or fetched
+// from BuilderBinaryURL with a required SHA-256 check.
 func GenerateGentooNativeScript(config *CloudInitConfig) string {
 	arch := config.Architecture
 	if arch == "" {
@@ -32,6 +29,19 @@ log "Configuring native Gentoo build node..."
 mkdir -p /etc/portage-engine /var/log/portage-engine /var/tmp/portage-builds /var/tmp/portage-artifacts /var/lib/portage-engine
 `)
 
+	if config.BuilderBinaryURL != "" {
+		fmt.Fprintf(&sb, `
+log "Downloading builder binary..."
+mkdir -p /opt/portage-builder
+builder_tmp=$(mktemp /tmp/portage-builder.XXXXXX)
+curl -fsSL -o "$builder_tmp" %s
+printf '%%s  %%s\n' %s "$builder_tmp" | sha256sum -c -
+install -m 0755 "$builder_tmp" /opt/portage-builder/portage-builder
+rm -f "$builder_tmp"
+log "Builder binary downloaded and verified"
+`, shellSingleQuote(config.BuilderBinaryURL), shellSingleQuote(config.BuilderBinarySHA256))
+	}
+
 	// make.conf: mirror + binhost + build FEATURES. The template already sets
 	// GENTOO_MIRRORS/profile; we append build-farm settings idempotently.
 	binhost := ""
@@ -47,6 +57,9 @@ cat >> /etc/portage/make.conf <<'MAKECONF'
 # PE-BUILD-BEGIN
 FEATURES="${FEATURES} buildpkg"
 `)
+	if config.PortageMirror != "" {
+		fmt.Fprintf(&sb, "GENTOO_MIRRORS=%s\n", heredocEscape(config.PortageMirror))
+	}
 	if binhost != "" {
 		fmt.Fprintf(&sb, "PORTAGE_BINHOST=%s\n", heredocEscape(binhost))
 	}
@@ -54,48 +67,27 @@ FEATURES="${FEATURES} buildpkg"
 		sb.WriteString(heredocEscape(config.MakeConfExtra) + "\n")
 	}
 	sb.WriteString("# PE-BUILD-END\nMAKECONF\n")
-
-	// Signing setup (native VM): the whole point of moving off containers.
-	if config.GPGKeyID != "" {
+	if config.PortageSyncURI != "" {
+		syncType := "rsync"
+		if strings.HasPrefix(config.PortageSyncURI, "http://") ||
+			strings.HasPrefix(config.PortageSyncURI, "https://") ||
+			strings.HasPrefix(config.PortageSyncURI, "git://") {
+			syncType = "git"
+		}
 		fmt.Fprintf(&sb, `
-log "Setting up binpkg signing (key %s)..."
-export GNUPGHOME=/root/.gnupg
-mkdir -p "$GNUPGHOME" && chmod 700 "$GNUPGHOME"
-if [ -f /tmp/pe-gpg-secret.asc ]; then
-    gpg --batch --yes --import /tmp/pe-gpg-secret.asc
-    gpg --export --armor %s > /tmp/pe-pub.asc
-    rm -f /tmp/pe-gpg-secret.asc
-fi
-# Enable in-emerge signing in make.conf.
-sed -i '/# PE-SIGN-BEGIN/,/# PE-SIGN-END/d' /etc/portage/make.conf 2>/dev/null || true
-cat >> /etc/portage/make.conf <<'SIGNCONF'
-# PE-SIGN-BEGIN
-BINPKG_FORMAT="gpkg"
-FEATURES="${FEATURES} binpkg-signing gpg-keepalive"
-BINPKG_GPG_SIGNING_GPG_HOME="/root/.gnupg"
-BINPKG_GPG_SIGNING_KEY="%s"
-# PE-SIGN-END
-SIGNCONF
-# Build the verify trust store. getuto seeds /etc/portage/gnupg with the
-# Gentoo release keys; we add our signing key with ultimate ownertrust, then
-# --check-trustdb so the ultimate validity is precomputed (portage verifies
-# with --no-auto-check-trustdb and would otherwise see the key as untrusted).
-getuto 2>/dev/null || true
-if [ -f /tmp/pe-pub.asc ]; then
-    gpg --homedir /etc/portage/gnupg --batch --yes --import /tmp/pe-pub.asc 2>/dev/null || true
-    gpg --homedir /etc/portage/gnupg --with-colons --list-keys 2>/dev/null | awk -F: '/^fpr:/{print $10":6:"}' | gpg --homedir /etc/portage/gnupg --batch --yes --import-ownertrust 2>/dev/null || true
-    gpg --homedir /etc/portage/gnupg --check-trustdb 2>/dev/null || true
-    rm -f /tmp/pe-pub.asc
-fi
-# Post-sign verification runs as the 'nobody' user (GPG_VERIFY_USER_DROP): the
-# store must be owned by nobody, mode 700, or gpg refuses it.
-chown -R nobody:nobody /etc/portage/gnupg
-find /etc/portage/gnupg -type d -exec chmod 700 {} \; 2>/dev/null || true
-log "Signing store ready"
-`, config.GPGKeyID, config.GPGKeyID, config.GPGKeyID)
+mkdir -p /etc/portage/repos.conf
+cat > /etc/portage/repos.conf/portage-engine.conf <<'REPOSCONF'
+[DEFAULT]
+main-repo = gentoo
+[gentoo]
+location = /var/db/repos/gentoo
+sync-type = %s
+sync-uri = %s
+REPOSCONF
+`, syncType, heredocEscape(config.PortageSyncURI))
 	}
 
-	// builder.conf (native mode: USE_DOCKER=false, host portage paths).
+	// builder.conf (native-only mode and native Portage paths).
 	tokenLine := ""
 	if config.BuilderToken != "" {
 		tokenLine = fmt.Sprintf("BUILDER_TOKEN=%s\n", heredocEscape(config.BuilderToken))
@@ -107,7 +99,7 @@ cat > /etc/portage-engine/builder.conf <<BUILDERCONF
 BUILDER_PORT=%d
 INSTANCE_ID=${INSTANCE_ID_VAL}
 ARCHITECTURE=%s
-USE_DOCKER=false
+NATIVE_JOB_POLICY=single-use
 BUILD_WORK_DIR=/var/tmp/portage-builds
 BUILD_ARTIFACT_DIR=/var/tmp/portage-artifacts
 DATA_DIR=/var/lib/portage-engine

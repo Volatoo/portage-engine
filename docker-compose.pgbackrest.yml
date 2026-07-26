@@ -1,0 +1,31 @@
+# Production/PITR overlay. PORTAGE_PGBACKREST_REPO may point at an existing
+# NAS-mounted directory (for example an NFS mount backed by 10.31.0.2).
+services:
+  postgres:
+    build:
+      context: .
+      dockerfile: deploy/postgres/Dockerfile.pgbackrest
+    image: portage-engine/postgres-pgbackrest:18.4-2.59.0
+    environment:
+      PGBACKREST_REPO1_CIPHER_PASS: ${PORTAGE_PGBACKREST_CIPHER_PASS:?set PORTAGE_PGBACKREST_CIPHER_PASS}
+      PGUSER: ${PORTAGE_POSTGRES_USER:-portage}
+      PGDATABASE: ${PORTAGE_POSTGRES_DB:-portage_engine}
+    command:
+      - postgres
+      - -c
+      - archive_mode=on
+      - -c
+      - archive_command=pgbackrest --stanza=portage-engine archive-push %p
+      - -c
+      - archive_timeout=60s
+      - -c
+      - wal_level=replica
+      - -c
+      - max_wal_senders=5
+    volumes:
+      - ./deploy/postgres/pgbackrest.conf:/etc/pgbackrest/pgbackrest.conf:ro
+      - ${PORTAGE_PGBACKREST_REPO:-./backups/pgbackrest}:/var/lib/pgbackrest
+      - pgbackrest-spool:/var/spool/pgbackrest
+
+volumes:
+  pgbackrest-spool:

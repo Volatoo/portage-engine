@@ -1,0 +1,251 @@
+{
+  "version": 1,
+  "bundle_id": "mirror/candidate-2026-07-22",
+  "strict_offline": true,
+  "allowed_hosts": [
+    "pve.example.internal",
+    "git-mirror.example.internal",
+    "distfiles.example.internal",
+    "binpkgs.example.internal"
+  ],
+  "advisory_cutoff": "2026-07-22T00:00:00Z",
+  "objects": [
+    {
+      "id": "service/portage-builder/linux-amd64",
+      "kind": "service-binary",
+      "path": "services/portage-builder-linux-amd64",
+      "platform": "linux-amd64",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "size": 0,
+      "executable": true
+    },
+    {
+      "id": "tool/portage-image-factory/v1/linux-amd64",
+      "kind": "service-binary",
+      "path": "tools/portage-image-factory-linux-amd64",
+      "platform": "linux-amd64",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "size": 0,
+      "executable": true,
+      "required_for": ["base-systemd", "desktop-verifier"]
+    },
+    {
+      "id": "packer/1.15.4/linux-amd64",
+      "kind": "packer",
+      "path": "packer/bin/packer",
+      "platform": "linux-amd64",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "size": 0,
+      "executable": true
+    },
+    {
+      "id": "packer-plugin/proxmox/1.2.3/linux-amd64",
+      "kind": "packer-plugin",
+      "path": "packer/plugins/github.com/hashicorp/proxmox/packer-plugin-proxmox_v1.2.3_x5.0_linux_amd64",
+      "platform": "linux-amd64",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "size": 0,
+      "executable": true
+    },
+    {
+      "id": "packer-plugin-checksum/proxmox/1.2.3/linux-amd64",
+      "kind": "plugin-checksum",
+      "path": "packer/plugins/github.com/hashicorp/proxmox/packer-plugin-proxmox_v1.2.3_x5.0_linux_amd64_SHA256SUM",
+      "platform": "linux-amd64",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "size": 0
+    },
+    {
+      "id": "terraform/1.15.6/linux-amd64",
+      "kind": "terraform",
+      "path": "terraform/bin/terraform",
+      "platform": "linux-amd64",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "size": 0,
+      "executable": true
+    },
+    {
+      "id": "terraform-provider/telmate-proxmox/3.0.2-rc04/linux-amd64",
+      "kind": "terraform-provider",
+      "path": "terraform/providers/registry.terraform.io/telmate/proxmox/terraform-provider-proxmox_3.0.2-rc04_linux_amd64.zip",
+      "platform": "linux-amd64",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "size": 0
+    },
+    {
+      "id": "terraform/provider-lock",
+      "kind": "terraform-lock",
+      "path": "terraform/.terraform.lock.hcl",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "size": 0
+    },
+    {
+      "id": "terraform/cli-config",
+      "kind": "terraform-lock",
+      "path": "terraform/terraform.rc",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "size": 0
+    },
+    {
+      "id": "package-sets/image-v1",
+      "kind": "package-set-catalog",
+      "path": "package-sets/catalog.json",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "size": 0
+    },
+    {
+      "id": "script/image-factory/run-offline-v1",
+      "kind": "script",
+      "path": "factory/run-offline.sh",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "size": 0,
+      "executable": true,
+      "required_for": ["base-systemd", "desktop-verifier"]
+    },
+    {
+      "id": "script/image-factory/smoke-offline-v1",
+      "kind": "script",
+      "path": "factory/smoke-offline.sh",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "size": 0,
+      "executable": true,
+      "required_for": ["base-systemd", "desktop-verifier"]
+    },
+    {
+      "id": "script/image-factory/packer-template-v1",
+      "kind": "script",
+      "path": "factory/packer/template.pkr.hcl",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "size": 0,
+      "required_for": ["base-systemd", "desktop-verifier"]
+    },
+    {
+      "id": "script/image-factory/provision-v1",
+      "kind": "script",
+      "path": "factory/packer/scripts/provision.sh",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "size": 0,
+      "executable": true,
+      "required_for": ["base-systemd", "desktop-verifier"]
+    },
+    {
+      "id": "script/image-factory/sanitize-v1",
+      "kind": "script",
+      "path": "factory/packer/scripts/sanitize-and-gate.sh",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "size": 0,
+      "executable": true,
+      "required_for": ["base-systemd", "desktop-verifier"]
+    },
+    {
+      "id": "script/image-factory/hydrate-distfiles-v1",
+      "kind": "script",
+      "path": "factory/packer/scripts/hydrate-distfiles.py",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "size": 0,
+      "executable": true,
+      "required_for": ["base-systemd", "desktop-verifier"]
+    },
+    {
+      "id": "script/image-factory/verify-profile-v1",
+      "kind": "script",
+      "path": "factory/catalyst/verify-profile.py",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "size": 0,
+      "executable": true,
+      "required_for": ["base-systemd", "desktop-verifier"]
+    },
+    {
+      "id": "script/desktop/guest-agent-v1",
+      "kind": "script",
+      "path": "factory/desktop/guest-agent.py",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "size": 0,
+      "executable": true,
+      "required_for": ["base-systemd", "desktop-verifier"]
+    },
+    {
+      "id": "build-plan/base-systemd-g1",
+      "kind": "build-plan",
+      "path": "plans/base-systemd.build.json",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "size": 0,
+      "required_for": ["base-systemd"]
+    },
+    {
+      "id": "build-plan/desktop-verifier-g1",
+      "kind": "build-plan",
+      "path": "plans/desktop-verifier.build.json",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "size": 0,
+      "required_for": ["desktop-verifier"]
+    },
+    {
+      "id": "image-manifest/base-systemd-g1",
+      "kind": "image-manifest",
+      "path": "images/base-systemd.image-manifest.json",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "size": 0,
+      "required_for": ["desktop-verifier"]
+    },
+    {
+      "id": "pbs-source/portage-engine-vm-9200-20260722T154432Z",
+      "kind": "pbs-source-attestation",
+      "path": "seeds/pbs-vm-9200-20260722T154432Z.attestation.json",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "size": 0,
+      "required_for": ["base-systemd"]
+    },
+    {
+      "id": "repository/gentoo-1111111",
+      "kind": "repository-snapshot",
+      "path": "repositories/gentoo-1111111111111111111111111111111111111111.bundle",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "size": 0
+    },
+    {
+      "id": "repository/pe-profiles-2222222",
+      "kind": "repository-snapshot",
+      "path": "repositories/pe-profiles-2222222222222222222222222222222222222222.bundle",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "size": 0
+    },
+    {
+      "id": "release-key/gentoo-developer",
+      "kind": "release-key",
+      "path": "keys/gentoo-developer.asc",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "size": 0
+    },
+    {
+      "id": "ca/internal-mirror",
+      "kind": "ca-bundle",
+      "path": "keys/internal-mirror.crt",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "size": 0
+    },
+    {
+      "id": "release-key/pe-profiles",
+      "kind": "release-key",
+      "path": "keys/pe-profiles-release.asc",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "size": 0
+    },
+    {
+      "id": "distfiles/base-systemd-manifest",
+      "kind": "distfile-manifest",
+      "path": "distfiles/base-systemd.MANIFEST.json",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "size": 0,
+      "required_for": ["base-systemd"]
+    },
+    {
+      "id": "distfiles/desktop-verifier-manifest",
+      "kind": "distfile-manifest",
+      "path": "distfiles/desktop-verifier.MANIFEST.json",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "size": 0,
+      "required_for": ["desktop-verifier"]
+    }
+  ]
+}

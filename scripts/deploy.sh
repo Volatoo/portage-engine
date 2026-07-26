@@ -188,8 +188,7 @@ EOF
 '"
 
     # Builder service
-    # NOTE: PrivateTmp=false is required for builder because Docker containers
-    # write to /var/tmp and the service needs to access those files directly
+    # Native Portage writes job workspaces and PKGDIR under /var/tmp.
     ssh "${REMOTE_USER}@${REMOTE_HOST}" "sudo bash -c 'cat > /etc/systemd/system/portage-builder.service << \"EOF\"
 [Unit]
 Description=Portage Engine Builder

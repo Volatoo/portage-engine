@@ -2,8 +2,71 @@ package config
 
 import (
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 )
+
+func TestLoadServerConfigImageFactoryStatusPath(t *testing.T) {
+	t.Setenv("IMAGE_FACTORY_STATUS_PATH", "/run/portage-engine/image-factory-status.json")
+	cfg, err := LoadServerConfig(filepath.Join(t.TempDir(), "missing.conf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ImageFactoryStatusPath != "/run/portage-engine/image-factory-status.json" {
+		t.Fatalf("ImageFactoryStatusPath = %q", cfg.ImageFactoryStatusPath)
+	}
+}
+
+func TestLoadServerDatabaseConfig(t *testing.T) {
+	t.Setenv("DATABASE_REQUIRED", "true")
+	t.Setenv("PGHOST", "postgres.internal")
+	t.Setenv("PGPORT", "5544")
+	t.Setenv("PGDATABASE", "portage_test")
+	t.Setenv("PGUSER", "portage_app")
+	t.Setenv("PGPASSWORD", "p@ss:/?#[]")
+	t.Setenv("PGSSLMODE", "require")
+	t.Setenv("DATABASE_MAX_CONNS", "24")
+	t.Setenv("DATABASE_MIN_CONNS", "3")
+
+	cfg, err := LoadServerConfig(filepath.Join(t.TempDir(), "missing.conf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Database.Enabled || !cfg.Database.Required {
+		t.Fatalf("required database must imply enabled: %+v", cfg.Database)
+	}
+	if cfg.Database.Host != "postgres.internal" || cfg.Database.Port != 5544 {
+		t.Fatalf("unexpected database address: %+v", cfg.Database)
+	}
+	if cfg.Database.Password != "p@ss:/?#[]" || cfg.Database.SSLMode != "require" {
+		t.Fatal("database password or SSL mode was not preserved")
+	}
+	if cfg.Database.MaxConns != 24 || cfg.Database.MinConns != 3 {
+		t.Fatalf("unexpected pool limits: %+v", cfg.Database)
+	}
+}
+
+func TestLoadServerRedisConfig(t *testing.T) {
+	t.Setenv("REDIS_REQUIRED", "true")
+	t.Setenv("REDIS_HOST", "redis.internal")
+	t.Setenv("REDIS_PORT", "6380")
+	t.Setenv("REDIS_PASSWORD", "redis-secret")
+	t.Setenv("REDIS_TLS_ENABLED", "true")
+	t.Setenv("REDIS_KEY_PREFIX", "pe-test")
+	t.Setenv("RATE_LIMIT_PER_MINUTE", "90")
+	t.Setenv("RATE_LIMIT_BURST", "12")
+	cfg, err := LoadServerConfig(filepath.Join(t.TempDir(), "missing.conf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Cache.Enabled || !cfg.Cache.Required || cfg.Cache.Host != "redis.internal" ||
+		cfg.Cache.Port != 6380 || cfg.Cache.Password != "redis-secret" ||
+		!cfg.Cache.TLSEnabled || cfg.Cache.KeyPrefix != "pe-test" ||
+		cfg.Cache.RateLimitPerMinute != 90 || cfg.Cache.RateLimitBurst != 12 {
+		t.Fatalf("unexpected Redis config: %+v", cfg.Cache)
+	}
+}
 
 // TestLoadServerConfig tests loading server configuration.
 func TestLoadServerConfig(t *testing.T) {
@@ -19,6 +82,7 @@ GPG_ENABLED=true
 GPG_KEY_ID=ABCD1234
 CLOUD_DEFAULT_PROVIDER=aws
 REMOTE_BUILDERS=http://builder1:9090,http://builder2:9090
+CATALOG_PATH=/etc/portage-engine/catalog.json
 `
 
 	if err := os.WriteFile(tmpFile, []byte(configData), 0600); err != nil {
@@ -74,6 +138,9 @@ REMOTE_BUILDERS=http://builder1:9090,http://builder2:9090
 	if cfg.RemoteBuilders[0] != "http://builder1:9090" {
 		t.Errorf("Expected first builder=http://builder1:9090, got %s", cfg.RemoteBuilders[0])
 	}
+	if cfg.CatalogPath != "/etc/portage-engine/catalog.json" {
+		t.Errorf("Expected CatalogPath from config, got %q", cfg.CatalogPath)
+	}
 }
 
 // TestLoadDashboardConfig tests loading dashboard configuration.
@@ -124,12 +191,9 @@ func TestLoadBuilderConfig(t *testing.T) {
 	configData := `# Test builder config
 BUILDER_PORT=6666
 BUILDER_WORKERS=8
-USE_DOCKER=false
-DOCKER_IMAGE=custom/gentoo:test
+NATIVE_JOB_POLICY=unsafe-reuse
 BUILD_WORK_DIR=/custom/work
 BUILD_ARTIFACT_DIR=/custom/artifacts
-GPG_ENABLED=true
-GPG_KEY_ID=TEST1234
 STORAGE_TYPE=http
 STORAGE_HTTP_BASE=https://storage.test.com
 NOTIFY_CONFIG=/path/to/notify.json
@@ -153,12 +217,8 @@ NOTIFY_CONFIG=/path/to/notify.json
 		t.Errorf("Expected Workers=8, got %d", cfg.Workers)
 	}
 
-	if cfg.UseDocker {
-		t.Error("Expected UseDocker=false, got true")
-	}
-
-	if cfg.DockerImage != "custom/gentoo:test" {
-		t.Errorf("Expected DockerImage=custom/gentoo:test, got %s", cfg.DockerImage)
+	if cfg.NativeJobPolicy != "unsafe-reuse" {
+		t.Errorf("Expected NativeJobPolicy=unsafe-reuse, got %q", cfg.NativeJobPolicy)
 	}
 
 	if cfg.WorkDir != "/custom/work" {
@@ -167,14 +227,6 @@ NOTIFY_CONFIG=/path/to/notify.json
 
 	if cfg.ArtifactDir != "/custom/artifacts" {
 		t.Errorf("Expected ArtifactDir=/custom/artifacts, got %s", cfg.ArtifactDir)
-	}
-
-	if !cfg.GPGEnabled {
-		t.Error("Expected GPGEnabled=true, got false")
-	}
-
-	if cfg.GPGKeyID != "TEST1234" {
-		t.Errorf("Expected GPGKeyID=TEST1234, got %s", cfg.GPGKeyID)
 	}
 
 	if cfg.StorageType != "http" {
@@ -250,8 +302,7 @@ EMPTY_KEY=
 func TestLoadBuilderConfigPortageSettings(t *testing.T) {
 	t.Run("portage mirror config", func(t *testing.T) {
 		tmpFile := "/tmp/test-builder-portage.conf"
-		configData := `DOCKER_IMAGE=hub.example.com/gentoo/stage3:latest
-SYNC_MIRROR=rsync://rsync.example.com/gentoo-portage
+		configData := `SYNC_MIRROR=rsync://rsync.example.com/gentoo-portage
 DISTFILES_MIRROR=https://mirrors.example.com/gentoo
 PORTAGE_REPOS_PATH=/custom/repos
 PORTAGE_CONF_PATH=/custom/portage
@@ -266,10 +317,6 @@ MAKE_CONF_PATH=/custom/make.conf
 		cfg, err := LoadBuilderConfig(tmpFile)
 		if err != nil {
 			t.Fatalf("LoadBuilderConfig failed: %v", err)
-		}
-
-		if cfg.DockerImage != "hub.example.com/gentoo/stage3:latest" {
-			t.Errorf("Expected DockerImage=hub.example.com/gentoo/stage3:latest, got %s", cfg.DockerImage)
 		}
 
 		if cfg.SyncMirror != "rsync://rsync.example.com/gentoo-portage" {
@@ -321,11 +368,20 @@ MAKE_CONF_PATH=/custom/make.conf
 			t.Errorf("Expected default MakeConfPath=/etc/portage/make.conf, got %s", cfg.MakeConfPath)
 		}
 
-		// Default Docker image
-		if cfg.DockerImage != "gentoo/stage3:latest" {
-			t.Errorf("Expected default DockerImage=gentoo/stage3:latest, got %s", cfg.DockerImage)
+		if cfg.NativeJobPolicy != "single-use" {
+			t.Errorf("Expected default NativeJobPolicy=single-use, got %q", cfg.NativeJobPolicy)
 		}
 	})
+}
+
+func TestLoadBuilderConfigRejectsDockerBackend(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "builder.conf")
+	if err := os.WriteFile(path, []byte("USE_DOCKER=true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadBuilderConfig(path); err == nil || !strings.Contains(err.Error(), "no longer supported") {
+		t.Fatalf("LoadBuilderConfig docker error = %v, want explicit removal error", err)
+	}
 }
 
 // TestUnquoteEnvValue verifies surrounding quotes are stripped (#61).
@@ -351,6 +407,10 @@ func TestUnquoteEnvValue(t *testing.T) {
 func TestLoadServerConfigEnvWithoutFile(t *testing.T) {
 	t.Setenv("SERVER_PORT", "9999")
 	t.Setenv("API_KEY", "envkey")
+	t.Setenv("CATALOG_PATH", "/srv/portage-engine/catalog.json")
+	t.Setenv("CLOUD_PVE_USERNAME", "terraform-prov@pve")
+	t.Setenv("CLOUD_PVE_PASSWORD", "runtime-only-password")
+	t.Setenv("BUILD_MODE", "native-gentoo")
 
 	cfg, err := LoadServerConfig("/nonexistent/path/server.conf")
 	if err != nil {
@@ -361,6 +421,19 @@ func TestLoadServerConfigEnvWithoutFile(t *testing.T) {
 	}
 	if cfg.APIKey != "envkey" {
 		t.Errorf("env API_KEY ignored when file missing: got %q", cfg.APIKey)
+	}
+	if cfg.CatalogPath != "/srv/portage-engine/catalog.json" {
+		t.Errorf("env CATALOG_PATH ignored: got %q", cfg.CatalogPath)
+	}
+	if cfg.CloudPVEUsername != "terraform-prov@pve" || cfg.CloudPVEPassword != "runtime-only-password" {
+		t.Fatal("headless PVE password authentication was not loaded from the process environment")
+	}
+	settings := CloudSettingsFromServerConfig(cfg)
+	if settings.PVEUsername != cfg.CloudPVEUsername || settings.PVEPassword != cfg.CloudPVEPassword {
+		t.Fatal("PVE password authentication was dropped from runtime cloud settings")
+	}
+	if settings.BuildMode != "native-gentoo" {
+		t.Fatalf("build mode was dropped from runtime cloud settings: %q", settings.BuildMode)
 	}
 }
 

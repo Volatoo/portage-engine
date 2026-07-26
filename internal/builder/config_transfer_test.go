@@ -242,6 +242,48 @@ func TestApplyConfigToSystem(t *testing.T) {
 			}
 		}
 	}
+	for _, target := range []string{
+		portageDir,
+		filepath.Join(portageDir, "package.use"),
+		packageUsePath,
+		keywordsPath,
+		maskPath,
+		makeConfPath,
+	} {
+		info, err := os.Stat(target)
+		if err != nil {
+			t.Fatalf("stat %s: %v", target, err)
+		}
+		if info.IsDir() && info.Mode().Perm()&0o005 != 0o005 {
+			t.Errorf("Portage helper cannot traverse/read directory %s: mode %o", target, info.Mode().Perm())
+		}
+		if !info.IsDir() && info.Mode().Perm()&0o004 != 0o004 {
+			t.Errorf("Portage helper cannot read config %s: mode %o", target, info.Mode().Perm())
+		}
+	}
+}
+
+func TestApplyConfigToSystemRejectsRepositoryPathTraversalBeforeWriting(t *testing.T) {
+	targetRoot := t.TempDir()
+	bundle := &ConfigBundle{
+		Config: &PortageConfig{
+			Repos: []RepoConfig{{
+				Name:     "../../escape",
+				Location: "/var/db/repos/escape",
+				SyncType: "git",
+				SyncURI:  "https://example.org/repo.git",
+			}},
+		},
+		Packages: &BuildPackageSpec{Packages: []PackageSpec{{Atom: "app-misc/hello"}}},
+	}
+
+	transfer := NewConfigTransfer("")
+	if err := transfer.ApplyConfigToSystem(bundle, targetRoot); err == nil {
+		t.Fatal("expected repository path traversal to be rejected")
+	}
+	if _, err := os.Stat(filepath.Join(targetRoot, "etc")); !os.IsNotExist(err) {
+		t.Fatalf("validation must fail before creating files, stat error: %v", err)
+	}
 }
 
 // TestPackageSpec tests package specification.

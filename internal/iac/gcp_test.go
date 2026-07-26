@@ -456,7 +456,7 @@ func TestGenerateBuilderConfig(t *testing.T) {
 		"BUILDER_PORT=9090",
 		"INSTANCE_ID=my-builder",
 		"ARCHITECTURE=amd64",
-		"USE_DOCKER=true",
+		"NATIVE_JOB_POLICY=single-use",
 		"PERSISTENCE_ENABLED=true",
 	}
 
@@ -1021,9 +1021,9 @@ func TestGCPProvisioner_GenerateMainTFWithCloudInit(t *testing.T) {
 		t.Error("Missing metadata_startup_script in terraform")
 	}
 
-	// Verify cloud-init content is embedded
-	if !strings.Contains(tf, "install_docker") {
-		t.Error("Missing docker installation in startup script")
+	// Verify native Gentoo bootstrap content is embedded.
+	if !strings.Contains(tf, "NATIVE_JOB_POLICY=single-use") {
+		t.Error("Missing native single-use policy in startup script")
 	}
 	if !strings.Contains(tf, "9090") {
 		t.Error("Missing builder port in startup script")
@@ -1058,21 +1058,17 @@ func TestGCPProvisioner_GenerateMainTFWithCloudInit_CustomConfig(t *testing.T) {
 
 	spec := DefaultGCPInstanceSpec()
 	cloudInit := &CloudInitConfig{
-		DockerImage:       "custom/builder:v1",
-		DockerRegistry:    "docker.io",
-		PullLatestImage:   true,
-		PortageTreeSync:   true,
 		PortageMirror:     "https://distfiles.gentoo.org",
+		PortageBinpkgHost: "http://binhost.invalid/binpkgs",
 		BuilderPort:       8888,
 		ServerCallbackURL: "http://custom.server:8080",
-		ExtraPackages:     []string{"htop", "vim"},
 	}
 
 	tf := provisioner.GenerateMainTFWithCloudInit(spec, "custom-builder", cloudInit)
 
 	// Verify custom settings are included
-	if !strings.Contains(tf, "custom/builder:v1") {
-		t.Error("Missing custom docker image")
+	if !strings.Contains(tf, "http://binhost.invalid/binpkgs") {
+		t.Error("Missing custom native binhost")
 	}
 	if !strings.Contains(tf, "8888") {
 		t.Error("Missing custom builder port")
@@ -1080,8 +1076,8 @@ func TestGCPProvisioner_GenerateMainTFWithCloudInit_CustomConfig(t *testing.T) {
 	if !strings.Contains(tf, "http://custom.server:8080") {
 		t.Error("Missing custom server callback URL")
 	}
-	if !strings.Contains(tf, "htop") {
-		t.Error("Missing extra package htop")
+	if strings.Contains(tf, "docker run") {
+		t.Error("Removed Docker backend leaked into GCP startup script")
 	}
 }
 

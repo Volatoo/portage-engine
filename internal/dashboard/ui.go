@@ -301,6 +301,8 @@ pre.log-view {
 .builder-card h3 { font: var(--title-3-emphasized); margin-bottom: 2px; overflow: hidden; text-overflow: ellipsis; }
 .builder-card .ep { font: var(--callout); color: var(--systemSecondary); margin-bottom: 10px; overflow: hidden; text-overflow: ellipsis; }
 .builder-card .meta { display: flex; justify-content: space-between; font: var(--callout); color: var(--systemSecondary); padding-top: 8px; border-top: var(--keyline); }
+.ledger-grid { grid-template-columns: 1fr; }
+.ledger-grid .builder-card .meta { justify-content: flex-start; gap: 6px 24px; flex-wrap: wrap; }
 
 .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 20px; }
 @media (max-width: 800px) { .form-grid { grid-template-columns: 1fr; } }
@@ -337,6 +339,13 @@ pre.log-view {
 .log-filters { display: flex; gap: 6px; margin-bottom: 10px; flex-wrap: wrap; }
 .log-filters .btn { padding: 4px 12px; font: var(--callout-emphasized); }
 .log-filters .btn.active { background: var(--keyColor); color: hsla(0, 0%, 100%, .95); }
+.log-meta { display: flex; gap: 8px 18px; flex-wrap: wrap; margin: -2px 0 10px; font: var(--footnote); color: var(--systemTertiary); }
+.stage-log-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin-top: 14px; }
+.stage-log-card { min-width: 0; padding: 10px 12px; border-radius: var(--radius-medium); background: var(--systemQuaternary); }
+.stage-log-card strong { display: block; font: var(--callout-emphasized); }
+.stage-log-card span { display: block; margin-top: 3px; font: var(--footnote); color: var(--systemSecondary); overflow-wrap: anywhere; }
+@media (max-width: 900px) { .stage-log-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 520px) { .stage-log-grid { grid-template-columns: 1fr; } }
 
 /* ---- settings sub-navigation ---- */
 .settings-layout { display: flex; gap: 28px; align-items: flex-start; }
@@ -358,6 +367,30 @@ pre.log-view {
 .radio-row { display: flex; gap: 18px; margin: 2px 0 10px; flex-wrap: wrap; }
 .radio-row label { display: flex; align-items: center; gap: 6px; font: var(--body); color: var(--systemPrimary); }
 .card-actions { display: flex; gap: 10px; align-items: center; padding: 0 20px 16px; }
+.factory-grid { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(260px, .6fr); gap: 20px; }
+@media (max-width: 900px) { .factory-grid { grid-template-columns: 1fr; } }
+.milestone-list { list-style: none; margin: 0; padding: 0; }
+.milestone { display: grid; grid-template-columns: 110px minmax(0, 1fr); gap: 16px; padding: 16px 20px; border-bottom: var(--keyline); }
+.milestone:last-child { border-bottom: 0; }
+.milestone h3 { font: var(--body-emphasized); margin-bottom: 3px; }
+.milestone p { font: var(--callout); color: var(--systemSecondary); }
+.milestone-meta { margin-top: 5px; font: var(--footnote); color: var(--systemTertiary); }
+.evidence-list { margin-top: 7px; display: flex; flex-wrap: wrap; gap: 6px 14px; }
+.evidence-list span { font: 400 11.5px/1.5 var(--font-mono); color: var(--systemTertiary); overflow-wrap: anywhere; }
+.factory-step-details { margin-top: 10px; border-top: var(--keyline); padding-top: 9px; }
+.factory-step-details > summary { cursor: pointer; font: var(--callout-emphasized); color: var(--keyColor); }
+.factory-step-list { margin-top: 9px; display: grid; gap: 8px; }
+.factory-step { padding: 10px 12px; border-radius: var(--radius-medium); background: var(--systemQuaternary); }
+.factory-step-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.factory-step-head strong { font: var(--callout-emphasized); }
+.factory-step-id { font: var(--footnote); color: var(--systemTertiary); }
+.factory-step p { margin-top: 5px; }
+.factory-step-log { margin-top: 7px; padding-top: 7px; border-top: var(--keyline); font: 400 11.5px/1.5 var(--font-mono); color: var(--systemTertiary); overflow-wrap: anywhere; }
+.factory-note { font: var(--callout); color: var(--systemSecondary); line-height: 1.5; }
+.blocker { padding: 13px 0; border-bottom: var(--keyline); }
+.blocker:last-child { border-bottom: 0; }
+.blocker strong { display: block; font: var(--body-emphasized); }
+.blocker p { font: var(--callout); color: var(--systemSecondary); margin-top: 3px; }
 `
 
 // i18nJS: English is the default (and the text baked into the HTML); Chinese
@@ -366,7 +399,7 @@ pre.log-view {
 const i18nJS = `
 var I18N = {
   zh: {
-    'nav.overview': '总览', 'nav.builds': '构建任务', 'nav.monitor': '构建节点',
+    'nav.overview': '总览', 'nav.builds': '构建任务', 'nav.monitor': '构建节点', 'nav.factory': '镜像工厂',
     'nav.settings': '设置', 'nav.docs': '文档', 'nav.signout': '退出登录',
     'brand.sub': 'Gentoo Binhost 控制台',
 
@@ -377,24 +410,25 @@ var I18N = {
     'title.detail': '构建详情 — Portage Engine',
     'title.logs': '构建日志 — Portage Engine',
     'title.monitor': '构建节点 — Portage Engine',
+    'title.factory': '镜像工厂 — Portage Engine',
     'title.settings': '设置 — Portage Engine',
     'title.docs': '文档 — Portage Engine',
 
     'landing.signin': '登录控制台',
     'landing.eyebrow': 'Gentoo Binhost 构建平台',
     'landing.h1': '集中构建,处处安装',
-    'landing.sub': '在 PVE 或云端按需拉起构建机,产物自动汇聚为 Portage 原生 binhost。客户端零改动,emerge 直接安装二进制包。',
+    'landing.sub': '在 PVE 或云端按需拉起构建机,产物自动汇聚为 Portage 原生 binhost。客户端完成一次 binhost 与签名信任配置后,继续用 emerge 安装。',
     'landing.cta': '进入控制台',
     'landing.docs': '查看文档',
     'landing.f1.eyebrow': '按需构建机', 'landing.f1.title': '用完即毁的构建 VM',
-    'landing.f1.text': '提交构建时在 Proxmox VE、GCP 或 AWS 自动创建临时虚拟机,按集群实时负载选择节点,构建完成即销毁。',
+    'landing.f1.text': '提交构建时在 Proxmox VE、GCP 或 AWS 创建全新的 Native Gentoo 构建虚拟机,按集群实时负载选择节点,任务完成后立即销毁。',
     'landing.f2.eyebrow': '原生 Binhost', 'landing.f2.title': '标准 Packages 索引',
     'landing.f2.text': '产物以 Portage 原生格式发布并支持 GPG 签名,任何 Gentoo 客户端配置一行 binrepos.conf 即可消费。',
     'landing.f3.eyebrow': '并行与汇聚', 'landing.f3.title': '多任务并行构建',
     'landing.f3.text': '多个构建任务各自独占虚拟机并行执行,产物统一回收进单一仓库,控制台实时跟踪每一步。',
     'landing.flow': '工作流',
-    'landing.s1.t': '提交', 'landing.s1.d': '用客户端请求构建某个包,可附带完整 Portage 配置。',
-    'landing.s2.t': '构建', 'landing.s2.d': '服务端拉起构建机、在容器中 emerge、回收产物并刷新索引。',
+    'landing.s1.t': '提交', 'landing.s1.d': '用客户端请求构建某个包,可附带策略允许的 Portage 配置子集。',
+    'landing.s2.t': '构建', 'landing.s2.d': '服务端拉起构建机、在 Native Gentoo 或配置的容器中 emerge、回收产物并刷新索引。',
     'landing.s3.t': '消费', 'landing.s3.d': '任何 Gentoo 机器把本服务当 binhost,直接安装二进制包。',
     'landing.footer': 'Portage Engine · 自托管 Gentoo 二进制包构建平台',
 
@@ -418,26 +452,68 @@ var I18N = {
     'detail.livelog': '实时日志', 'detail.duration': '耗时',
     'detail.delete': '删除任务', 'detail.delete.confirm': '删除这条任务记录?',
     'detail.delete.fail': '删除失败:',
+    'detail.cancel': '取消任务', 'detail.cancel.confirm': '取消这个任务并使当前执行器租约失效?',
+    'detail.retry': '重试任务', 'detail.retry.confirm': '为这个任务创建新的隔离构建尝试?',
+    'detail.action.fail': '操作失败:',
     'builds.cleanup': '清理失败任务', 'builds.cleanup.confirm': '移除所有失败的任务记录?',
     'pipe.queued': '排队', 'pipe.provision': '创建构建机', 'pipe.deploy': '部署 Builder',
-    'pipe.build': '构建', 'pipe.collect': '回收产物', 'pipe.verify': '安装验证', 'pipe.cleanup': '释放实例',
-    'filter.all': '全部', 'filter.provision': '供给', 'filter.deploy': '部署', 'filter.build': '构建',
-    'filter.collect': '回收', 'filter.verify': '验证', 'filter.release': '释放',
+    'pipe.build': '构建', 'pipe.collect': '隔离回收', 'pipe.verify': '安装验证', 'pipe.sign': '隔离签名', 'pipe.publish': '发布', 'pipe.cleanup': '释放实例',
+    'filter.all': '全部', 'filter.queued': '排队', 'filter.provision': '供给', 'filter.deploy': '部署', 'filter.build': '构建',
+    'filter.collect': '回收', 'filter.verify': '验证', 'filter.sign': '签名', 'filter.publish': '发布', 'filter.release': '释放',
     'detail.status': '状态', 'detail.arch': '架构', 'detail.created': '创建',
     'detail.updated': '更新', 'detail.instance': '实例', 'detail.artifact': '产物',
     'detail.unknown': '(未知)',
 
     'logs.h1': '构建日志', 'logs.back': '返回详情', 'logs.none': '(暂无日志)',
-    'logs.fail': '日志加载失败:', 'logs.loading': '加载中…',
+    'logs.fail': '日志加载失败:', 'logs.loading': '加载中…', 'logs.lines': '行',
+    'logs.bytes': '日志大小', 'logs.generated': '刷新时间', 'logs.truncated': '日志已截断',
+    'logs.last': '最后事件',
 
     'mon.h1': '构建节点', 'mon.sub': '静态 builder 与云实例',
+    'mon.ledger': '任务账本', 'mon.ledger.shadow': 'PostgreSQL 任务真源',
+    'mon.ledger.ok': '一致', 'mon.ledger.degraded': '异常',
+    'mon.ledger.legacy': '进程投影视图 ', 'mon.ledger.rows': '数据库任务 ',
+    'mon.ledger.repaired': '最近修复 ', 'mon.ledger.errors': '写入错误 ',
+    'mon.ledger.checked': '最近核对 ',
+    'mon.scheduler': '持久化调度器', 'mon.scheduler.pg': 'PostgreSQL 队列与租约',
+    'mon.scheduler.healthy': '健康', 'mon.scheduler.degraded': '异常',
+    'mon.scheduler.queue': '排队任务 ', 'mon.scheduler.running': '运行任务 ',
+    'mon.scheduler.leases': '有效租约 ', 'mon.scheduler.expired': '过期租约 ',
+    'mon.scheduler.workers': '活跃执行槽 ', 'mon.scheduler.stale': '过期执行槽 ',
+    'mon.scheduler.attempts': '最近一小时尝试 ',
+    'mon.metadata': '运行元数据', 'mon.metadata.db': 'Infra、制品与镜像工厂',
+    'mon.metadata.infra': '存活实例 ', 'mon.metadata.cleanup': '清理失败 ',
+    'mon.metadata.published': '已发布制品 ', 'mon.metadata.staged': '隔离制品 ',
+    'mon.metadata.missing': '缺失制品 ', 'mon.metadata.corrupt': '损坏制品 ',
+    'mon.metadata.orphaned': '孤儿制品 ',
+    'mon.metadata.factory': '镜像工厂运行 ',
+    'mon.cache': '实时加速层', 'mon.cache.redis': 'Redis Presence、限流与事件',
+    'mon.cache.presence': '控制面实例 ', 'mon.cache.fallback': '故障时回退 PostgreSQL 轮询',
     'mon.builders': 'Builder', 'mon.instances': '云实例',
     'mon.noBuilders': '没有已注册的 builder。静态 builder 需配置 SERVER_URL 后自动注册;云构建的临时实例不在此列。',
     'mon.noInstances': '当前没有运行中的云实例。',
     'mon.archLabel': '架构 ', 'mon.loadLabel': '负载 ',
+    'mon.policyLabel': '隔离策略 ', 'mon.accepting': '可接收任务',
+    'mon.notAccepting': '等待回收，不再接收任务',
     'mon.shell': '终端',
+    'factory.h1': '镜像工厂', 'factory.sub': 'Profile、离线输入、PVE/PBS 来源链与 E2E 证据',
+    'factory.catalog': '已生效目录', 'factory.profiles': 'Profile', 'factory.images': '镜像',
+    'factory.bundles': '离线输入包', 'factory.milestones': '里程碑',
+    'factory.blockers': '阻塞项', 'factory.desktop': '桌面 E2E',
+    'factory.notconfigured': '尚未配置 IMAGE_FACTORY_STATUS_PATH；目录数据可用，但里程碑证据不会由页面猜测。',
+    'factory.noBlockers': '当前状态快照未报告阻塞项。',
+    'factory.readonly': '此页面只读。发布与回滚仍通过签名 CLI 流程执行。',
+    'factory.updated': '证据更新于 ', 'factory.sets': '包组', 'factory.image': '镜像', 'factory.displayModel': '显示硬件',
+    'factory.channel': '通道', 'factory.default': '默认', 'factory.none': '无',
+    'factory.evidence': '证据', 'factory.action': '下一步', 'factory.completed': '完成于',
+    'factory.stepLogs': '阶段日志', 'factory.started': '开始', 'factory.finished': '结束',
+    'factory.duration': '耗时', 'factory.log': '日志', 'factory.size': '大小',
+    'factory.desktop.strategy': '策略', 'factory.desktop.ai': 'AI 使用边界',
+    'factory.desktop.runner': '执行器', 'factory.desktop.display': '显示协议',
+    'st.not_started': '未开始', 'st.planned': '已规划', 'st.in_progress': '进行中',
+    'st.blocked': '受阻', 'st.passed': '已通过', 'st.failed': '失败',
     'set.sec.upload': '产物上传',
-    'set.upload.desc': '配置后,新构建的二进制包(连同 Packages 索引与签名公钥)会推送到内网镜像站的制品接口,安装验证也会改用镜像站 URL。',
+    'set.upload.desc': '配置后，只有通过隔离安装验证并完成中央发布的二进制包，才会连同 Packages 索引与签名公钥推送到内网镜像站。',
     'set.upload.url': '镜像站地址', 'set.upload.url.hint': '留空则不上传,包仅由本服务的 /binpkgs 提供',
     'set.upload.dir': '制品目录', 'set.upload.dir.hint': '文件位于 /local/<目录>/… 下,该 URL 即为内网 binhost',
     'set.upload.user': '用户名', 'set.upload.pass': '密码',
@@ -451,12 +527,6 @@ var I18N = {
     'set.cat.general': '通用', 'set.cat.infra': '基础设施', 'set.cat.access': '接入',
     'set.sec.mirrors': '镜像加速', 'set.sec.buildconf': '构建配置',
     'set.mirrors.hint': '拉起构建机时使用的内网镜像——局域网内可大幅加速部署。全部可选。',
-    'set.mirrors.apt': 'APT 镜像(基础 URL)',
-    'set.mirrors.apt.hint': '需提供 /debian 与 /debian-security;构建机的 sources.list 会重写指向它',
-    'set.mirrors.dockerdl': 'Docker 下载镜像',
-    'set.mirrors.dockerdl.hint': 'download.docker.com 的镜像;通过 DOWNLOAD_URL 传给内置安装脚本',
-    'set.mirrors.dockerreg': 'Docker Registry 镜像',
-    'set.mirrors.dockerreg.hint': 'Docker Hub 镜像,写入 daemon.json;加速 gentoo/stage3 拉取',
     'set.mirrors.gentoo': 'Gentoo 镜像(GENTOO_MIRRORS)',
     'set.mirrors.gentoo.hint': 'distfiles 与 webrsync 快照;写入构建机的 make.conf',
     'set.mirrors.method': 'Portage 树同步方式',
@@ -465,20 +535,16 @@ var I18N = {
     'set.mirrors.sync.hint': '自定义 repos.conf sync-uri;留空则用 Gentoo 镜像的 webrsync 快照',
     'set.makeconf': '附加 make.conf 内容',
     'set.makeconf.hint': '逐字追加到每台构建机生成的 make.conf(全局 USE、ACCEPT_LICENSE、FEATURES、EMERGE_DEFAULT_OPTS 等)。包级 USE 由客户端配置包传递。',
-    'set.buildfeatures': '构建容器 FEATURES',
-    'set.buildfeatures.hint': '追加到构建容器的 FEATURES。Docker 构建需要 "-userpriv -usersandbox"(容器内无法 unshare/降权,签名校验须以 root 运行)。仅当在完整 Gentoo 虚拟机中构建时才留空。',
+    'set.buildfeatures': 'Native 构建 FEATURES',
+    'set.buildfeatures.hint': '追加到 Native Gentoo 一次性构建 root 的 FEATURES;留空则使用镜像/profile 默认值。',
     'set.buildmode': '构建模式',
-    'set.buildmode.hint': 'Docker:在 Debian 虚拟机上的 gentoo/stage3 容器里构建。原生 Gentoo 虚拟机:用 UEFI cloud-init 模板拉起 Gentoo 虚拟机原生 emerge——emerge 内签名只有这个模式能正常工作。原生模式下请把 PVE 模板设为你的 Gentoo 模板。',
-    'set.signbinpkgs': '签名二进制包(emerge 内)',
-    'set.signbinpkgs.hint': '在 emerge 期间启用 gpkg 签名。Portage 的签名后自校验需要 getuto 的 CA 证书为该密钥背书,在 Docker 构建容器内无法做到——仅在原生 Gentoo 虚拟机构建节点上启用。关闭时构建为未签名包;公钥仍会发布,安装验证仍会导入它。',
+    'set.buildmode.hint': '构建后端固定为 Native Gentoo disposable root/VM;Docker builder 已移除。',
     'set.sec.general': '后端与测试', 'set.sec.builders': '静态 Builder',
     'set.sec.ssh': 'SSH 密钥', 'set.sec.net': '网络与投递', 'set.sec.gpg': 'GPG 签名',
     'set.gpg.state': '签名状态', 'set.gpg.keyid': '密钥 ID',
-    'set.gpg.on': '已启用', 'set.gpg.off': '未启用',
-    'set.gpg.name': '密钥名称', 'set.gpg.email': '密钥邮箱',
-    'set.gpg.generate': '生成密钥并启用签名',
-    'set.gpg.working': '正在生成密钥…', 'set.gpg.done': '签名已启用,密钥 ', 'set.gpg.fail': '失败:',
-    'set.gpg.hint': '在服务端创建签名密钥(已配置则直接采用)并启用签名。客户端从 /api/v1/gpg/public-key 获取公钥;portage-client configure 会自动配置 verify-signature。',
+    'set.gpg.on': '已就绪', 'set.gpg.wait': '等待签名器', 'set.gpg.off': '未启用',
+    'set.gpg.mode': '隔离模式', 'set.gpg.queue': '签名队列',
+    'set.gpg.hint': '私钥只存在于独立 portage-signer 的专用卷中。控制面通过 PostgreSQL 提交摘要绑定任务,签名器主动拉取;Builder 与 WebUI 均不能读取或生成私钥。',
     'set.gpg.pubkey': '公钥', 'set.gpg.download': '下载公钥',
     'set.conn': '连接', 'set.placement': '节点调度', 'set.resources': '资源',
     'set.pveuser': '用户名(Token 的替代方式)',
@@ -497,11 +563,9 @@ var I18N = {
     'set.testbuild.view': '查看构建详情',
     'set.testbuild.fail': '测试构建失败:',
     'set.backend': '构建后端', 'set.provider': '默认提供商', 'set.ttl': '实例 TTL(分钟)',
-    'set.ttl.hint': '闲置实例会被新构建复用,超过该闲置时长自动销毁;0 为不限制',
+    'set.ttl.hint': '实例最长生命周期和孤儿回收窗口;成功的 Native builder 立即销毁且不复用',
     'set.ttl': '实例闲置 TTL(分钟)',
-    'set.verify': '每个 binpkg 构建后在全新容器中从 binhost 安装验证,通过才算成功(推荐)',
-    'set.dockerimage': '构建容器镜像',
-    'set.dockerimage.hint': '新实例每次拉取;Docker Hub 镜像慢时可指向本地 registry 中的镜像(如 hub.infra.plz.ac/gentoo/stage3:latest)',
+    'set.verify': '每个 binpkg 必须先从任务隔离 binhost 完成安装验证，通过后才允许发布',
     'set.builders': '静态 Builder(逗号分隔 URL)',
     'set.builders.hint': '配置后构建轮询分发到这些 builder;留空则每次构建按需拉起云端临时 VM',
     'set.gcp': 'Google Cloud',
@@ -523,6 +587,8 @@ var I18N = {
     'set.tokenid': 'API Token ID', 'set.secret': 'API Token Secret',
     'set.secret.saved': '已保存;留空表示保持不变', 'set.secret.unset': '尚未设置',
     'set.secret.ph': '••••••••(留空保持不变)',
+    'set.secret.external.set': '由部署环境提供（已配置）',
+    'set.secret.external.unset': '由部署环境提供（尚未配置）',
     'set.storage': '存储池', 'set.bridge': '网桥',
     'set.tls': '跳过 TLS 证书校验(自签证书;更安全的做法是把 PVE CA 加入系统信任库)',
     'set.ssh': 'SSH 部署',
@@ -531,7 +597,7 @@ var I18N = {
     'set.knownhosts': 'known_hosts 路径(可选)',
     'set.hostkey': '跳过 SSH host key 校验(新建 VM 首连必需,或改用上方 known_hosts)',
     'set.net': '网络与投递',
-    'set.callback': '回调地址', 'set.callback.hint': '构建 VM 访问本服务的地址,须为 VM 可达的 IP',
+    'set.callback': '回调地址', 'set.callback.hint': '发布 Gate 必填：构建节点通过此地址读取任务隔离 binhost，必须从 builder 网络可达',
     'set.binpath': 'Builder 二进制路径', 'set.binpath.hint': '部署时 scp 到实例;需为 linux 且架构匹配',
     'set.binurl': 'Builder 二进制 URL(可选)', 'set.binurl.hint': '实例启动时自行下载;与路径同时设置时路径优先',
     'set.save': '保存', 'set.test': '测试 PVE 连接',
@@ -545,18 +611,19 @@ var I18N = {
 
     'docs.h1': '文档', 'docs.sub': '快速上手',
     'docs.consume': '消费二进制包',
-    'docs.consume.p': '在任何 Gentoo 机器上把本服务配置为 binhost,之后 emerge 自动拉取并校验二进制包,缺包时回退本地编译:',
+    'docs.consume.p': '先通过可信渠道核对签名指纹并配置 Portage keyring,再把本服务配置为 binhost。之后 emerge 拉取并校验二进制包,缺包时回退本地编译:',
     'docs.build': '请求构建',
     'docs.build.p': 'Portage 没有请求远端构建的原生机制,用客户端提交(可选 -wait 等待完成):',
-    'docs.build.p2': '提交后服务端在云端拉起临时构建机(或分发给静态 builder),产物自动进入 binhost 仓库并刷新 Packages 索引。',
+    'docs.build.p2': '提交后服务端创建全新的 Native Gentoo 构建机(或分发给可创建一次性 root 的静态 agent),产物自动进入 binhost 仓库并刷新 Packages 索引。',
     'docs.cloud': '云构建配置',
     'docs.cloud.p': 'PVE / 云提供商的接入参数在「设置」页管理,保存即生效。PVE 模板制作与端到端测试步骤见仓库内 docs/PVE_TESTING.md。',
     'docs.gpg': 'GPG 验证',
-    'docs.gpg.p': '启用签名后,客户端 configure 时会自动配置 verify-signature;公钥由服务端 /api/v1/gpg/public-key 分发。',
+    'docs.gpg.p': 'configure 只写 binrepos.conf 的 verify-signature。公钥可由管理员从 /api/v1/gpg/public-key 获取,但必须独立核对完整指纹并导入 /etc/portage/gnupg;仅导入不等于建立信任。',
 
     'st.queued': '排队中', 'st.claimed': '已认领', 'st.provisioning': '开机中',
-    'st.forwarding': '分发中', 'st.deploying': '部署中', 'st.building': '构建中', 'st.verifying': '验证中', 'st.success': '成功',
-    'st.completed': '完成', 'st.failed': '失败', 'st.online': '在线',
+    'st.forwarding': '分发中', 'st.deploying': '部署中', 'st.building': '构建中',
+    'st.collecting': '隔离回收中', 'st.verifying': '验证中', 'st.signing': '签名中', 'st.publishing': '发布中', 'st.success': '成功',
+    'st.completed': '完成', 'st.failed': '失败', 'st.canceled': '已取消', 'st.online': '在线',
     'st.offline': '离线', 'st.running': '运行中', 'st.destroy_failed': '销毁失败'
   }
 };
@@ -622,11 +689,28 @@ function fmtTime(s) {
   var d = new Date(s);
   return isNaN(d) ? String(s) : d.toLocaleString();
 }
+function fmtBytes(n) {
+  n = Number(n || 0);
+  if (!isFinite(n) || n < 0) return '-';
+  var units = ['B', 'KiB', 'MiB', 'GiB'];
+  var i = 0;
+  while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+  return (i === 0 ? String(Math.round(n)) : n.toFixed(n >= 10 ? 1 : 2)) + ' ' + units[i];
+}
+function fmtTimeRange(start, end) {
+  if (!start || !end) return '-';
+  var ms = new Date(end) - new Date(start);
+  if (!isFinite(ms) || ms < 0) return '-';
+  var sec = Math.floor(ms / 1000);
+  var h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+  return (h ? h + 'h ' : '') + (h || m ? m + 'm ' : '') + s + 's';
+}
 var STATUS_COLORS = {
   queued: 'gray', claimed: 'orange', provisioning: 'orange', forwarding: 'orange',
-  deploying: 'orange', verifying: 'blue',
-  building: 'blue', success: 'green', completed: 'green', failed: 'red',
-  online: 'green', offline: 'red', running: 'green', destroy_failed: 'red'
+  deploying: 'orange', collecting: 'blue', verifying: 'blue', signing: 'blue', publishing: 'blue',
+  building: 'blue', success: 'green', completed: 'green', failed: 'red', canceled: 'gray',
+  online: 'green', busy: 'blue', draining: 'orange', offline: 'red', running: 'green', destroy_failed: 'red',
+  not_started: 'gray', planned: 'gray', in_progress: 'blue', blocked: 'orange', passed: 'green'
 };
 function statusBadge(s) {
   var color = STATUS_COLORS[s] || 'gray';
@@ -651,6 +735,7 @@ func appPage(titleEN, titleKey, active, content, script string) string {
 		{"/overview", "Overview", "nav.overview"},
 		{"/builds", "Builds", "nav.builds"},
 		{"/monitor", "Build Nodes", "nav.monitor"},
+		{"/image-factory", "Image Factory", "nav.factory"},
 		{"/settings", "Settings", "nav.settings"},
 		{"/docs", "Docs", "nav.docs"},
 	} {
@@ -667,7 +752,7 @@ func appPage(titleEN, titleKey, active, content, script string) string {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title data-i18n="` + titleKey + `">` + titleEN + ` — Portage Engine</title>
-<link rel="stylesheet" href="/static/apple.css">
+<link rel="stylesheet" href="/static/apple.css?v=2">
 </head>
 <body>
 <div class="topbar"><span class="brand">Portage Engine</span>` + nav + `</div>
@@ -699,7 +784,7 @@ const landingHTML = `<!DOCTYPE html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title data-i18n="title.landing">Portage Engine — self-hosted Gentoo binary package platform</title>
-<link rel="stylesheet" href="/static/apple.css">
+<link rel="stylesheet" href="/static/apple.css?v=2">
 </head>
 <body>
 <nav class="landing-nav">
@@ -712,7 +797,7 @@ const landingHTML = `<!DOCTYPE html>
 <header class="landing-hero">
   <p class="eyebrow" data-i18n="landing.eyebrow">Gentoo binhost platform</p>
   <h1 data-i18n="landing.h1">Build once, install everywhere</h1>
-  <p class="sub" data-i18n="landing.sub">Spin up build machines on demand on Proxmox VE or in the cloud. Artifacts converge into a native Portage binhost — clients install binary packages with plain emerge, no changes required.</p>
+  <p class="sub" data-i18n="landing.sub">Spin up build machines on demand on Proxmox VE or in the cloud. Artifacts converge into a native Portage binhost; after one-time binhost and signing-trust setup, clients continue to install with plain emerge.</p>
   <div class="cta">
     <a class="btn blue" href="/overview" data-i18n="landing.cta">Open Console</a>
     <a class="btn" href="/docs" data-i18n="landing.docs">Documentation</a>
@@ -722,7 +807,7 @@ const landingHTML = `<!DOCTYPE html>
   <article class="landing-card">
     <h4 data-i18n="landing.f1.eyebrow">On-demand builders</h4>
     <h3 data-i18n="landing.f1.title">Ephemeral build VMs</h3>
-    <p data-i18n="landing.f1.text">Each build gets a fresh VM on Proxmox VE, GCP, or AWS — placed on the least-loaded node and destroyed when the build finishes.</p>
+    <p data-i18n="landing.f1.text">A fresh native Gentoo build VM is created on Proxmox VE, GCP, or AWS, placed on an eligible node, and destroyed after the job.</p>
   </article>
   <article class="landing-card">
     <h4 data-i18n="landing.f2.eyebrow">Native binhost</h4>
@@ -740,12 +825,12 @@ const landingHTML = `<!DOCTYPE html>
   <div class="steps">
     <div class="step">
       <h4 data-i18n="landing.s1.t">Submit</h4>
-      <p data-i18n="landing.s1.d">Request a package build from the client, optionally with your full Portage configuration.</p>
+      <p data-i18n="landing.s1.d">Request a package build from the client, optionally with a policy-approved subset of your Portage configuration.</p>
       <span class="mono">portage-client build -package app-misc/jq</span>
     </div>
     <div class="step">
       <h4 data-i18n="landing.s2.t">Build</h4>
-      <p data-i18n="landing.s2.d">The server provisions a builder, runs emerge in a container, collects the artifact, and refreshes the index.</p>
+      <p data-i18n="landing.s2.d">The server provisions a builder, runs emerge on native Gentoo or in the configured container, collects the artifact, and refreshes the index.</p>
       <span class="mono">provision &rarr; emerge &rarr; collect &rarr; index</span>
     </div>
     <div class="step">
@@ -770,7 +855,7 @@ const loginHTML = `<!DOCTYPE html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title data-i18n="title.login">Sign In — Portage Engine</title>
-<link rel="stylesheet" href="/static/apple.css">
+<link rel="stylesheet" href="/static/apple.css?v=2">
 </head>
 <body>
 <div class="auth-wrap">
@@ -964,12 +1049,15 @@ const buildDetailContent = `
   <div><h1 id="title" data-i18n="detail.h1">Build Details</h1><p class="sub mono" id="jid"></p></div>
   <div class="actions">
     <a class="btn" id="logs-link" href="#" data-i18n="detail.logs">View Logs</a>
+    <button class="btn" id="cancel-job" style="display:none" data-i18n="detail.cancel">Cancel Job</button>
+    <button class="btn" id="retry-job" style="display:none" data-i18n="detail.retry">Retry Job</button>
     <button class="btn" id="delete-job" style="display:none" data-i18n="detail.delete">Delete Job</button>
     <button class="btn" id="refresh" data-i18n="common.refresh">Refresh</button>
   </div>
 </div>
 <div class="card"><div class="card-pad">
   <div class="pipeline" id="pipeline" aria-label="Build pipeline"></div>
+  <div class="stage-log-grid" id="stage-log-summary"></div>
 </div></div>
 <div class="stat-grid" id="meta"></div>
 <div class="card" id="err-card" style="display:none">
@@ -980,6 +1068,7 @@ const buildDetailContent = `
   <h3 class="card-title" data-i18n="detail.livelog">Live Log</h3>
   <div class="card-pad">
     <div class="log-filters" id="log-filters"></div>
+    <div class="log-meta" id="live-log-meta"></div>
     <pre class="log-view" id="live-log">…</pre>
   </div>
 </div>`
@@ -996,7 +1085,7 @@ function fmtDuration(ms) {
   return (h ? h + 'h ' : '') + (h || m ? m + 'm ' : '') + sec + 's';
 }
 function durationTile(b) {
-  var terminal = b.status === 'failed' || b.status === 'completed' || b.status === 'success';
+  var terminal = b.status === 'failed' || b.status === 'completed' || b.status === 'success' || b.status === 'canceled';
   var end = terminal ? new Date(b.updated_at) : new Date();
   var tle = el('div', 'stat-tile');
   tle.appendChild(el('h4', null, t('detail.duration', 'Duration')));
@@ -1011,7 +1100,7 @@ setInterval(function () {
   var n = document.getElementById('duration-num');
   if (!n || !lastDetail) return;
   var b = lastDetail;
-  var terminal = b.status === 'failed' || b.status === 'completed' || b.status === 'success';
+  var terminal = b.status === 'failed' || b.status === 'completed' || b.status === 'success' || b.status === 'canceled';
   if (!terminal) n.textContent = fmtDuration(new Date() - new Date(b.created_at));
 }, 1000);
 function metaTile(labelKey, labelEN, node, wrap) {
@@ -1066,8 +1155,12 @@ async function load() {
       g.appendChild(metaTile('detail.artifact', 'Artifact', basename(b.artifact_path), true));
     }
     var delBtn = document.getElementById('delete-job');
-    var terminal = b.status === 'failed' || b.status === 'completed' || b.status === 'success';
+    var retryBtn = document.getElementById('retry-job');
+    var cancelBtn = document.getElementById('cancel-job');
+    var terminal = b.status === 'failed' || b.status === 'completed' || b.status === 'success' || b.status === 'canceled';
     delBtn.style.display = terminal ? '' : 'none';
+    retryBtn.style.display = (b.status === 'failed' || b.status === 'canceled') ? '' : 'none';
+    cancelBtn.style.display = terminal ? 'none' : '';
     var errCard = document.getElementById('err-card');
     if (b.error) { errCard.style.display = ''; document.getElementById('err-text').textContent = b.error; }
     else errCard.style.display = 'none';
@@ -1082,19 +1175,26 @@ var STAGES = [
   { key: 'build',     en: 'Build', marker: '[build] submitting' },
   { key: 'collect',   en: 'Collect Artifact', marker: '[collect]' },
   { key: 'verify',    en: 'Verify Install', marker: '[verify]' },
+  { key: 'sign',      en: 'Isolated Sign', marker: '[sign]' },
+  { key: 'publish',   en: 'Publish', marker: '[publish]' },
   { key: 'cleanup',   en: 'Release', marker: '[cleanup]' }
 ];
 var FILTERS = [
   { key: 'all',       en: 'All',       prefixes: null },
+  { key: 'queued',    en: 'Queued',    prefixes: ['[queued]'] },
   { key: 'provision', en: 'Provision', prefixes: ['[provision]', '[terraform]'] },
   { key: 'deploy',    en: 'Deploy',    prefixes: ['[deploy]', '[remote]'] },
   { key: 'build',     en: 'Build',     prefixes: ['[build]'] },
   { key: 'collect',   en: 'Collect',   prefixes: ['[collect]'] },
   { key: 'verify',    en: 'Verify',    prefixes: ['[verify]'] },
-  { key: 'release',   en: 'Release',   prefixes: ['[cleanup]'] }
+  { key: 'sign',      en: 'Sign',      prefixes: ['[sign]'] },
+  { key: 'publish',   en: 'Publish',   prefixes: ['[publish]'] },
+  { key: 'release',   en: 'Release',   stage: 'cleanup', prefixes: ['[cleanup]'] }
 ];
 var activeFilter = 'all';
 var lastLogText = '';
+var lastLogStages = [];
+var lastLogMetadata = {};
 
 function stageState(idx, reachedIdx, status, failedIdx, cleanupDone) {
   var terminal = status === 'completed' || status === 'success';
@@ -1113,7 +1213,7 @@ function stageState(idx, reachedIdx, status, failedIdx, cleanupDone) {
   if (idx === reachedIdx) return 'current';
   return 'pending';
 }
-var STATUS_STAGE = { queued: 0, claimed: 0, provisioning: 1, deploying: 2, forwarding: 3, building: 3, verifying: 5 };
+var STATUS_STAGE = { queued: 0, claimed: 0, provisioning: 1, deploying: 2, forwarding: 3, building: 3, collecting: 4, verifying: 5, signing: 6, publishing: 7 };
 function renderPipeline(logText, status, failedStage) {
   var reached = 0;
   for (var i = 0; i < STAGES.length; i++) {
@@ -1144,11 +1244,35 @@ function renderFilters() {
   var box = document.getElementById('log-filters');
   clear(box);
   FILTERS.forEach(function (f) {
-    var b = el('button', 'btn' + (activeFilter === f.key ? ' active' : ''), t('filter.' + f.key, f.en));
+    var count = f.key === 'all'
+      ? lastLogText.split('\n').filter(function (line) { return line.trim(); }).length
+      : ((lastLogStages.filter(function (stage) { return stage.id === (f.stage || f.key); })[0] || {}).line_count || 0);
+    var b = el('button', 'btn' + (activeFilter === f.key ? ' active' : ''), t('filter.' + f.key, f.en) + ' (' + count + ')');
     b.type = 'button';
     b.addEventListener('click', function () { activeFilter = f.key; renderFilters(); renderLogs(); });
     box.appendChild(b);
   });
+}
+function renderStageLogSummary() {
+  var box = document.getElementById('stage-log-summary');
+  clear(box);
+  lastLogStages.forEach(function (stage) {
+    var def = STAGES.filter(function (item) { return item.key === stage.id; })[0];
+    var card = el('div', 'stage-log-card');
+    card.appendChild(el('strong', null, t('pipe.' + stage.id, def ? def.en : stage.id)));
+    var timing = (stage.line_count || 0) + ' ' + t('logs.lines', 'line(s)');
+    if (stage.started_at && stage.updated_at) timing += ' · ' + fmtTimeRange(stage.started_at, stage.updated_at);
+    card.appendChild(el('span', null, timing));
+    if (stage.last_message) card.appendChild(el('span', null, t('logs.last', 'Last event') + ': ' + stage.last_message.slice(0, 180)));
+    box.appendChild(card);
+  });
+}
+function renderLogMetadata() {
+  var box = document.getElementById('live-log-meta');
+  clear(box);
+  box.appendChild(el('span', null, t('logs.bytes', 'Log size') + ': ' + fmtBytes(lastLogMetadata.bytes)));
+  if (lastLogMetadata.generated_at) box.appendChild(el('span', null, t('logs.generated', 'Refreshed') + ': ' + fmtTime(lastLogMetadata.generated_at)));
+  if (lastLogMetadata.truncated) box.appendChild(el('span', null, t('logs.truncated', 'Log truncated')));
 }
 function renderLogs() {
   var pre = document.getElementById('live-log');
@@ -1168,7 +1292,12 @@ async function loadLogs() {
   try {
     var r = await api('/api/builds/logs?job_id=' + encodeURIComponent(jobID));
     lastLogText = r.logs || '';
+    lastLogStages = r.stages || [];
+    lastLogMetadata = r;
+    renderFilters();
     renderLogs();
+    renderStageLogSummary();
+    renderLogMetadata();
     var d = await api('/api/builds/detail?job_id=' + encodeURIComponent(jobID));
     renderPipeline(lastLogText, d.status, d.failed_stage);
   } catch (e) { /* next tick */ }
@@ -1181,9 +1310,32 @@ document.getElementById('delete-job').addEventListener('click', async function (
     location.href = '/builds';
   } catch (e) { alert(t('detail.delete.fail', 'Delete failed: ') + e.message); }
 });
+document.getElementById('cancel-job').addEventListener('click', async function () {
+  if (!confirm(t('detail.cancel.confirm', 'Cancel this job and revoke its active executor lease?'))) return;
+  try {
+    await api('/api/builds/cancel?job_id=' + encodeURIComponent(jobID), { method: 'POST' });
+    await load(); await loadLogs();
+  } catch (e) { alert(t('detail.action.fail', 'Action failed: ') + e.message); }
+});
+document.getElementById('retry-job').addEventListener('click', async function () {
+  if (!confirm(t('detail.retry.confirm', 'Create a new isolated attempt for this job?'))) return;
+  try {
+    await api('/api/builds/retry?job_id=' + encodeURIComponent(jobID), { method: 'POST' });
+    await load(); await loadLogs();
+  } catch (e) { alert(t('detail.action.fail', 'Action failed: ') + e.message); }
+});
 document.getElementById('refresh').addEventListener('click', function () { load(); loadLogs(); });
 load();
 loadLogs();
+if (window.EventSource) {
+  var jobEvents = new EventSource('/api/events/jobs');
+  jobEvents.addEventListener('job', function (event) {
+    try {
+      var update = JSON.parse(event.data);
+      if (update.job_id === jobID) { load(); loadLogs(); }
+    } catch (e) {}
+  });
+}
 setInterval(load, 10000);
 setInterval(loadLogs, 5000);
 `
@@ -1201,6 +1353,9 @@ const logsContent = `
   </div>
 </div>
 <div class="card"><div class="card-pad">
+  <div class="log-filters" id="log-filters"></div>
+  <div class="log-meta" id="log-meta"></div>
+  <div class="stage-log-grid" id="stage-log-summary"></div>
   <pre class="log-view" id="log" data-i18n="logs.loading">Loading…</pre>
 </div></div>`
 
@@ -1208,14 +1363,72 @@ const logsJS = `
 var jobID = document.getElementById('head').getAttribute('data-job-id');
 document.getElementById('jid').textContent = jobID;
 document.getElementById('back-link').href = '/build/' + encodeURIComponent(jobID);
+var LOG_FILTERS = [
+  { key: 'all', en: 'All', prefixes: null },
+  { key: 'queued', en: 'Queued', prefixes: ['[queued]'] },
+  { key: 'provision', en: 'Provision', prefixes: ['[provision]', '[terraform]'] },
+  { key: 'deploy', en: 'Deploy', prefixes: ['[deploy]', '[remote]'] },
+  { key: 'build', en: 'Build', prefixes: ['[build]'] },
+  { key: 'collect', en: 'Collect', prefixes: ['[collect]'] },
+  { key: 'verify', en: 'Verify', prefixes: ['[verify]'] },
+  { key: 'release', en: 'Release', stage: 'cleanup', prefixes: ['[cleanup]'] }
+];
+var activeLogFilter = 'all';
+var fullLogText = '';
+var fullLogStages = [];
+var fullLogMetadata = {};
+function renderFullLogFilters() {
+  var box = document.getElementById('log-filters'); clear(box);
+  LOG_FILTERS.forEach(function (filter) {
+    var count = filter.key === 'all'
+      ? fullLogText.split('\n').filter(function (line) { return line.trim(); }).length
+      : ((fullLogStages.filter(function (stage) { return stage.id === (filter.stage || filter.key); })[0] || {}).line_count || 0);
+    var button = el('button', 'btn' + (activeLogFilter === filter.key ? ' active' : ''), t('filter.' + filter.key, filter.en) + ' (' + count + ')');
+    button.type = 'button';
+    button.addEventListener('click', function () { activeLogFilter = filter.key; renderFullLogFilters(); renderFullLog(); });
+    box.appendChild(button);
+  });
+}
+function renderFullLog() {
+  var filter = LOG_FILTERS.filter(function (item) { return item.key === activeLogFilter; })[0];
+  var lines = fullLogText.split('\n');
+  if (filter && filter.prefixes) {
+    lines = lines.filter(function (line) {
+      return filter.prefixes.some(function (prefix) { return line.indexOf(prefix) !== -1; });
+    });
+  }
+  document.getElementById('log').textContent = lines.join('\n') || t('logs.none', '(no logs yet)');
+}
+function renderFullLogDetails() {
+  var meta = document.getElementById('log-meta'); clear(meta);
+  meta.appendChild(el('span', null, t('logs.bytes', 'Log size') + ': ' + fmtBytes(fullLogMetadata.bytes)));
+  if (fullLogMetadata.generated_at) meta.appendChild(el('span', null, t('logs.generated', 'Refreshed') + ': ' + fmtTime(fullLogMetadata.generated_at)));
+  if (fullLogMetadata.truncated) meta.appendChild(el('span', null, t('logs.truncated', 'Log truncated')));
+  var grid = document.getElementById('stage-log-summary'); clear(grid);
+  fullLogStages.forEach(function (stage) {
+    var card = el('div', 'stage-log-card');
+    card.appendChild(el('strong', null, t('pipe.' + stage.id, stage.id)));
+    var timing = (stage.line_count || 0) + ' ' + t('logs.lines', 'line(s)');
+    if (stage.started_at && stage.updated_at) timing += ' · ' + fmtTimeRange(stage.started_at, stage.updated_at);
+    card.appendChild(el('span', null, timing));
+    if (stage.last_message) card.appendChild(el('span', null, t('logs.last', 'Last event') + ': ' + stage.last_message.slice(0, 180)));
+    grid.appendChild(card);
+  });
+}
 async function load() {
   var pre = document.getElementById('log');
   pre.removeAttribute('data-i18n');
   try {
     var r = await api('/api/builds/logs?job_id=' + encodeURIComponent(jobID));
-    pre.textContent = r.logs || t('logs.none', '(no logs yet)');
+    fullLogText = r.logs || '';
+    fullLogStages = r.stages || [];
+    fullLogMetadata = r;
+    renderFullLogFilters();
+    renderFullLogDetails();
+    renderFullLog();
   } catch (e) { pre.textContent = t('logs.fail', 'Failed to load logs: ') + e.message; }
 }
+function onLangChange() { renderFullLogFilters(); renderFullLogDetails(); renderFullLog(); }
 document.getElementById('refresh').addEventListener('click', load);
 load();
 setInterval(load, 5000);
@@ -1230,6 +1443,18 @@ const monitorContent = `
   <div><h1 data-i18n="mon.h1">Build Nodes</h1><p class="sub" data-i18n="mon.sub">Static builders and cloud instances</p></div>
   <div class="actions"><button class="btn" id="refresh" data-i18n="common.refresh">Refresh</button></div>
 </div>
+<h2 class="section-title" data-i18n="mon.ledger">Job Ledger</h2>
+<div class="builder-grid ledger-grid" id="ledger"></div>
+<div id="ledger-error"></div>
+<h2 class="section-title" data-i18n="mon.scheduler">Durable Scheduler</h2>
+<div class="builder-grid ledger-grid" id="scheduler"></div>
+<div id="scheduler-error"></div>
+<h2 class="section-title" data-i18n="mon.metadata">Runtime Metadata</h2>
+<div class="builder-grid ledger-grid" id="runtime-metadata"></div>
+<div id="runtime-metadata-error"></div>
+<h2 class="section-title" data-i18n="mon.cache">Realtime Acceleration</h2>
+<div class="builder-grid ledger-grid" id="cache-status"></div>
+<div id="cache-status-error"></div>
 <h2 class="section-title" data-i18n="mon.builders">Builders</h2>
 <div class="builder-grid" id="builders"></div>
 <div id="builders-empty"></div>
@@ -1249,6 +1474,92 @@ const monitorContent = `
 const monitorJS = `
 async function load() {
   try {
+    var ledgerResponse = await fetch('/api/ledger/status');
+    if (ledgerResponse.status === 401) { location.href = '/login'; throw new Error('unauthorized'); }
+    var ledger = await ledgerResponse.json();
+    if (!ledgerResponse.ok && typeof ledger.ok === 'undefined') {
+      throw new Error(ledger.details || ledger.error || ('HTTP ' + ledgerResponse.status));
+    }
+    var reconcile = ledger.last_reconcile || {};
+    var ledgerGrid = document.getElementById('ledger');
+    clear(ledgerGrid); clear(document.getElementById('ledger-error'));
+    var ledgerCard = el('article', 'builder-card');
+    ledgerCard.appendChild(el('h3', null, t('mon.ledger.shadow', 'PostgreSQL job authority')));
+    var ledgerBadge = statusBadge(ledger.ok ? 'passed' : 'failed');
+    ledgerBadge.lastChild.textContent = ledger.ok
+      ? t('mon.ledger.ok', 'consistent')
+      : t('mon.ledger.degraded', 'degraded');
+    ledgerCard.appendChild(ledgerBadge);
+    var ledgerMeta = el('div', 'meta');
+    ledgerMeta.appendChild(el('span', null, t('mon.ledger.legacy', 'memory jobs ') + (reconcile.legacy_count || 0)));
+    ledgerMeta.appendChild(el('span', null, t('mon.ledger.rows', 'ledger jobs ') + (reconcile.ledger_count || 0)));
+    ledgerMeta.appendChild(el('span', null, t('mon.ledger.repaired', 'last repaired ') + (reconcile.repaired || 0)));
+    ledgerMeta.appendChild(el('span', null, t('mon.ledger.errors', 'write errors ') + (ledger.write_errors || 0)));
+    if (reconcile.checked_at) {
+      ledgerMeta.appendChild(el('span', null, t('mon.ledger.checked', 'last checked ') + fmtTime(reconcile.checked_at)));
+    }
+    ledgerCard.appendChild(ledgerMeta);
+    ledgerGrid.appendChild(ledgerCard);
+  } catch (e) { showError('ledger-error', e); }
+  try {
+    var scheduler = await api('/api/scheduler/status');
+    var schedulerGrid = document.getElementById('scheduler');
+    clear(schedulerGrid); clear(document.getElementById('scheduler-error'));
+    var schedulerCard = el('article', 'builder-card');
+    schedulerCard.appendChild(el('h3', null, t('mon.scheduler.pg', 'PostgreSQL queue and leases')));
+    var schedulerBadge = statusBadge(scheduler.healthy === false || (scheduler.expired_leases || 0) > 0 ? 'failed' : 'passed');
+    schedulerBadge.lastChild.textContent = scheduler.healthy === false
+      ? t('mon.scheduler.degraded', 'degraded')
+      : t('mon.scheduler.healthy', 'healthy');
+    schedulerCard.appendChild(schedulerBadge);
+    var schedulerMeta = el('div', 'meta');
+    schedulerMeta.appendChild(el('span', null, t('mon.scheduler.queue', 'queued ') + (scheduler.queued_tasks || 0)));
+    schedulerMeta.appendChild(el('span', null, t('mon.scheduler.running', 'running ') + (scheduler.running_tasks || 0)));
+    schedulerMeta.appendChild(el('span', null, t('mon.scheduler.leases', 'active leases ') + (scheduler.active_leases || 0)));
+    schedulerMeta.appendChild(el('span', null, t('mon.scheduler.expired', 'expired leases ') + (scheduler.expired_leases || 0)));
+    schedulerMeta.appendChild(el('span', null, t('mon.scheduler.workers', 'active slots ') + (scheduler.active_workers || 0)));
+    schedulerMeta.appendChild(el('span', null, t('mon.scheduler.stale', 'stale slots ') + (scheduler.stale_workers || 0)));
+    schedulerMeta.appendChild(el('span', null, t('mon.scheduler.attempts', 'attempts last hour ') + (scheduler.attempts_last_hour || 0)));
+    schedulerCard.appendChild(schedulerMeta);
+    schedulerGrid.appendChild(schedulerCard);
+  } catch (e) { showError('scheduler-error', e); }
+  try {
+    var metadataResponse = await api('/api/runtime-metadata/status');
+    var metadata = metadataResponse.status || {};
+    var metadataGrid = document.getElementById('runtime-metadata');
+    clear(metadataGrid); clear(document.getElementById('runtime-metadata-error'));
+    var metadataCard = el('article', 'builder-card');
+    metadataCard.appendChild(el('h3', null, t('mon.metadata.db', 'Infra, artifacts and image factory')));
+    var artifactIntegrityOK = (metadata.missing_artifacts || 0) === 0 && (metadata.corrupt_artifacts || 0) === 0;
+    metadataCard.appendChild(statusBadge(metadataResponse.ok && artifactIntegrityOK ? 'passed' : 'failed'));
+    var metadataMeta = el('div', 'meta');
+    metadataMeta.appendChild(el('span', null, t('mon.metadata.infra', 'live infra ') + (metadata.live_infra || 0)));
+    metadataMeta.appendChild(el('span', null, t('mon.metadata.cleanup', 'cleanup failed ') + (metadata.cleanup_failed_infra || 0)));
+    metadataMeta.appendChild(el('span', null, t('mon.metadata.published', 'published artifacts ') + (metadata.published_artifacts || 0)));
+    metadataMeta.appendChild(el('span', null, t('mon.metadata.staged', 'staged artifacts ') + (metadata.staged_artifacts || 0)));
+    metadataMeta.appendChild(el('span', null, t('mon.metadata.missing', 'missing artifacts ') + (metadata.missing_artifacts || 0)));
+    metadataMeta.appendChild(el('span', null, t('mon.metadata.corrupt', 'corrupt artifacts ') + (metadata.corrupt_artifacts || 0)));
+    metadataMeta.appendChild(el('span', null, t('mon.metadata.orphaned', 'orphaned artifacts ') + (metadata.orphaned_artifacts || 0)));
+    metadataMeta.appendChild(el('span', null, t('mon.metadata.factory', 'factory runs ') + (metadata.factory_runs || 0)));
+    if (metadata.last_metadata_update_at) metadataMeta.appendChild(el('span', null, fmtTime(metadata.last_metadata_update_at)));
+    metadataCard.appendChild(metadataMeta);
+    metadataGrid.appendChild(metadataCard);
+  } catch (e) { showError('runtime-metadata-error', e); }
+  try {
+    var cacheStatus = await api('/api/cache/status');
+    var cacheGrid = document.getElementById('cache-status');
+    clear(cacheGrid); clear(document.getElementById('cache-status-error'));
+    var cacheCard = el('article', 'builder-card');
+    cacheCard.appendChild(el('h3', null, t('mon.cache.redis', 'Redis presence, rate limits and events')));
+    cacheCard.appendChild(statusBadge(cacheStatus.ok ? 'passed' : 'failed'));
+    var cacheMeta = el('div', 'meta');
+    cacheMeta.appendChild(el('span', null, t('mon.cache.presence', 'control-plane instances ') + (cacheStatus.control_plane_presence || 0)));
+    cacheMeta.appendChild(el('span', null, t('mon.cache.fallback', 'PostgreSQL polling fallback')));
+    if (cacheStatus.last_success_at) cacheMeta.appendChild(el('span', null, fmtTime(cacheStatus.last_success_at)));
+    cacheCard.appendChild(cacheMeta);
+    cacheGrid.appendChild(cacheCard);
+  } catch (e) { showError('cache-status-error', e); }
+  try {
     var data = await api('/api/builders/status');
     var builders = (data && data.builders) || [];
     var grid = document.getElementById('builders');
@@ -1265,6 +1576,12 @@ async function load() {
       var meta = el('div', 'meta');
       meta.appendChild(el('span', null, t('mon.archLabel', 'arch ') + (b.architecture || '-')));
       meta.appendChild(el('span', null, t('mon.loadLabel', 'load ') + (b.current_load || 0) + '/' + (b.capacity || 0)));
+      if (b.native_job_policy) {
+        meta.appendChild(el('span', null, t('mon.policyLabel', 'isolation ') + b.native_job_policy));
+      }
+      meta.appendChild(el('span', null, b.accepting_builds === false
+        ? t('mon.notAccepting', 'draining; no new jobs')
+        : t('mon.accepting', 'accepting jobs')));
       c.appendChild(meta);
       grid.appendChild(c);
     });
@@ -1339,18 +1656,13 @@ const settingsContent = `
     <div class="field">
       <label for="ttl" data-i18n="set.ttl">Idle instance TTL (minutes)</label>
       <input type="number" id="ttl" min="0">
-      <p class="hint" data-i18n="set.ttl.hint">Warm idle instances are reused by new builds and auto-destroyed after this idle window; 0 disables</p>
+      <p class="hint" data-i18n="set.ttl.hint">Maximum instance lifetime and orphan cleanup window; successful native builders are destroyed immediately and never reused</p>
     </div>
   </div>
   <div class="card-pad" style="padding-top:0">
-    <div class="field">
-      <label for="docker_image" data-i18n="set.dockerimage">Build container image</label>
-      <input type="text" id="docker_image" placeholder="gentoo/stage3:latest">
-      <p class="hint" data-i18n="set.dockerimage.hint">Pulled on each fresh instance; point it at an image in your local registry (e.g. hub.infra.plz.ac/gentoo/stage3:latest) when the Docker Hub mirror is slow</p>
-    </div>
     <div class="field check">
-      <input type="checkbox" id="verify_install" checked>
-      <label for="verify_install" data-i18n="set.verify">Verify each binpkg installs from the binhost before marking the build successful (recommended)</label>
+      <input type="checkbox" id="verify_install" checked disabled>
+      <label for="verify_install" data-i18n="set.verify">Every binpkg must install from its job quarantine before publication</label>
     </div>
   </div></div>
 
@@ -1443,7 +1755,7 @@ const settingsContent = `
   <div class="card"><h3 class="card-title" data-i18n="set.resources">Resources</h3><div class="card-pad form-grid">
     <div class="field">
       <label for="pve_template" data-i18n="set.template">VM template</label>
-      <input type="text" id="pve_template" placeholder="debian-12-cloudinit-template">
+      <input type="text" id="pve_template" placeholder="gentoo-native-cloudinit-template">
       <p class="hint" data-i18n="set.template.hint">Must be a QEMU template with cloud-init and qemu-guest-agent installed</p>
     </div>
     <div class="field">
@@ -1525,21 +1837,6 @@ const settingsContent = `
     <p class="hint" style="margin-bottom:10px" data-i18n="set.mirrors.hint">Internal mirrors used when bootstrapping build instances — dramatically faster deploys on a LAN. All optional.</p>
     <div class="form-grid">
       <div class="field">
-        <label for="apt_mirror" data-i18n="set.mirrors.apt">APT mirror (base URL)</label>
-        <input type="text" id="apt_mirror" placeholder="http://10.31.0.2">
-        <p class="hint" data-i18n="set.mirrors.apt.hint">Serves /debian and /debian-security; the guest's sources.list is rewritten to it</p>
-      </div>
-      <div class="field">
-        <label for="docker_dl_mirror" data-i18n="set.mirrors.dockerdl">Docker download mirror</label>
-        <input type="text" id="docker_dl_mirror" placeholder="http://10.31.0.2/docker-ce">
-        <p class="hint" data-i18n="set.mirrors.dockerdl.hint">Mirror of download.docker.com; fed to the vendored install script via DOWNLOAD_URL</p>
-      </div>
-      <div class="field">
-        <label for="docker_reg_mirror" data-i18n="set.mirrors.dockerreg">Docker registry mirror</label>
-        <input type="text" id="docker_reg_mirror" placeholder="https://hub.infra.plz.ac">
-        <p class="hint" data-i18n="set.mirrors.dockerreg.hint">Docker Hub mirror written to daemon.json; accelerates the gentoo/stage3 pull</p>
-      </div>
-      <div class="field">
         <label for="gentoo_mirror" data-i18n="set.mirrors.gentoo">Gentoo mirror (GENTOO_MIRRORS)</label>
         <input type="text" id="gentoo_mirror" placeholder="http://10.31.0.2/gentoo">
         <p class="hint" data-i18n="set.mirrors.gentoo.hint">Distfiles and webrsync snapshots; lands in make.conf on build instances</p>
@@ -1560,7 +1857,7 @@ const settingsContent = `
     </div>
   </div></div>
   <div class="card"><h3 class="card-title" data-i18n="set.sec.upload">Artifact Upload</h3><div class="card-pad">
-    <p class="hint" data-i18n="set.upload.desc">When set, fresh binpkgs (with the Packages index and signing pubkey) are pushed to the internal mirror's artifact API, and install verification runs against the mirror URL.</p>
+    <p class="hint" data-i18n="set.upload.desc">When set, only centrally promoted binpkgs that passed quarantined install verification are pushed to the internal mirror with the Packages index and signing pubkey.</p>
     <div class="grid-2">
       <div class="field">
         <label for="upload_url" data-i18n="set.upload.url">Mirror base URL</label>
@@ -1593,21 +1890,14 @@ const settingsContent = `
       <p class="hint" data-i18n="set.makeconf.hint">Appended verbatim to the generated make.conf on every build instance (global USE, ACCEPT_LICENSE, FEATURES, EMERGE_DEFAULT_OPTS, ...). Per-package USE comes from the client's config bundle.</p>
     </div>
     <div class="field">
-      <label for="build_features" data-i18n="set.buildfeatures">Build container FEATURES</label>
-      <input type="text" id="build_features" spellcheck="false" placeholder="-userpriv -usersandbox">
-      <p class="hint" data-i18n="set.buildfeatures.hint">Appended to the build container's FEATURES. Docker builds need "-userpriv -usersandbox" (no unshare/privilege-drop, so signature verification runs as root). Leave empty only when building in a full Gentoo VM.</p>
+      <label for="build_features" data-i18n="set.buildfeatures">Native build FEATURES</label>
+      <input type="text" id="build_features" spellcheck="false" placeholder="parallel-fetch">
+      <p class="hint" data-i18n="set.buildfeatures.hint">Appended to the disposable native Gentoo root's FEATURES; leave empty to use the image/profile defaults.</p>
     </div>
     <div class="field">
-      <label for="build_mode" data-i18n="set.buildmode">Build mode</label>
-      <select id="build_mode">
-        <option value="docker">Docker container (Debian host + gentoo/stage3)</option>
-        <option value="native-gentoo">Native Gentoo VM (UEFI template)</option>
-      </select>
-      <p class="hint" data-i18n="set.buildmode.hint">Docker: build inside a gentoo/stage3 container on a Debian VM. Native Gentoo VM: provision a Gentoo VM from the UEFI cloud-init template and emerge natively — required for working in-emerge signing. Set the PVE template to your Gentoo template for native mode.</p>
-    </div>
-    <div class="field field-check">
-      <label class="check"><input type="checkbox" id="sign_binpkgs"> <span data-i18n="set.signbinpkgs">Sign binary packages (in-emerge)</span></label>
-      <p class="hint" data-i18n="set.signbinpkgs.hint">Enables gpkg signing during emerge. Portage's post-sign self-verification needs getuto's CA to certify the key, which is not achievable inside the Docker build container — enable this only on native Gentoo VM builders. When off, packages build unsigned; the pubkey is still published and install verification still imports it.</p>
+      <label data-i18n="set.buildmode">Build mode</label>
+      <p>Native Gentoo disposable root / VM</p>
+      <p class="hint" data-i18n="set.buildmode.hint">The build backend is fixed to a disposable native Gentoo root/VM; Docker builders have been removed.</p>
     </div>
   </div></div>
 </section>
@@ -1648,24 +1938,16 @@ const settingsContent = `
         <h4 data-i18n="set.gpg.keyid">Key ID</h4>
         <div class="num wrap" id="gpg-keyid">-</div>
       </div>
-    </div>
-    <div id="gpg-gen-box">
-      <div class="form-grid">
-        <div class="field">
-          <label for="gpg_name" data-i18n="set.gpg.name">Key name</label>
-          <input type="text" id="gpg_name" placeholder="Portage Engine">
-        </div>
-        <div class="field">
-          <label for="gpg_email" data-i18n="set.gpg.email">Key email</label>
-          <input type="text" id="gpg_email" placeholder="portage@example.com">
-        </div>
+      <div class="stat-tile">
+        <h4 data-i18n="set.gpg.mode">Isolation mode</h4>
+        <div class="num wrap" id="gpg-mode">-</div>
       </div>
-      <div class="form-actions">
-        <button class="btn blue" type="button" id="gpg-generate" data-i18n="set.gpg.generate">Generate Key &amp; Enable Signing</button>
-        <span class="save-msg" id="gpg-msg" role="status"></span>
+      <div class="stat-tile">
+        <h4 data-i18n="set.gpg.queue">Signing queue</h4>
+        <div class="num wrap" id="gpg-queue">-</div>
       </div>
-      <p class="hint" style="margin-top:8px" data-i18n="set.gpg.hint">Creates a signing key on the server (or adopts the configured one) and enables signing. Clients fetch the public key from /api/v1/gpg/public-key; portage-client configure sets verify-signature automatically.</p>
     </div>
+    <p class="hint" data-i18n="set.gpg.hint">The private key exists only in the isolated portage-signer key volume. The control plane submits digest-bound tasks through PostgreSQL; neither builders nor this WebUI can read or generate private keys.</p>
   </div></div>
   <div class="card"><h3 class="card-title" data-i18n="set.gpg.pubkey">Public Key</h3><div class="card-pad">
     <pre class="log-view" id="gpg-pubkey" style="max-height:260px">-</pre>
@@ -1680,7 +1962,7 @@ const settingsContent = `
     <div class="field">
       <label for="callback" data-i18n="set.callback">Callback URL</label>
       <input type="text" id="callback" placeholder="http://10.0.0.10:8080">
-      <p class="hint" data-i18n="set.callback.hint">How build VMs reach this server; must be an address reachable from the VM</p>
+      <p class="hint" data-i18n="set.callback.hint">Required by the publication gate: builders use this reachable URL to read the job quarantine binhost</p>
     </div>
     <div class="field">
       <label for="bin_path" data-i18n="set.binpath">Builder binary path</label>
@@ -1691,6 +1973,11 @@ const settingsContent = `
       <label for="bin_url" data-i18n="set.binurl">Builder binary URL (optional)</label>
       <input type="text" id="bin_url" placeholder="https://example.com/portage-builder-linux-amd64">
       <p class="hint" data-i18n="set.binurl.hint">Downloaded by the instance at bootstrap; path wins if both are set</p>
+    </div>
+    <div class="field">
+      <label for="bin_sha256">Builder binary SHA-256</label>
+      <input type="text" id="bin_sha256" maxlength="64" placeholder="64 lowercase hexadecimal characters">
+      <p class="hint">Required when using a URL; the instance verifies it before installing or running the binary</p>
     </div>
   </div></div>
 </section>
@@ -1746,8 +2033,7 @@ function collect() {
   return {
     provider: val('provider'),
     instance_ttl_minutes: parseInt(val('ttl') || '0', 10) || 0,
-    skip_verify_install: !checked('verify_install'),
-    docker_image: val('docker_image'),
+    skip_verify_install: false,
     remote_builders: csv('remote_builders'),
     gcp_project: val('gcp_project'),
     gcp_region: val('gcp_region'),
@@ -1770,16 +2056,12 @@ function collect() {
     pve_template: val('pve_template'),
     pve_cicustom: val('pve_cicustom'),
     pve_nameserver: val('pve_nameserver'),
-    apt_mirror: val('apt_mirror'),
-    docker_download_mirror: val('docker_dl_mirror'),
-    docker_registry_mirror: val('docker_reg_mirror'),
     gentoo_mirror: val('gentoo_mirror'),
     portage_sync_uri: val('portage_sync_uri'),
     portage_sync_method: val('portage_sync_method') || 'webrsync',
     make_conf_extra: document.getElementById('make_conf_extra').value,
     build_features: val('build_features'),
-    build_mode: val('build_mode') || 'docker',
-    sign_binpkgs: checked('sign_binpkgs'),
+    build_mode: 'native-gentoo',
     ssh_key_path: val('ssh_key_path'),
     ssh_user: val('ssh_user'),
     ssh_known_hosts: val('ssh_known_hosts'),
@@ -1790,15 +2072,31 @@ function collect() {
     upload_dir: val('upload_dir'),
     server_callback_url: val('callback'),
     builder_binary_path: val('bin_path'),
-    builder_binary_url: val('bin_url')
+    builder_binary_url: val('bin_url'),
+    builder_binary_sha256: val('bin_sha256')
   };
 }
 function fill(s) {
   lastSettings = s;
+  var externalSecrets = !!s.secret_values_managed_externally;
+  function secretText(present) {
+    if (externalSecrets) {
+      return present
+        ? t('set.secret.external.set', 'Managed by deployment environment (configured)')
+        : t('set.secret.external.unset', 'Managed by deployment environment (not configured)');
+    }
+    return present ? t('set.secret.saved', 'Saved; leave empty to keep') : t('set.secret.unset', 'Not set yet');
+  }
+  ['aws_secret_key', 'pve_password', 'pve_token_secret', 'upload_password'].forEach(function (id) {
+    var input = document.getElementById(id);
+    if (input) {
+      input.disabled = externalSecrets;
+      input.placeholder = externalSecrets ? t('set.secret.external.set', 'Managed by deployment environment') : '';
+    }
+  });
   setVal('provider', s.provider || 'pve');
   setVal('ttl', s.instance_ttl_minutes || 0);
-  document.getElementById('verify_install').checked = !s.skip_verify_install;
-  setVal('docker_image', s.docker_image);
+  document.getElementById('verify_install').checked = true;
   setVal('remote_builders', (s.remote_builders || []).join(','));
   setVal('gcp_project', s.gcp_project);
   setVal('gcp_region', s.gcp_region);
@@ -1808,8 +2106,8 @@ function fill(s) {
   setVal('aws_zone', s.aws_zone);
   setVal('aws_access_key', s.aws_access_key);
   var awsHint = document.getElementById('aws-secret-hint');
-  awsHint.textContent = s.has_aws_secret_key ? t('set.secret.saved', 'Saved; leave empty to keep') : t('set.secret.unset', 'Not set yet');
-  document.getElementById('aws_secret_key').placeholder = s.has_aws_secret_key ? t('set.secret.ph', 'Saved — leave empty to keep') : '';
+  awsHint.textContent = secretText(s.has_aws_secret_key);
+  if (!externalSecrets) document.getElementById('aws_secret_key').placeholder = s.has_aws_secret_key ? t('set.secret.ph', 'Saved — leave empty to keep') : '';
   setVal('pve_endpoint', s.pve_endpoint);
   var auto = !s.pve_node || s.pve_node.toLowerCase() === 'auto';
   document.getElementById('place_auto').checked = auto;
@@ -1820,24 +2118,19 @@ function fill(s) {
   setVal('pve_token_id', s.pve_token_id);
   setVal('pve_username', s.pve_username);
   var passHint = document.getElementById('pve-pass-hint');
-  passHint.textContent = s.has_pve_password ? t('set.secret.saved', 'Saved; leave empty to keep') : t('set.secret.unset', 'Not set yet');
-  document.getElementById('pve_password').placeholder = s.has_pve_password ? t('set.secret.ph', 'Saved — leave empty to keep') : '';
+  passHint.textContent = secretText(s.has_pve_password);
+  if (!externalSecrets) document.getElementById('pve_password').placeholder = s.has_pve_password ? t('set.secret.ph', 'Saved — leave empty to keep') : '';
   document.getElementById('pve_insecure').checked = !!s.pve_insecure;
   setVal('pve_storage', s.pve_storage);
   setVal('pve_network', s.pve_network);
   setVal('pve_template', s.pve_template);
   setVal('pve_cicustom', s.pve_cicustom);
   setVal('pve_nameserver', s.pve_nameserver);
-  setVal('apt_mirror', s.apt_mirror);
-  setVal('docker_dl_mirror', s.docker_download_mirror);
-  setVal('docker_reg_mirror', s.docker_registry_mirror);
   setVal('gentoo_mirror', s.gentoo_mirror);
   setVal('portage_sync_uri', s.portage_sync_uri);
   setVal('portage_sync_method', s.portage_sync_method || 'webrsync');
   setVal('make_conf_extra', s.make_conf_extra);
   setVal('build_features', s.build_features);
-  setVal('build_mode', s.build_mode || 'docker');
-  document.getElementById('sign_binpkgs').checked = !!s.sign_binpkgs;
   setVal('ssh_key_path', s.ssh_key_path);
   setVal('ssh_user', s.ssh_user);
   setVal('ssh_known_hosts', s.ssh_known_hosts);
@@ -1847,15 +2140,16 @@ function fill(s) {
   setVal('upload_dir', s.upload_dir);
   var upHint = document.getElementById('upload-pass-hint');
   if (upHint) {
-    upHint.textContent = s.has_upload_password ? t('set.secret.saved', 'Saved; leave empty to keep') : t('set.secret.unset', 'Not set yet');
-    document.getElementById('upload_password').placeholder = s.has_upload_password ? t('set.secret.ph', 'Saved — leave empty to keep') : '';
+    upHint.textContent = secretText(s.has_upload_password);
+    if (!externalSecrets) document.getElementById('upload_password').placeholder = s.has_upload_password ? t('set.secret.ph', 'Saved — leave empty to keep') : '';
   }
   setVal('callback', s.server_callback_url);
   setVal('bin_path', s.builder_binary_path);
   setVal('bin_url', s.builder_binary_url);
+  setVal('bin_sha256', s.builder_binary_sha256);
   var hint = document.getElementById('secret-hint');
-  hint.textContent = s.has_pve_token_secret ? t('set.secret.saved', 'Saved; leave empty to keep') : t('set.secret.unset', 'Not set yet');
-  document.getElementById('pve_token_secret').placeholder = s.has_pve_token_secret ? t('set.secret.ph', 'Saved — leave empty to keep') : '';
+  hint.textContent = secretText(s.has_pve_token_secret);
+  if (!externalSecrets) document.getElementById('pve_token_secret').placeholder = s.has_pve_token_secret ? t('set.secret.ph', 'Saved — leave empty to keep') : '';
 }
 function onLangChange() { if (lastSettings) fill(lastSettings); }
 function noteAt(target, text, ok) {
@@ -1962,9 +2256,13 @@ document.getElementById('test-build').addEventListener('click', async function (
 async function loadGPG() {
   try {
     var s = await api('/api/gpg/status');
-    document.getElementById('gpg-state').textContent = s.enabled ? t('set.gpg.on', 'Enabled') : t('set.gpg.off', 'Disabled');
+    document.getElementById('gpg-state').textContent = !s.enabled ? t('set.gpg.off', 'Disabled') : (s.ready ? t('set.gpg.on', 'Ready') : t('set.gpg.wait', 'Waiting for signer'));
     document.getElementById('gpg-keyid').textContent = s.key_id || '-';
-    if (s.enabled) {
+    document.getElementById('gpg-mode').textContent = s.mode || '-';
+    var q = s.queue || {};
+    document.getElementById('gpg-queue').textContent =
+      String(q.queued || 0) + ' queued · ' + String(q.claimed || 0) + ' active · ' + String(q.failed || 0) + ' failed';
+    if (s.ready) {
       try {
         var r = await fetch('/api/keys/public');
         if (r.ok) document.getElementById('gpg-pubkey').textContent = await r.text();
@@ -1974,22 +2272,172 @@ async function loadGPG() {
     document.getElementById('gpg-state').textContent = '?';
   }
 }
-document.getElementById('gpg-generate').addEventListener('click', async function () {
-  var gmsg = document.getElementById('gpg-msg');
-  noteAt(gmsg, t('set.gpg.working', 'Generating key…'), true);
-  try {
-    var r = await api('/api/gpg/generate', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: val('gpg_name'), email: val('gpg_email') })
-    });
-    noteAt(gmsg, t('set.gpg.done', 'Signing enabled, key ') + r.key_id, true);
-    loadGPG();
-  } catch (ex) { noteAt(gmsg, t('set.gpg.fail', 'Failed: ') + ex.message, false); }
-});
 loadGPG();
 
 load();
+`
+
+// ---------------------------------------------------------------------------
+// Image factory
+// ---------------------------------------------------------------------------
+
+const imageFactoryContent = `
+<div class="page-head">
+  <div><h1 data-i18n="factory.h1">Image Factory</h1><p class="sub" data-i18n="factory.sub">Profiles, offline inputs, PVE/PBS provenance, and E2E evidence</p></div>
+  <div class="actions"><button class="btn" id="refresh" data-i18n="common.refresh">Refresh</button></div>
+</div>
+<p class="factory-note" data-i18n="factory.readonly">This surface is read-only. Promotion and rollback remain signed CLI operations.</p>
+<div class="stat-grid" id="factory-stats" style="margin-top:16px"></div>
+<div id="factory-message"></div>
+<h2 class="section-title" data-i18n="factory.catalog">Active Catalog</h2>
+<div class="card">
+  <div class="table-scroll"><table class="list" aria-label="Image factory profiles">
+    <thead><tr><th>Profile</th><th data-i18n="th.arch">Arch</th><th data-i18n="factory.image">Image</th><th data-i18n="factory.displayModel">Display</th><th data-i18n="factory.sets">Package sets</th><th data-i18n="factory.channel">Channel</th></tr></thead>
+    <tbody id="factory-profiles"></tbody>
+  </table></div>
+  <div id="factory-profile-empty"></div>
+</div>
+<div class="factory-grid">
+  <section>
+    <h2 class="section-title" data-i18n="factory.milestones">Milestones</h2>
+    <div class="card"><ol class="milestone-list" id="factory-milestones"></ol><div id="factory-milestone-empty"></div></div>
+  </section>
+  <aside>
+    <h2 class="section-title" data-i18n="factory.desktop">Desktop E2E</h2>
+    <div class="card"><div class="card-pad" id="factory-desktop"></div></div>
+    <h2 class="section-title" data-i18n="factory.blockers">Blockers</h2>
+    <div class="card"><div class="card-pad" id="factory-blockers"></div></div>
+  </aside>
+</div>`
+
+const imageFactoryJS = `
+function factoryStat(labelKey, labelEN, value) {
+  var tile = el('div', 'stat-tile');
+  tile.appendChild(el('h4', null, t(labelKey, labelEN)));
+  tile.appendChild(el('div', 'num', String(value)));
+  return tile;
+}
+function labeledLine(key, fallback, value) {
+  var p = el('p', 'factory-note');
+  p.appendChild(el('strong', null, t(key, fallback) + ': '));
+  p.appendChild(document.createTextNode(value || '-'));
+  return p;
+}
+function factoryEvidenceText(item) {
+  var detail = item.label || t('factory.evidence', 'Evidence');
+  if (item.digest) detail += ' · ' + item.digest;
+  if (item.path) detail += ' · ' + item.path;
+  if (item.size_bytes) detail += ' · ' + fmtBytes(item.size_bytes);
+  if (item.recorded_at) detail += ' · ' + fmtTime(item.recorded_at);
+  return detail;
+}
+function factoryStepMeta(step) {
+  var parts = [];
+  if (step.started_at) parts.push(t('factory.started', 'Started') + ' ' + fmtTime(step.started_at));
+  if (step.completed_at) parts.push(t('factory.finished', 'Finished') + ' ' + fmtTime(step.completed_at));
+  if (step.started_at && step.completed_at) parts.push(t('factory.duration', 'Duration') + ' ' + fmtTimeRange(step.started_at, step.completed_at));
+  return parts.join(' · ');
+}
+function renderFactory(data) {
+  var catalog = data.catalog || {};
+  var profiles = catalog.profiles || [];
+  var images = catalog.images || [];
+  var bundles = catalog.mirror_bundles || [];
+  var stats = document.getElementById('factory-stats'); clear(stats);
+  stats.appendChild(factoryStat('factory.profiles', 'Profiles', profiles.length));
+  stats.appendChild(factoryStat('factory.images', 'Images', images.length));
+  stats.appendChild(factoryStat('factory.bundles', 'Offline bundles', bundles.length));
+  stats.appendChild(factoryStat('factory.catalog', 'Catalog', 'v' + (catalog.version || 0)));
+
+  var message = document.getElementById('factory-message'); clear(message);
+  if (!data.configured) message.appendChild(el('div', 'card card-pad factory-note', t('factory.notconfigured', 'IMAGE_FACTORY_STATUS_PATH is not configured; catalog data is available, but milestone evidence is not guessed by the UI.')));
+
+  var tbody = document.getElementById('factory-profiles'); clear(tbody);
+  var profileEmpty = document.getElementById('factory-profile-empty'); clear(profileEmpty);
+  if (!profiles.length) profileEmpty.appendChild(el('div', 'empty', t('factory.none', 'None')));
+  profiles.forEach(function (profile) {
+    var image = images.find(function (item) { return item.id === profile.image_id; }) || {};
+    var tr = el('tr');
+    var id = el('td', 'mono', profile.id || '-');
+    if (profile.default) id.appendChild(el('span', 'status green', ' · ' + t('factory.default', 'default')));
+    tr.appendChild(id);
+    tr.appendChild(el('td', 'sec', profile.arch || '-'));
+    tr.appendChild(el('td', 'mono sec', profile.image_id || '-'));
+    tr.appendChild(el('td', 'sec', image.display_model || '-'));
+    tr.appendChild(el('td', 'sec', (profile.package_sets || []).join(', ') || '-'));
+    tr.appendChild(el('td', 'sec', profile.channel || '-'));
+    tbody.appendChild(tr);
+  });
+
+  var status = data.status || {};
+  var milestones = status.milestones || [];
+  var milestoneList = document.getElementById('factory-milestones'); clear(milestoneList);
+  var milestoneEmpty = document.getElementById('factory-milestone-empty'); clear(milestoneEmpty);
+  if (!milestones.length) milestoneEmpty.appendChild(el('div', 'empty', t('factory.none', 'None')));
+  milestones.forEach(function (milestone) {
+    var li = el('li', 'milestone');
+    var state = el('div'); state.appendChild(statusBadge(milestone.state)); li.appendChild(state);
+    var body = el('div');
+    body.appendChild(el('h3', null, milestone.id + ' · ' + milestone.title));
+    if (milestone.summary) body.appendChild(el('p', null, milestone.summary));
+    if (milestone.completed_at) body.appendChild(el('div', 'milestone-meta', t('factory.completed', 'Completed') + ' ' + fmtTime(milestone.completed_at)));
+    if ((milestone.evidence || []).length) {
+      var evidence = el('div', 'evidence-list');
+      milestone.evidence.forEach(function (item) {
+        evidence.appendChild(el('span', null, factoryEvidenceText(item)));
+      });
+      body.appendChild(evidence);
+    }
+    if ((milestone.steps || []).length) {
+      var details = el('details', 'factory-step-details');
+      details.appendChild(el('summary', null, t('factory.stepLogs', 'Stage logs') + ' (' + milestone.steps.length + ')'));
+      var stepList = el('div', 'factory-step-list');
+      milestone.steps.forEach(function (step) {
+        var stepBox = el('div', 'factory-step');
+        var head = el('div', 'factory-step-head');
+        head.appendChild(statusBadge(step.state));
+        head.appendChild(el('strong', null, step.title));
+        head.appendChild(el('span', 'factory-step-id', step.id));
+        stepBox.appendChild(head);
+        var meta = factoryStepMeta(step);
+        if (meta) stepBox.appendChild(el('div', 'milestone-meta', meta));
+        if (step.summary) stepBox.appendChild(el('p', null, step.summary));
+        if (step.log) stepBox.appendChild(el('div', 'factory-step-log', t('factory.log', 'Log') + ': ' + factoryEvidenceText(step.log)));
+        stepList.appendChild(stepBox);
+      });
+      details.appendChild(stepList);
+      body.appendChild(details);
+    }
+    li.appendChild(body); milestoneList.appendChild(li);
+  });
+
+  var desktop = status.desktop_e2e || {};
+  var desktopBox = document.getElementById('factory-desktop'); clear(desktopBox);
+  desktopBox.appendChild(statusBadge(desktop.state || 'not_started'));
+  desktopBox.appendChild(labeledLine('factory.desktop.strategy', 'Strategy', desktop.strategy));
+  desktopBox.appendChild(labeledLine('factory.desktop.ai', 'AI boundary', desktop.ai_policy));
+  desktopBox.appendChild(labeledLine('factory.desktop.runner', 'Runner', desktop.runner));
+  desktopBox.appendChild(labeledLine('factory.desktop.display', 'Display', desktop.display));
+
+  var blockers = status.blockers || [];
+  var blockerBox = document.getElementById('factory-blockers'); clear(blockerBox);
+  if (!blockers.length) blockerBox.appendChild(el('p', 'factory-note', t('factory.noBlockers', 'No blockers are reported by the current status snapshot.')));
+  blockers.forEach(function (blocker) {
+    var item = el('div', 'blocker');
+    item.appendChild(el('strong', null, blocker.code || 'BLOCKED'));
+    item.appendChild(el('p', null, blocker.summary || '-'));
+    if (blocker.action) item.appendChild(el('p', null, t('factory.action', 'Next') + ': ' + blocker.action));
+    blockerBox.appendChild(item);
+  });
+  if (status.updated_at) document.querySelector('.page-head .sub').textContent = t('factory.updated', 'Evidence updated ') + fmtTime(status.updated_at);
+}
+async function loadFactory() {
+  try { renderFactory(await api('/api/image-factory/status')); }
+  catch (error) { showError('factory-message', error); }
+}
+function onLangChange() { loadFactory(); }
+document.getElementById('refresh').addEventListener('click', loadFactory);
+loadFactory();
 `
 
 // ---------------------------------------------------------------------------
@@ -2000,17 +2448,17 @@ const docsContent = `
 <div class="page-head"><div><h1 data-i18n="docs.h1">Docs</h1><p class="sub" data-i18n="docs.sub">Quick start</p></div></div>
 <div class="card"><div class="card-pad docs-body">
   <h2 data-i18n="docs.consume">Consume binary packages</h2>
-  <p data-i18n="docs.consume.p">Point any Gentoo machine at this server as its binhost. From then on emerge fetches and verifies binary packages automatically, falling back to source builds when a package is missing:</p>
-  <pre>sudo portage-client configure -server=http://SERVER:8080
+  <p data-i18n="docs.consume.p">Verify the signing fingerprint through a trusted channel and configure Portage's keyring before pointing a Gentoo machine at this binhost. Emerge then verifies fetched packages and falls back to source when a package is missing:</p>
+  <pre>sudo portage-client configure -server=https://SERVER
 emerge --getbinpkg app-misc/jq</pre>
   <h2 data-i18n="docs.build">Request a build</h2>
   <p data-i18n="docs.build.p">Portage has no native way to request a remote build — use the client (add -wait to block until done):</p>
-  <pre>portage-client build -server=http://SERVER:8080 -package app-misc/jq -wait</pre>
-  <p data-i18n="docs.build.p2">The server provisions an ephemeral build VM (or dispatches to a static builder); the artifact lands in the binhost repository and the Packages index refreshes automatically.</p>
+  <pre>portage-client build -server=https://SERVER -package app-misc/jq -wait</pre>
+  <p data-i18n="docs.build.p2">The server creates a fresh native Gentoo build VM (or dispatches to a static agent that owns disposable roots); the artifact lands in the binhost repository and the Packages index refreshes automatically.</p>
   <h2 data-i18n="docs.cloud">Cloud build configuration</h2>
   <p data-i18n="docs.cloud.p">PVE / cloud provider settings are managed on the Settings page and apply on save. For PVE template creation and the end-to-end test walkthrough, see docs/PVE_TESTING.md in the repository.</p>
   <h2 data-i18n="docs.gpg">GPG verification</h2>
-  <p data-i18n="docs.gpg.p">With signing enabled, the client configures verify-signature automatically; the public key is served from /api/v1/gpg/public-key.</p>
+  <p data-i18n="docs.gpg.p">Configure writes verify-signature to binrepos.conf only. An administrator can retrieve the public key from /api/v1/gpg/public-key, but clients must independently verify its full fingerprint, import it into /etc/portage/gnupg, and establish trust.</p>
 </div></div>`
 
 const docsJS = `/* static page */`
@@ -2022,7 +2470,7 @@ const shellHTML = `<!DOCTYPE html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title data-i18n="title.shell">Shell — Portage Engine</title>
-<link rel="stylesheet" href="/static/apple.css">
+<link rel="stylesheet" href="/static/apple.css?v=2">
 <link rel="stylesheet" href="/static/xterm.css">
 <style>
   .shell-head { display: flex; align-items: center; gap: 12px; padding: 10px 16px; border-bottom: .5px solid var(--labelDivider); }
@@ -2064,11 +2512,12 @@ term.onData(function (data) { if (ws.readyState === 1) ws.send(data); });
 
 // Assembled authed pages.
 var (
-	overviewHTML    = appPage("Overview", "title.overview", "overview", overviewContent, overviewJS)
-	buildsPageHTML  = appPage("Builds", "title.builds", "builds", buildsContent, buildsJS)
-	buildDetailHTML = appPage("Build Details", "title.detail", "builds", buildDetailContent, buildDetailJS)
-	logsPageHTML    = appPage("Build Logs", "title.logs", "builds", logsContent, logsJS)
-	monitorHTML     = appPage("Build Nodes", "title.monitor", "monitor", monitorContent, monitorJS)
-	settingsHTML    = appPage("Settings", "title.settings", "settings", settingsContent, settingsJS)
-	docsHTML        = appPage("Docs", "title.docs", "docs", docsContent, docsJS)
+	overviewHTML     = appPage("Overview", "title.overview", "overview", overviewContent, overviewJS)
+	buildsPageHTML   = appPage("Builds", "title.builds", "builds", buildsContent, buildsJS)
+	buildDetailHTML  = appPage("Build Details", "title.detail", "builds", buildDetailContent, buildDetailJS)
+	logsPageHTML     = appPage("Build Logs", "title.logs", "builds", logsContent, logsJS)
+	monitorHTML      = appPage("Build Nodes", "title.monitor", "monitor", monitorContent, monitorJS)
+	imageFactoryHTML = appPage("Image Factory", "title.factory", "image-factory", imageFactoryContent, imageFactoryJS)
+	settingsHTML     = appPage("Settings", "title.settings", "settings", settingsContent, settingsJS)
+	docsHTML         = appPage("Docs", "title.docs", "docs", docsContent, docsJS)
 )

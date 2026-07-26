@@ -75,6 +75,9 @@ Desktop.ini
 /var/tmp/portage-builds/
 /var/tmp/portage-artifacts/
 /var/cache/binpkgs/
+/backups/
+image-factory/packer/output/
+image-factory/common.local.json
 
 # Docker
 .docker/
@@ -87,6 +90,7 @@ Desktop.ini
 
 # Environment files
 .env
+.env.compose
 .env.local
 .env.*.local
 

@@ -490,8 +490,7 @@ func GenerateBuilderConfig(output *InstanceOutput, builderPort int) string {
 BUILDER_PORT=%d
 INSTANCE_ID=%s
 ARCHITECTURE=amd64
-USE_DOCKER=true
-DOCKER_IMAGE=gentoo/stage3:latest
+NATIVE_JOB_POLICY=single-use
 BUILD_WORK_DIR=/var/tmp/portage-builds
 BUILD_ARTIFACT_DIR=/var/tmp/portage-artifacts
 DATA_DIR=/var/lib/portage-engine

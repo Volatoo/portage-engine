@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "catalog_id": "pe/image-package-sets-v1",
+  "sets": [
+    {
+      "id": "pe/runtime-v1",
+      "packages": [
+        "app-emulation/cloud-init",
+        "app-crypt/gnupg",
+        "app-emulation/qemu-guest-agent",
+        "net-misc/openssh"
+      ]
+    },
+    {
+      "id": "pe/build-test-v1",
+      "packages": [
+        "app-misc/hello",
+        "dev-build/autoconf",
+        "dev-build/automake",
+        "dev-build/cmake",
+        "dev-build/libtool",
+        "dev-build/meson",
+        "dev-build/ninja",
+        "dev-util/pkgconf",
+        "dev-vcs/git"
+      ]
+    },
+    {
+      "id": "pe/desktop-verifier-v1",
+      "includes": [
+        "pe/runtime-v1",
+        "pe/build-test-v1"
+      ],
+      "packages": [
+        "app-accessibility/at-spi2-core",
+        "dev-python/pygobject",
+        "media-fonts/dejavu",
+        "media-gfx/scrot",
+        "net-misc/tigervnc",
+        "x11-apps/xrandr",
+        "x11-apps/xset",
+        "x11-apps/xmessage",
+        "x11-base/xorg-server",
+        "x11-misc/lightdm",
+        "x11-misc/xdotool",
+        "xfce-base/xfce4-meta"
+      ]
+    },
+    {
+      "id": "pe/catalyst-boot-v1",
+      "includes": [
+        "pe/runtime-v1",
+        "pe/build-test-v1"
+      ],
+      "packages": [
+        "sys-boot/grub",
+        "sys-kernel/gentoo-kernel-bin"
+      ]
+    }
+  ]
+}

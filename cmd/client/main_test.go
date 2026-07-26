@@ -1,12 +1,47 @@
 package main
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/slchris/portage-engine/internal/builder"
 )
+
+func TestFetchBinhostProfile(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/binhosts" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"binhosts":[
+			{"profile_id":"pe/base","arch":"amd64","binhost_path":"releases/amd64/binpackages/23.0/x86-64_pe-base","default":true,"sync_path":"/binpkgs/releases/amd64/binpackages/23.0/x86-64_pe-base"},
+			{"profile_id":"pe/desktop","arch":"amd64","binhost_path":"releases/amd64/binpackages/23.0/x86-64_pe-desktop","sync_path":"/binpkgs/releases/amd64/binpackages/23.0/x86-64_pe-desktop"}
+		]}`))
+	}))
+	defer server.Close()
+
+	selected, err := fetchBinhostProfile(server.Client(), server.URL, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if selected.ProfileID != "pe/base" {
+		t.Fatalf("default profile = %q", selected.ProfileID)
+	}
+	selected, err = fetchBinhostProfile(server.Client(), server.URL, "pe/desktop")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if selected.SyncPath != "/binpkgs/releases/amd64/binpackages/23.0/x86-64_pe-desktop" {
+		t.Fatalf("desktop sync path = %q", selected.SyncPath)
+	}
+	if _, err := fetchBinhostProfile(server.Client(), server.URL, "pe/missing"); err == nil {
+		t.Fatal("unknown profile was accepted")
+	}
+}
 
 func TestLoadConfigFromFile(t *testing.T) {
 	tmpDir := t.TempDir()

@@ -2,6 +2,7 @@ package server
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"log/slog"
 	"net"
@@ -12,6 +13,34 @@ import (
 
 	"github.com/google/uuid"
 )
+
+func (s *Server) rateLimitMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.cache == nil || !strings.HasPrefix(r.URL.Path, "/api/v1/") ||
+			(r.Method != http.MethodPost && r.Method != http.MethodPut &&
+				r.Method != http.MethodPatch && r.Method != http.MethodDelete) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		identity := stripPort(r.RemoteAddr) + "|" + r.URL.Path
+		ctx, cancel := context.WithTimeout(r.Context(), 750*time.Millisecond)
+		allowed, err := s.cache.Allow(ctx, identity,
+			s.config.Cache.RateLimitPerMinute, s.config.Cache.RateLimitBurst)
+		cancel()
+		if err != nil {
+			// Redis is acceleration, never the build correctness authority.
+			// Fail open and let PostgreSQL idempotency/fencing protect writes.
+			next.ServeHTTP(w, r)
+			return
+		}
+		if !allowed {
+			w.Header().Set("Retry-After", "1")
+			http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
 
 // responseWriter wraps http.ResponseWriter to capture the status code and bytes written.
 type responseWriter struct {
@@ -50,6 +79,13 @@ func (rw *responseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 		return nil, nil, fmt.Errorf("underlying ResponseWriter does not support hijacking")
 	}
 	return h.Hijack()
+}
+
+// Flush forwards streaming responses such as SSE through the logging wrapper.
+func (rw *responseWriter) Flush() {
+	if flusher, ok := rw.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
 }
 
 // requestIDMiddleware generates a unique request ID for each request and adds it
@@ -111,7 +147,7 @@ func (s *Server) enhancedLoggingMiddleware(next http.Handler) http.Handler {
 
 		slog.Log(r.Context(), level, "http request",
 			"method", r.Method,
-			"path", r.RequestURI,
+			"path", requestURIForLog(r),
 			"status", rw.statusCode,
 			"duration_ms", fmt.Sprintf("%.2f", float64(duration.Microseconds())/1000.0),
 			"bytes", rw.bytesWritten,
@@ -119,6 +155,21 @@ func (s *Server) enhancedLoggingMiddleware(next http.Handler) http.Handler {
 			"request_id", requestID,
 		)
 	})
+}
+
+func requestURIForLog(r *http.Request) string {
+	if r == nil || !strings.HasPrefix(r.URL.Path, "/verify-binhost/") {
+		if r == nil {
+			return ""
+		}
+		return r.RequestURI
+	}
+	rest := strings.TrimPrefix(r.URL.Path, "/verify-binhost/")
+	suffix := ""
+	if slash := strings.IndexByte(rest, '/'); slash >= 0 {
+		suffix = rest[slash:]
+	}
+	return "/verify-binhost/<redacted>" + suffix
 }
 
 // stripPort removes the port from a remote address for cleaner logging.

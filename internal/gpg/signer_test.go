@@ -2,6 +2,7 @@ package gpg
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -145,6 +146,75 @@ func TestInitializeNoKey(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "no key ID configured") {
 		t.Errorf("Unexpected error: %v", err)
+	}
+}
+
+func TestInitializeAutoCreateReusesPersistentKey(t *testing.T) {
+	if _, err := exec.LookPath("gpg"); err != nil {
+		t.Skip("gpg is not installed")
+	}
+
+	home, err := os.MkdirTemp("/tmp", "pe-gpg-restart-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(home) })
+	const email = "restart-test@portage-engine.invalid"
+	first := NewSigner("", "", true,
+		WithGnupgHome(home),
+		WithAutoCreate("Portage Engine Restart Test", email),
+	)
+	if err := first.Initialize(); err != nil {
+		t.Fatalf("first Initialize: %v", err)
+	}
+	firstKeyID := first.KeyID()
+	if firstKeyID == "" {
+		t.Fatal("first Initialize did not select a key")
+	}
+
+	second := NewSigner("", "", true,
+		WithGnupgHome(home),
+		WithAutoCreate("Portage Engine Restart Test", email),
+	)
+	if err := second.Initialize(); err != nil {
+		t.Fatalf("second Initialize: %v", err)
+	}
+	if second.KeyID() != firstKeyID {
+		t.Fatalf("restart selected key %q, want %q", second.KeyID(), firstKeyID)
+	}
+
+	keyIDs, err := second.findSecretKeyIDs(email)
+	if err != nil {
+		t.Fatalf("list restart-test keys: %v", err)
+	}
+	if len(keyIDs) != 1 {
+		t.Fatalf("restart created %d matching secret keys, want 1: %v", len(keyIDs), keyIDs)
+	}
+	marker, err := os.ReadFile(filepath.Join(home, activeKeyFile))
+	if err != nil {
+		t.Fatalf("read active-key marker: %v", err)
+	}
+	if strings.TrimSpace(string(marker)) != firstKeyID {
+		t.Fatalf("active-key marker = %q, want %q", strings.TrimSpace(string(marker)), firstKeyID)
+	}
+}
+
+func TestInitializeAutoCreateFailsClosedOnMissingMarkedKey(t *testing.T) {
+	if _, err := exec.LookPath("gpg"); err != nil {
+		t.Skip("gpg is not installed")
+	}
+
+	home := t.TempDir()
+	if err := os.WriteFile(filepath.Join(home, activeKeyFile), []byte("DEADBEEFDEADBEEF\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	signer := NewSigner("", "", true,
+		WithGnupgHome(home),
+		WithAutoCreate("Portage Engine Missing Key Test", "missing-key@portage-engine.invalid"),
+	)
+	err := signer.Initialize()
+	if err == nil || !strings.Contains(err.Error(), "references a missing key") {
+		t.Fatalf("Initialize error = %v, want missing-key failure", err)
 	}
 }
 

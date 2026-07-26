@@ -1,162 +1,89 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
-	"log"
 	"net/http"
 	"os"
-	"path/filepath"
-
-	"github.com/slchris/portage-engine/internal/gpg"
+	"time"
 )
 
-// handlers_gpg.go exposes GPG signing key management to the dashboard:
-// status, runtime key generation, and (via the existing /api/v1/gpg/public-key
-// endpoint) public key distribution.
-
-// gpgRuntimeConfig persists a dashboard-triggered signing setup so it survives
-// restarts even when the bootstrap conf has GPG_ENABLED=false.
-type gpgRuntimeConfig struct {
-	Enabled bool   `json:"enabled"`
-	Name    string `json:"name"`
-	Email   string `json:"email"`
+type signerPublicMetadata struct {
+	KeyID     string    `json:"key_id"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
-func (s *Server) gpgRuntimePath() string {
-	dataDir := s.config.DataDir
-	if dataDir == "" {
-		dataDir = "/var/lib/portage-engine/server"
-	}
-	return filepath.Join(dataDir, "gpg-runtime.json")
+func (s *Server) signerPublicMetadataPath() string {
+	return s.config.GPGPublicKeyPath + ".json"
 }
 
-// loadGPGRuntime applies a previously saved dashboard-managed signing setup.
-// Called at startup after the conf-based signer is initialized.
-func (s *Server) loadGPGRuntime() {
-	if s.gpgSigner.IsEnabled() {
-		return // conf already enables signing
-	}
-	data, err := os.ReadFile(s.gpgRuntimePath())
-	if err != nil {
-		return
-	}
-	var rc gpgRuntimeConfig
-	if json.Unmarshal(data, &rc) != nil || !rc.Enabled {
-		return
-	}
-	if err := s.enableGPG(rc.Name, rc.Email); err != nil {
-		log.Printf("Warning: failed to re-enable dashboard-managed GPG signing: %v", err)
-		return
-	}
-	log.Printf("GPG signing re-enabled from dashboard-managed config (key %s)", s.gpgSigner.KeyID())
-}
-
-// enableGPG builds an enabled signer (auto-creating a key when none exists)
-// and swaps it in.
-func (s *Server) enableGPG(name, email string) error {
-	if name == "" {
-		name = "Portage Engine"
-	}
-	if email == "" {
-		email = "portage@localhost"
-	}
-	var opts []gpg.SignerOption
-	if s.config.GPGHome != "" {
-		opts = append(opts, gpg.WithGnupgHome(s.config.GPGHome))
-	}
-	opts = append(opts, gpg.WithAutoCreate(name, email))
-	signer := gpg.NewSigner(s.config.GPGKeyID, s.config.GPGKeyPath, true, opts...)
-	if err := signer.Initialize(); err != nil {
-		return err
-	}
-	s.settingsMu.Lock()
-	s.gpgSigner = signer
-	s.settingsMu.Unlock()
-	return nil
-}
-
-// gpgKeyMaterial exports the signing key material (key ID, armored public
-// key, armored secret key) for deployment, verification, and publication.
-// Returns zero values when signing is disabled.
+// gpgKeyMaterial deliberately returns no secret-key bytes. Control-plane and
+// builder processes can distribute the isolated signer's public key, but no
+// code path in either process can export or deploy the release private key.
 func (s *Server) gpgKeyMaterial() (string, []byte, []byte) {
-	s.settingsMu.Lock()
-	signer := s.gpgSigner
-	s.settingsMu.Unlock()
-	if signer == nil || !signer.IsEnabled() || signer.KeyID() == "" {
+	if !s.config.GPGEnabled || s.config.GPGPublicKeyPath == "" {
 		return "", nil, nil
 	}
-	dir, err := os.MkdirTemp("", "pe-gpg-export")
-	if err != nil {
+	publicKey, err := os.ReadFile(s.config.GPGPublicKeyPath) // #nosec G304 -- operator-configured public key path.
+	if err != nil || len(publicKey) == 0 {
 		return "", nil, nil
 	}
-	defer func() { _ = os.RemoveAll(dir) }()
-	pubPath, secPath, err := signer.ExportKeyPair(dir)
-	if err != nil {
-		log.Printf("Warning: GPG key export failed: %v", err)
-		return "", nil, nil
+	var metadata signerPublicMetadata
+	data, err := os.ReadFile(s.signerPublicMetadataPath()) // #nosec G304 -- adjacent signer-owned metadata.
+	if err == nil {
+		_ = json.Unmarshal(data, &metadata)
 	}
-	pub, _ := os.ReadFile(pubPath)
-	sec, _ := os.ReadFile(secPath)
-	return signer.KeyID(), pub, sec
+	return metadata.KeyID, publicKey, nil
 }
 
-// handleGPGPubkey serves the armored public signing key so clients (and the
-// mirror) can trust the binhost.
 func (s *Server) handleGPGPubkey(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	keyID, pub, _ := s.gpgKeyMaterial()
-	if keyID == "" || len(pub) == 0 {
-		http.Error(w, "GPG signing is not enabled", http.StatusNotFound)
+	_, publicKey, _ := s.gpgKeyMaterial()
+	if len(publicKey) == 0 {
+		http.Error(w, "isolated signer public key is not ready", http.StatusServiceUnavailable)
 		return
 	}
 	w.Header().Set("Content-Type", "application/pgp-keys")
 	w.Header().Set("Content-Disposition", `attachment; filename="portage-engine.asc"`)
-	_, _ = w.Write(pub)
+	_, _ = w.Write(publicKey)
 }
 
-// handleGPGStatus reports whether signing is enabled and with which key.
 func (s *Server) handleGPGStatus(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	s.settingsMu.Lock()
-	signer := s.gpgSigner
-	s.settingsMu.Unlock()
-	writeJSON(w, map[string]any{
-		"enabled": signer.IsEnabled(),
-		"key_id":  signer.KeyID(),
-	})
+	keyID, publicKey, _ := s.gpgKeyMaterial()
+	response := map[string]any{
+		"enabled":          s.config.GPGEnabled,
+		"ready":            len(publicKey) > 0,
+		"key_id":           keyID,
+		"mode":             "isolated-outbound-pull",
+		"private_key_here": false,
+	}
+	if s.jobLedger != nil {
+		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		status, err := s.jobLedger.SigningRuntimeStatus(ctx)
+		cancel()
+		if err != nil {
+			response["queue_error"] = err.Error()
+		} else {
+			response["queue"] = status
+		}
+	}
+	writeJSON(w, response)
 }
 
-// handleGPGGenerate creates (or adopts) a signing key at runtime, enables
-// signing, and persists the choice.
+// Key generation is intentionally unavailable from the control plane. The
+// isolated signer owns key lifecycle and writes only its public key to the
+// shared read-only distribution path.
 func (s *Server) handleGPGGenerate(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	var req gpgRuntimeConfig
-	_ = json.NewDecoder(r.Body).Decode(&req)
-
-	if err := s.enableGPG(req.Name, req.Email); err != nil {
-		http.Error(w, "GPG setup failed: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	req.Enabled = true
-	if data, err := json.MarshalIndent(&req, "", "  "); err == nil {
-		if err := os.MkdirAll(filepath.Dir(s.gpgRuntimePath()), 0o750); err == nil {
-			_ = os.WriteFile(s.gpgRuntimePath(), data, 0o600)
-		}
-	}
-
-	log.Printf("GPG signing enabled via dashboard (key %s)", s.gpgSigner.KeyID())
-	writeJSON(w, map[string]any{
-		"enabled": true,
-		"key_id":  s.gpgSigner.KeyID(),
-	})
+	http.Error(w, "signing keys are managed only by the isolated portage-signer", http.StatusConflict)
 }

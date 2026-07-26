@@ -11,27 +11,15 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/slchris/portage-engine/internal/profilecontract"
 )
 
-// BuildOptions controls binary-package format and GPG signing for a build.
+// BuildOptions controls the unsigned binary-package format produced by a
+// builder. Private-key operations belong exclusively to portage-signer.
 type BuildOptions struct {
 	// Format is the BINPKG_FORMAT Portage produces: "gpkg" (default) or "xpak".
 	Format string
-	// SignKeyID, when non-empty, enables Gentoo-native binpkg signing
-	// (FEATURES="binpkg-signing", BINPKG_GPG_SIGNING_KEY=...). Only GPKG output
-	// can be signed.
-	SignKeyID string
-	// SignGnupgHome is the GNUPGHOME containing the signing key inside the build
-	// environment (BINPKG_GPG_SIGNING_GPG_HOME).
-	SignGnupgHome string
-	// SignHostGnupgHome is the host directory holding the signing keyring; the
-	// Docker executor bind-mounts it into the container at SignGnupgHome.
-	SignHostGnupgHome string
-}
-
-// signingEnabled reports whether native binpkg signing should be configured.
-func (o BuildOptions) signingEnabled() bool {
-	return o.SignKeyID != "" && o.Format != "xpak"
 }
 
 // BuildExecutor handles the actual package build process.
@@ -76,26 +64,45 @@ func (be *BuildExecutor) ExecuteBuild(
 	// Create build workspace
 	buildID := job.ID
 	buildWorkDir := filepath.Join(be.workDir, buildID)
-	if err := os.MkdirAll(buildWorkDir, 0750); err != nil {
+	// Portage drops fetch/build helpers to the portage user. It must be able to
+	// traverse the job-scoped PORTAGE_CONFIGROOT on native build nodes.
+	if err := os.MkdirAll(buildWorkDir, 0755); err != nil {
 		return fmt.Errorf("failed to create build workspace: %w", err)
 	}
 	defer func() {
 		_ = os.RemoveAll(buildWorkDir)
 	}()
 
+	if err := seedNativeMakeConf(buildWorkDir); err != nil {
+		return fmt.Errorf("failed to seed native Portage config: %w", err)
+	}
 	// Apply configuration to build environment
 	if err := be.configTransfer.ApplyConfigToSystem(bundle, buildWorkDir); err != nil {
 		return fmt.Errorf("failed to apply configuration: %w", err)
 	}
+	if err := verifyRepositoryRevisions(ctx, bundle.Config.Repos); err != nil {
+		return fmt.Errorf("repository provenance check failed: %w", err)
+	}
+	configRoot, err := prepareNativeProfile(bundle, buildWorkDir)
+	if err != nil {
+		return fmt.Errorf("profile selection failed: %w", err)
+	}
+	pkgDir := filepath.Join(buildWorkDir, "binpkgs")
+	if err := os.MkdirAll(pkgDir, 0o755); err != nil {
+		return fmt.Errorf("failed to create job package directory: %w", err)
+	}
 
 	// Build each package
 	for _, pkg := range bundle.Packages.Packages {
-		if err := be.buildPackage(ctx, pkg, bundle, buildWorkDir, job); err != nil {
+		if err := be.buildPackage(ctx, pkg, bundle, buildWorkDir, pkgDir, configRoot, job); err != nil {
 			return fmt.Errorf("failed to build package %s: %w", pkg.Atom, err)
 		}
 	}
 
-	return nil
+	// Publish the complete set created by this job, including dependencies.
+	// Verification uses --usepkgonly, so publishing only the requested atom is
+	// insufficient for a clean/offline install.
+	return be.collectArtifacts(pkgDir, job)
 }
 
 // buildPackage builds a single package.
@@ -104,6 +111,8 @@ func (be *BuildExecutor) buildPackage(
 	pkg PackageSpec,
 	bundle *ConfigBundle,
 	buildWorkDir string,
+	pkgDir string,
+	configRoot string,
 	job *BuildJob,
 ) error {
 	// Construct emerge command
@@ -117,7 +126,7 @@ func (be *BuildExecutor) buildPackage(
 	execCmd.Dir = buildWorkDir
 
 	// Set environment variables
-	execCmd.Env = append(os.Environ(), be.buildEnvironment(pkg, bundle, be.nativePkgDir())...)
+	execCmd.Env = append(os.Environ(), be.buildEnvironment(pkg, bundle, pkgDir, configRoot)...)
 
 	job.appendLog(fmt.Sprintf("Building package: %s\n", pkg.Atom))
 	job.appendLog(fmt.Sprintf("Command: %s\n", strings.Join(cmd, " ")))
@@ -134,11 +143,6 @@ func (be *BuildExecutor) buildPackage(
 
 	if err != nil {
 		return fmt.Errorf("emerge failed: %w", err)
-	}
-
-	// Find and collect built packages
-	if err := be.collectArtifacts(pkg, buildWorkDir, job); err != nil {
-		return fmt.Errorf("failed to collect artifacts: %w", err)
 	}
 
 	return nil
@@ -179,7 +183,10 @@ func (be *BuildExecutor) constructEmergeCommand(
 
 	// Add the package atom
 	if pkg.Version != "" {
-		cmd = append(cmd, fmt.Sprintf("%s-%s", pkg.Atom, pkg.Version))
+		// A versioned Gentoo atom is an exact-match atom and therefore must use
+		// the '=' operator. Without it, emerge rejects category/package-version
+		// as an invalid atom before dependency resolution starts.
+		cmd = append(cmd, fmt.Sprintf("=%s-%s", pkg.Atom, pkg.Version))
 	} else {
 		cmd = append(cmd, pkg.Atom)
 	}
@@ -187,10 +194,8 @@ func (be *BuildExecutor) constructEmergeCommand(
 	return cmd
 }
 
-// buildEnvironment constructs the environment variables for the build. pkgDir is
-// the PKGDIR emerge should write binary packages to (a host path for native
-// builds, an in-container path for Docker builds).
-func (be *BuildExecutor) buildEnvironment(pkg PackageSpec, bundle *ConfigBundle, pkgDir string) []string {
+// buildEnvironment constructs the environment variables for the native build.
+func (be *BuildExecutor) buildEnvironment(pkg PackageSpec, bundle *ConfigBundle, pkgDir, configRoot string) []string {
 	env := []string{}
 
 	// Collect any user-supplied FEATURES so we extend rather than clobber them.
@@ -212,20 +217,9 @@ func (be *BuildExecutor) buildEnvironment(pkg PackageSpec, bundle *ConfigBundle,
 	}
 	appendUserEnv(pkg.Environment)
 
-	// Select the binary package format (gpkg by default; only gpkg is signable).
+	// Select the binary package format. The builder always emits unsigned
+	// artifacts; signing occurs only after the quarantine verification gate.
 	env = append(env, fmt.Sprintf("BINPKG_FORMAT=%s", be.opts.Format))
-
-	// Configure Gentoo-native binpkg signing when a signing key is available.
-	// This makes emerge itself produce a signed .gpkg.tar — the only signature
-	// a stock emerge will verify — instead of an external detached .sig.
-	if be.opts.signingEnabled() {
-		features["binpkg-signing"] = true
-		features["gpg-keepalive"] = true
-		env = append(env, fmt.Sprintf("BINPKG_GPG_SIGNING_KEY=%s", be.opts.SignKeyID))
-		if be.opts.SignGnupgHome != "" {
-			env = append(env, fmt.Sprintf("BINPKG_GPG_SIGNING_GPG_HOME=%s", be.opts.SignGnupgHome))
-		}
-	}
 
 	// Emit FEATURES in sorted order for determinism.
 	featureList := make([]string, 0, len(features))
@@ -236,32 +230,83 @@ func (be *BuildExecutor) buildEnvironment(pkg PackageSpec, bundle *ConfigBundle,
 	env = append(env, fmt.Sprintf("FEATURES=%s", strings.Join(featureList, " ")))
 
 	env = append(env, fmt.Sprintf("PKGDIR=%s", pkgDir))
+	if configRoot != "" {
+		env = append(env, fmt.Sprintf("PORTAGE_CONFIGROOT=%s", configRoot))
+	}
 
 	return env
 }
 
-// nativePkgDir returns the PKGDIR for native builds (a host path under workDir).
-func (be *BuildExecutor) nativePkgDir() string {
-	return filepath.Join(be.workDir, "packages")
+func seedNativeMakeConf(configRoot string) error {
+	destinationDir := filepath.Join(configRoot, "etc", "portage")
+	if err := os.MkdirAll(destinationDir, 0o755); err != nil {
+		return err
+	}
+	source := filepath.Join("/etc", "portage", "make.conf")
+	info, err := os.Stat(source)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil || !info.Mode().IsRegular() || info.Size() > 1<<20 {
+		return fmt.Errorf("host make.conf is not a bounded regular file")
+	}
+	content, err := os.ReadFile(source) // #nosec G304 -- fixed operator-owned Portage path.
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(destinationDir, "make.conf"), content, 0o644)
 }
 
-// containerPkgDir is the in-container PKGDIR the Docker executor uses; it matches
-// the path artifacts are copied from after the build.
-const containerPkgDir = "/var/cache/binpkgs"
+func prepareNativeProfile(bundle *ConfigBundle, configRoot string) (string, error) {
+	makeProfile := filepath.Join(configRoot, "etc", "portage", "make.profile")
+	if err := os.Remove(makeProfile); err != nil && !os.IsNotExist(err) {
+		return "", err
+	}
+	metadata := bundle.Metadata
+	if metadata.ProfileRepositoryID == "" {
+		// Direct local compatibility requests predate the catalog fields. They
+		// still get an isolated config root, but inherit the image's already
+		// selected profile rather than silently ignoring the bundle.
+		profile, err := filepath.EvalSymlinks("/etc/portage/make.profile")
+		if err != nil {
+			return "", fmt.Errorf("resolve image make.profile: %w", err)
+		}
+		if err := os.Symlink(profile, makeProfile); err != nil {
+			return "", err
+		}
+		return configRoot, nil
+	}
+	var profileRepository *RepoConfig
+	for index := range bundle.Config.Repos {
+		if bundle.Config.Repos[index].RegistryID == metadata.ProfileRepositoryID {
+			profileRepository = &bundle.Config.Repos[index]
+			break
+		}
+	}
+	if profileRepository == nil || profileRepository.Name != metadata.ProfileRepositoryName {
+		return "", fmt.Errorf("resolved profile repository is absent")
+	}
+	selection := profilecontract.Selection{RepositoryName: profileRepository.Name, RepositoryRoot: profileRepository.Location, ProfilePath: metadata.Profile,
+		VerifyExactParents: len(metadata.ProfileParents) > 0}
+	for _, parent := range metadata.ProfileParents {
+		selection.Parents = append(selection.Parents, profilecontract.Parent{RepositoryName: parent.RepositoryName, ProfilePath: parent.ProfilePath})
+	}
+	profileDir, err := profilecontract.Verify(selection)
+	if err != nil {
+		return "", err
+	}
+	if err := os.Symlink(profileDir, makeProfile); err != nil {
+		return "", err
+	}
+	return configRoot, nil
+}
 
 // collectArtifacts collects built package artifacts.
-func (be *BuildExecutor) collectArtifacts(
-	pkg PackageSpec,
-	_ string,
-	job *BuildJob,
-) error {
-	// Find binary package in PKGDIR
-	pkgDir := be.nativePkgDir()
-
+func (be *BuildExecutor) collectArtifacts(pkgDir string, job *BuildJob) error {
 	// The package structure is typically:
 	//   GPKG:  PKGDIR/category/package/package-version.gpkg.tar
 	//   XPAK:  PKGDIR/category/package-version.tbz2
-	var foundPackages []string
+	var rels []string
 
 	err := filepath.Walk(pkgDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -270,10 +315,11 @@ func (be *BuildExecutor) collectArtifacts(
 		// Match modern GPKG (.gpkg.tar) and legacy XPAK (.tbz2) so artifacts are
 		// found regardless of the configured format.
 		if !info.IsDir() && (strings.HasSuffix(info.Name(), ".gpkg.tar") || strings.HasSuffix(info.Name(), ".tbz2")) {
-			// Check if this package matches the atom
-			if strings.Contains(path, strings.ReplaceAll(pkg.Atom, "/", string(os.PathSeparator))) {
-				foundPackages = append(foundPackages, path)
+			rel, relErr := filepath.Rel(pkgDir, path)
+			if relErr != nil || rel == "." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+				return fmt.Errorf("invalid package path %s", path)
 			}
+			rels = append(rels, rel)
 		}
 		return nil
 	})
@@ -282,20 +328,32 @@ func (be *BuildExecutor) collectArtifacts(
 		return fmt.Errorf("failed to search for packages: %w", err)
 	}
 
-	if len(foundPackages) == 0 {
-		return fmt.Errorf("no binary packages found for %s", pkg.Atom)
+	if len(rels) == 0 {
+		return fmt.Errorf("no binary packages found")
 	}
+	sort.Strings(rels)
 
-	// Copy artifacts to artifact directory
-	for _, pkgPath := range foundPackages {
-		destPath := filepath.Join(be.artifactDir, filepath.Base(pkgPath))
+	// Copy artifacts to the shared serving directory with category preserved,
+	// while the job records only its own paths (never stale warm-pool output).
+	for _, rel := range rels {
+		pkgPath := filepath.Join(pkgDir, rel)
+		destPath := filepath.Join(be.artifactDir, rel)
+		if err := os.MkdirAll(filepath.Dir(destPath), 0o750); err != nil {
+			return fmt.Errorf("failed to create artifact directory: %w", err)
+		}
 		if err := be.copyFile(pkgPath, destPath); err != nil {
 			return fmt.Errorf("failed to copy artifact: %w", err)
 		}
-
-		job.setArtifactURL(destPath)
 		job.appendLog(fmt.Sprintf("Artifact collected: %s\n", destPath))
 	}
+	primary := primaryArtifact(rels, job.Request.PackageName, func(rel string) int64 {
+		if info, statErr := os.Stat(filepath.Join(be.artifactDir, rel)); statErr == nil {
+			return info.Size()
+		}
+		return 0
+	})
+	job.setArtifactURL(filepath.Join(be.artifactDir, primary))
+	job.setArtifacts(rels)
 
 	return nil
 }
@@ -325,190 +383,45 @@ func (be *BuildExecutor) copyFile(src, dst string) error {
 	return destFile.Sync()
 }
 
-// DockerBuildExecutor handles Docker-based builds.
-type DockerBuildExecutor struct {
-	*BuildExecutor
-	dockerImage      string
-	containerRuntime ContainerRuntime
-}
-
-// NewDockerBuildExecutor creates a new Docker-based build executor with default
-// (gpkg, unsigned) options.
-func NewDockerBuildExecutor(workDir, artifactDir, dockerImage string, runtime ContainerRuntime) *DockerBuildExecutor {
-	return NewDockerBuildExecutorWithOptions(workDir, artifactDir, dockerImage, runtime, BuildOptions{Format: "gpkg"})
-}
-
-// NewDockerBuildExecutorWithOptions creates a Docker executor with explicit options.
-func NewDockerBuildExecutorWithOptions(workDir, artifactDir, dockerImage string, runtime ContainerRuntime, opts BuildOptions) *DockerBuildExecutor {
-	if runtime == nil {
-		runtime = NewDockerRuntime()
-	}
-	return &DockerBuildExecutor{
-		BuildExecutor:    NewBuildExecutorWithOptions(workDir, artifactDir, opts),
-		dockerImage:      dockerImage,
-		containerRuntime: runtime,
-	}
-}
-
-// ExecuteBuild executes a build inside a Docker container.
-func (dbe *DockerBuildExecutor) ExecuteBuild(
-	ctx context.Context,
-	bundle *ConfigBundle,
-	job *BuildJob,
-) error {
-	// Reject any bundle whose fields contain shell metacharacters or option
-	// injection before constructing any command.
-	if err := validateBundle(bundle); err != nil {
-		return fmt.Errorf("invalid build request: %w", err)
-	}
-
-	// Create build workspace
-	buildID := job.ID
-	buildWorkDir := filepath.Join(dbe.workDir, buildID)
-	if err := os.MkdirAll(buildWorkDir, 0750); err != nil {
-		return fmt.Errorf("failed to create build workspace: %w", err)
-	}
-	defer func() {
-		_ = os.RemoveAll(buildWorkDir)
-	}()
-
-	// Export configuration bundle
-	bundlePath := filepath.Join(buildWorkDir, "config-bundle.tar.gz")
-	if err := dbe.configTransfer.ExportBundle(bundle, bundlePath); err != nil {
-		return fmt.Errorf("failed to export bundle: %w", err)
-	}
-
-	// Prepare container
-	containerName := fmt.Sprintf("portage-build-%s", buildID)
-
-	// Create container
-	createArgs := []string{
-		"--name", containerName,
-		"-v", fmt.Sprintf("%s:/workspace", buildWorkDir),
-		"-v", fmt.Sprintf("%s:/artifacts", dbe.artifactDir),
-	}
-	// Mount the signing keyring read-only at a staging path. GnuPG needs a
-	// writable, 0700 GNUPGHOME, so the apply step copies it to a writable
-	// location before use.
-	if dbe.opts.signingEnabled() && dbe.opts.SignHostGnupgHome != "" {
-		createArgs = append(createArgs,
-			"-v", fmt.Sprintf("%s:%s:ro", dbe.opts.SignHostGnupgHome, dbe.opts.SignGnupgHome+"-src"))
-	}
-	createArgs = append(createArgs,
-		"-w", "/workspace",
-		dbe.dockerImage,
-		"/bin/bash", "-c", "sleep infinity",
-	)
-
-	if err := dbe.containerRuntime.Create(ctx, createArgs); err != nil {
-		job.appendLog(fmt.Sprintf("Failed to create container: %v\n", err))
-		return fmt.Errorf("failed to create container: %w", err)
-	}
-
-	// Start container
-	if err := dbe.containerRuntime.Start(ctx, containerName); err != nil {
-		_ = dbe.cleanupContainer(ctx, containerName)
-		return fmt.Errorf("failed to start container: %w", err)
-	}
-
-	// Ensure cleanup
-	defer func() {
-		_ = dbe.cleanupContainer(ctx, containerName)
-	}()
-
-	// Extract configuration bundle inside container
-	_, err := dbe.containerRuntime.Exec(ctx, containerName, []string{
-		"/bin/bash", "-c",
-		"mkdir -p /tmp/config && tar -xzf /workspace/config-bundle.tar.gz -C /tmp/config",
-	})
-	if err != nil {
-		return fmt.Errorf("failed to extract config bundle: %w", err)
-	}
-
-	// Apply configuration. The make.conf override fragment is appended to the
-	// real /etc/portage/make.conf (Portage does not source make.conf.d/), so it
-	// is not left as a stray copied file but appended explicitly.
-	_, err = dbe.containerRuntime.Exec(ctx, containerName, []string{
-		"/bin/bash", "-c",
-		"cp -r /tmp/config/etc/portage/* /etc/portage/ 2>/dev/null; " +
-			"rm -f /etc/portage/make.conf.portage-engine; " +
-			"if [ -f /tmp/config/" + makeConfFragmentPath + " ]; then " +
-			"cat /tmp/config/" + makeConfFragmentPath + " >> /etc/portage/make.conf; fi",
-	})
-	if err != nil {
-		return fmt.Errorf("failed to apply configuration: %w", err)
-	}
-
-	// Prepare a writable GNUPGHOME for binpkg-signing: GnuPG requires a 0700,
-	// writable home, but the host keyring is mounted read-only.
-	if dbe.opts.signingEnabled() && dbe.opts.SignHostGnupgHome != "" {
-		src := dbe.opts.SignGnupgHome + "-src"
-		dst := dbe.opts.SignGnupgHome
-		_, err = dbe.containerRuntime.Exec(ctx, containerName, []string{
-			"/bin/bash", "-c",
-			fmt.Sprintf("rm -rf %s && cp -a %s %s && chmod 700 %s && chmod -R go-rwx %s",
-				dst, src, dst, dst, dst),
-		})
+// verifyRepositoryRevisions fails closed when a catalog-pinned git repository
+// is not already present at the requested commit. The build path deliberately
+// does not fetch or check out here: image/mirror preparation owns mutation,
+// while package jobs only consume immutable inputs.
+func verifyRepositoryRevisions(ctx context.Context, repos []RepoConfig) error {
+	for _, repo := range repos {
+		if repo.Revision == "" {
+			continue
+		}
+		if repo.SyncType != "git" {
+			return fmt.Errorf("repository %q pins a revision but is not git-backed", repo.Name)
+		}
+		output, err := exec.CommandContext(ctx, "git", "-C", repo.Location, "rev-parse", "HEAD").Output()
 		if err != nil {
-			return fmt.Errorf("failed to prepare signing keyring: %w", err)
+			return fmt.Errorf("read repository %q revision: %w", repo.Name, err)
+		}
+		status, err := exec.CommandContext(ctx, "git", "-C", repo.Location, "status", "--porcelain=v1", "--untracked-files=all").Output()
+		if err != nil {
+			return fmt.Errorf("read repository %q worktree state: %w", repo.Name, err)
+		}
+		if err := validateRepositoryState(repo.Revision, string(output), string(status)); err != nil {
+			return fmt.Errorf("repository %q: %w", repo.Name, err)
 		}
 	}
-
-	// Build packages
-	for _, pkg := range bundle.Packages.Packages {
-		if err := dbe.buildPackageInDocker(ctx, pkg, bundle, containerName, job); err != nil {
-			return fmt.Errorf("failed to build package %s: %w", pkg.Atom, err)
-		}
-	}
-
 	return nil
 }
 
-// buildPackageInDocker builds a package inside container.
-func (dbe *DockerBuildExecutor) buildPackageInDocker(
-	ctx context.Context,
-	pkg PackageSpec,
-	bundle *ConfigBundle,
-	containerName string,
-	job *BuildJob,
-) error {
-	// Construct emerge command as an argv slice. The container runtime passes
-	// it directly to `docker exec` (no shell), so none of the atom/USE/keyword
-	// values can be interpreted as shell metacharacters.
-	emergeCmd := dbe.constructEmergeCommand(pkg, bundle, "")
-
-	// Environment variables are passed via `docker exec -e KEY=VALUE`, again
-	// avoiding any shell interpretation of the values.
-	envVars := dbe.buildEnvironment(pkg, bundle, containerPkgDir)
-
-	job.appendLog(fmt.Sprintf("Building package in container: %s\n", pkg.Atom))
-	job.appendLog(fmt.Sprintf("Command: %s\n", strings.Join(emergeCmd, " ")))
-
-	startTime := time.Now()
-	output, err := dbe.containerRuntime.ExecEnv(ctx, containerName, envVars, emergeCmd)
-	duration := time.Since(startTime)
-
-	job.appendLog(fmt.Sprintf("Build duration: %s\n", duration))
-	job.appendLog(fmt.Sprintf("Output:\n%s\n", string(output)))
-
-	if err != nil {
-		return fmt.Errorf("emerge failed in container: %w", err)
-	}
-
-	// Copy artifacts from the container's PKGDIR (matches the PKGDIR env above).
-	src := fmt.Sprintf("%s:%s/.", containerName, containerPkgDir)
-	if err := dbe.containerRuntime.Copy(ctx, src, dbe.artifactDir); err != nil {
-		job.appendLog(fmt.Sprintf("Warning: Failed to copy artifacts: %v\n", err))
-	}
-
-	return nil
+func revisionMatches(expected, actual string) bool {
+	expected = strings.ToLower(strings.TrimSpace(expected))
+	actual = strings.ToLower(strings.TrimSpace(actual))
+	return len(expected) >= 7 && strings.HasPrefix(actual, expected)
 }
 
-// cleanupContainer stops and removes a container.
-func (dbe *DockerBuildExecutor) cleanupContainer(ctx context.Context, containerName string) error {
-	// Stop container
-	_ = dbe.containerRuntime.Stop(ctx, containerName)
-
-	// Remove container
-	return dbe.containerRuntime.Remove(ctx, containerName)
+func validateRepositoryState(expected, actual, porcelain string) error {
+	if !revisionMatches(expected, actual) {
+		return fmt.Errorf("is at %s, expected %s", strings.TrimSpace(actual), expected)
+	}
+	if strings.TrimSpace(porcelain) != "" {
+		return fmt.Errorf("worktree has tracked or untracked modifications")
+	}
+	return nil
 }

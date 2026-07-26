@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "updated_at": "2026-07-23T00:00:00Z",
+  "overall_state": "planned",
+  "milestones": [
+    {
+      "id": "IMG-0",
+      "title": "Catalog and immutable contracts",
+      "state": "planned",
+      "summary": "Replace this example with evidence produced by the deployment.",
+      "steps": [
+        {
+          "id": "catalog-validate",
+          "title": "Validate reviewed catalog",
+          "state": "planned",
+          "summary": "Record bounded operator-facing context here. Raw logs stay in a digest-bound artifact and must be scrubbed before publication.",
+          "log": {
+            "label": "Catalog validation log",
+            "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "path": "evidence/catalog-validate.log",
+            "size_bytes": 1024
+          }
+        }
+      ]
+    }
+  ],
+  "blockers": [],
+  "desktop_e2e": {
+    "state": "planned",
+    "strategy": "deterministic-first",
+    "ai_policy": "triage-only",
+    "runner": "openQA-compatible guest runner",
+    "display": "VNC/SPICE plus screenshot artifacts",
+    "artifacts": "screenshots, video, serial log, journal, application logs"
+  }
+}

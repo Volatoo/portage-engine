@@ -35,11 +35,14 @@ type PortageConfig struct {
 
 // RepoConfig represents a repository configuration.
 type RepoConfig struct {
-	Name     string `json:"name"`
-	Location string `json:"location"`
-	SyncType string `json:"sync_type"`
-	SyncURI  string `json:"sync_uri"`
-	Priority int    `json:"priority"`
+	RegistryID string `json:"registry_id,omitempty"`
+	Name       string `json:"name"`
+	Location   string `json:"location"`
+	SyncType   string `json:"sync_type"`
+	SyncURI    string `json:"sync_uri"`
+	Revision   string `json:"revision,omitempty"`
+	Digest     string `json:"digest,omitempty"`
+	Priority   int    `json:"priority"`
 }
 
 // BuildPackageSpec specifies packages to build with their configurations.
@@ -65,11 +68,23 @@ type ConfigBundle struct {
 
 // BundleMetadata contains metadata about the configuration bundle.
 type BundleMetadata struct {
-	UserID      string `json:"user_id"`
-	TargetArch  string `json:"target_arch"`
-	Profile     string `json:"profile"`
-	CreatedAt   string `json:"created_at"`
-	Description string `json:"description,omitempty"`
+	UserID                string             `json:"user_id"`
+	TargetArch            string             `json:"target_arch"`
+	ProfileID             string             `json:"profile_id,omitempty"`
+	Profile               string             `json:"profile"`
+	ProfileRepositoryID   string             `json:"profile_repository_id,omitempty"`
+	ProfileRepositoryName string             `json:"profile_repository_name,omitempty"`
+	ProfileParents        []ProfileParentRef `json:"profile_parents,omitempty"`
+	CreatedAt             string             `json:"created_at"`
+	Description           string             `json:"description,omitempty"`
+}
+
+// ProfileParentRef is the resolved, server-owned parent chain expected in the
+// selected external profile's parent file.
+type ProfileParentRef struct {
+	RepositoryID   string `json:"repository_id"`
+	RepositoryName string `json:"repository_name"`
+	ProfilePath    string `json:"profile_path"`
 }
 
 // ConfigTransfer handles configuration transfer operations.
@@ -446,12 +461,19 @@ func (ct *ConfigTransfer) CreateConfigBundle(
 		Packages: packages,
 		Metadata: metadata,
 	}
+	if err := validateBundle(bundle); err != nil {
+		return nil, fmt.Errorf("invalid config bundle: %w", err)
+	}
 
 	return bundle, nil
 }
 
 // ExportBundle exports the configuration bundle to a tarball.
 func (ct *ConfigTransfer) ExportBundle(bundle *ConfigBundle, outputPath string) error {
+	if err := validateBundle(bundle); err != nil {
+		return fmt.Errorf("invalid config bundle: %w", err)
+	}
+
 	// Create output file
 	outFile, err := os.Create(outputPath)
 	if err != nil {
@@ -710,12 +732,18 @@ func (ct *ConfigTransfer) ImportBundle(bundlePath string) (*ConfigBundle, error)
 	if bundle == nil {
 		return nil, fmt.Errorf("bundle.json not found in tarball")
 	}
+	if err := validateBundle(bundle); err != nil {
+		return nil, fmt.Errorf("invalid config bundle: %w", err)
+	}
 
 	return bundle, nil
 }
 
 // ApplyConfigToSystem applies the configuration bundle to a target system.
 func (ct *ConfigTransfer) ApplyConfigToSystem(bundle *ConfigBundle, targetRoot string) error {
+	if err := validateBundle(bundle); err != nil {
+		return fmt.Errorf("invalid config bundle: %w", err)
+	}
 	if targetRoot == "" {
 		targetRoot = "/"
 	}
@@ -766,7 +794,9 @@ func (ct *ConfigTransfer) createPortageDirs(portageDir string) error {
 	}
 
 	for _, dir := range dirs {
-		if err := os.MkdirAll(dir, 0750); err != nil {
+		// Native Portage drops helpers to the portage user, which must be able
+		// to traverse and read the job-scoped configuration tree.
+		if err := os.MkdirAll(dir, 0755); err != nil {
 			return fmt.Errorf("failed to create directory %s: %w", dir, err)
 		}
 	}
@@ -786,7 +816,7 @@ func (ct *ConfigTransfer) writePackageUse(portageDir string, packageUse map[stri
 	content := strings.Join(lines, "\n") + "\n"
 	path := filepath.Join(portageDir, "package.use", "00-user")
 
-	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
 		return fmt.Errorf("failed to write package.use: %w", err)
 	}
 	return nil
@@ -805,7 +835,7 @@ func (ct *ConfigTransfer) writePackageKeywords(portageDir string, packageKeyword
 	content := strings.Join(lines, "\n") + "\n"
 	path := filepath.Join(portageDir, "package.accept_keywords", "00-user")
 
-	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
 		return fmt.Errorf("failed to write package.accept_keywords: %w", err)
 	}
 	return nil
@@ -820,7 +850,7 @@ func (ct *ConfigTransfer) writePackageMask(portageDir string, packageMask []stri
 	content := strings.Join(packageMask, "\n") + "\n"
 	path := filepath.Join(portageDir, "package.mask", "00-user")
 
-	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
 		return fmt.Errorf("failed to write package.mask: %w", err)
 	}
 	return nil
@@ -835,7 +865,7 @@ func (ct *ConfigTransfer) writePackageUnmask(portageDir string, packageUnmask []
 	content := strings.Join(packageUnmask, "\n") + "\n"
 	path := filepath.Join(portageDir, "package.unmask", "00-user")
 
-	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
 		return fmt.Errorf("failed to write package.unmask: %w", err)
 	}
 	return nil
@@ -888,7 +918,7 @@ func (ct *ConfigTransfer) writeReposConf(portageDir string, repos []RepoConfig) 
 		content := strings.Join(lines, "\n") + "\n"
 		path := filepath.Join(portageDir, "repos.conf", fmt.Sprintf("%s.conf", repo.Name))
 
-		if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+		if err := os.WriteFile(path, []byte(content), 0644); err != nil {
 			return fmt.Errorf("failed to write repos.conf for %s: %w", repo.Name, err)
 		}
 	}

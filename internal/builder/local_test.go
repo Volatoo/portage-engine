@@ -1,17 +1,35 @@
 package builder
 
 import (
+	"errors"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
-	"github.com/slchris/portage-engine/internal/gpg"
+	"github.com/slchris/portage-engine/pkg/config"
 )
+
+// testReusableBuilderConfig keeps tests isolated from the production
+// single-use marker. Reuse is safe here because t.TempDir gives every test a
+// disposable root and these tests exercise queue/status behavior rather than
+// host-root hygiene.
+func testReusableBuilderConfig(t *testing.T) *config.BuilderConfig {
+	t.Helper()
+	root := t.TempDir()
+	return &config.BuilderConfig{
+		NativeJobPolicy:    "unsafe-reuse",
+		DataDir:            filepath.Join(root, "data"),
+		WorkDir:            filepath.Join(root, "work"),
+		ArtifactDir:        filepath.Join(root, "artifacts"),
+		PersistenceEnabled: false,
+	}
+}
 
 // TestNewLocalBuilder tests creating a new LocalBuilder.
 func TestNewLocalBuilder(t *testing.T) {
-	signer := gpg.NewSigner("/tmp/test-gpg", "test@example.com", false)
-
-	builder := NewLocalBuilder(2, signer, nil)
+	builder := NewLocalBuilder(2, testReusableBuilderConfig(t))
 	if builder == nil {
 		t.Fatal("NewLocalBuilder returned nil")
 	}
@@ -20,24 +38,96 @@ func TestNewLocalBuilder(t *testing.T) {
 		t.Errorf("Expected 2 workers, got %d", builder.workers)
 	}
 
-	if builder.signer != signer {
-		t.Error("Signer not set correctly")
-	}
-
 	if builder.executor == nil {
 		t.Error("Executor not initialized")
 	}
 
-	if builder.dockerExecutor == nil {
-		t.Error("Docker executor not initialized")
+}
+
+func TestNativeSingleUsePersistsDrainAcrossRestart(t *testing.T) {
+	root := t.TempDir()
+	cfg := &config.BuilderConfig{
+		Workers:            0, // keep the accepted job queued; no real emerge
+		NativeJobPolicy:    "single-use",
+		DataDir:            filepath.Join(root, "data"),
+		WorkDir:            filepath.Join(root, "work"),
+		ArtifactDir:        filepath.Join(root, "artifacts"),
+		PersistenceEnabled: false,
+	}
+	first := NewLocalBuilder(0, cfg)
+	if !first.AcceptingBuilds() || first.Capacity() != 1 {
+		t.Fatalf("fresh single-use native builder state: accepting=%v capacity=%d", first.AcceptingBuilds(), first.Capacity())
+	}
+	jobID, err := first.SubmitBuild(&LocalBuildRequest{PackageName: "app-misc/hello"})
+	if err != nil {
+		t.Fatalf("first native job was rejected: %v", err)
+	}
+	if first.AcceptingBuilds() {
+		t.Fatal("single-use native builder still accepts jobs after reservation")
+	}
+	if first.Capacity() != 0 {
+		t.Fatalf("consumed single-use native builder capacity = %d, want 0", first.Capacity())
+	}
+	if _, err := first.SubmitBuild(&LocalBuildRequest{PackageName: "app-misc/jq"}); !errors.Is(err, ErrNativeBuilderDraining) {
+		t.Fatalf("second native job error = %v, want ErrNativeBuilderDraining", err)
+	}
+
+	marker := filepath.Join(cfg.DataDir, "native-builder-tainted.json")
+	info, err := os.Stat(marker)
+	if err != nil {
+		t.Fatalf("taint marker missing: %v", err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("taint marker mode = %o, want 600", info.Mode().Perm())
+	}
+	data, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), jobID) {
+		t.Fatalf("taint marker does not bind accepted job: %s", data)
+	}
+
+	restarted := NewLocalBuilder(0, cfg)
+	if restarted.AcceptingBuilds() {
+		t.Fatal("process restart cleared native taint without a rootfs reset")
+	}
+	if _, err := restarted.SubmitBuild(&LocalBuildRequest{PackageName: "app-misc/jq"}); !errors.Is(err, ErrNativeBuilderDraining) {
+		t.Fatalf("restarted dirty builder error = %v, want ErrNativeBuilderDraining", err)
+	}
+	status := restarted.GetStatus()
+	if status["status"] != "draining" || status["accepting_builds"] != false || status["capacity"] != 0 {
+		t.Fatalf("dirty builder status did not expose drain state: %+v", status)
+	}
+}
+
+func TestNativeSingleUseCorruptMarkerFailsClosed(t *testing.T) {
+	root := t.TempDir()
+	dataDir := filepath.Join(root, "data")
+	if err := os.MkdirAll(dataDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dataDir, "native-builder-tainted.json"), []byte("{partial"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.BuilderConfig{
+		NativeJobPolicy: "single-use",
+		DataDir:         dataDir,
+		WorkDir:         filepath.Join(root, "work"),
+		ArtifactDir:     filepath.Join(root, "artifacts"),
+	}
+	b := NewLocalBuilder(0, cfg)
+	if b.AcceptingBuilds() {
+		t.Fatal("corrupt native taint marker was treated as a clean builder")
+	}
+	if _, err := b.SubmitBuild(&LocalBuildRequest{PackageName: "app-misc/hello"}); !errors.Is(err, ErrNativeBuilderDraining) {
+		t.Fatalf("corrupt-marker builder error = %v, want ErrNativeBuilderDraining", err)
 	}
 }
 
 // TestLocalBuilderSubmitBuild tests submitting a build job.
 func TestLocalBuilderSubmitBuild(t *testing.T) {
-	signer := gpg.NewSigner("/tmp/test-gpg", "test@example.com", false)
-
-	builder := NewLocalBuilder(1, signer, nil)
+	builder := NewLocalBuilder(0, testReusableBuilderConfig(t))
 
 	req := &LocalBuildRequest{
 		PackageName: "dev-lang/python",
@@ -75,9 +165,7 @@ func TestLocalBuilderSubmitBuild(t *testing.T) {
 
 // TestLocalBuilderGetJobStatus tests retrieving job status.
 func TestLocalBuilderGetJobStatus(t *testing.T) {
-	signer := gpg.NewSigner("/tmp/test-gpg", "test@example.com", false)
-
-	builder := NewLocalBuilder(1, signer, nil)
+	builder := NewLocalBuilder(0, testReusableBuilderConfig(t))
 
 	req := &LocalBuildRequest{
 		PackageName: "app-editors/vim",
@@ -107,9 +195,7 @@ func TestLocalBuilderGetJobStatus(t *testing.T) {
 
 // TestLocalBuilderGetJobStatusNotFound tests retrieving non-existent job.
 func TestLocalBuilderGetJobStatusNotFound(t *testing.T) {
-	signer := gpg.NewSigner("/tmp/test-gpg", "test@example.com", false)
-
-	builder := NewLocalBuilder(1, signer, nil)
+	builder := NewLocalBuilder(0, testReusableBuilderConfig(t))
 
 	_, err := builder.GetJobStatus("non-existent-job-id")
 	if err == nil {
@@ -119,9 +205,7 @@ func TestLocalBuilderGetJobStatusNotFound(t *testing.T) {
 
 // TestLocalBuilderListJobs tests listing all jobs.
 func TestLocalBuilderListJobs(t *testing.T) {
-	signer := gpg.NewSigner("/tmp/test-gpg", "test@example.com", false)
-
-	builder := NewLocalBuilder(1, signer, nil)
+	builder := NewLocalBuilder(0, testReusableBuilderConfig(t))
 
 	// Submit multiple jobs
 	for i := 0; i < 3; i++ {
@@ -143,9 +227,7 @@ func TestLocalBuilderListJobs(t *testing.T) {
 
 // TestLocalBuilderGetStatus tests getting builder status.
 func TestLocalBuilderGetStatus(t *testing.T) {
-	signer := gpg.NewSigner("/tmp/test-gpg", "test@example.com", false)
-
-	builder := NewLocalBuilder(2, signer, nil)
+	builder := NewLocalBuilder(2, testReusableBuilderConfig(t))
 
 	status := builder.GetStatus()
 	if status == nil {
@@ -163,8 +245,7 @@ func TestLocalBuilderGetStatus(t *testing.T) {
 
 // TestLocalBuilderGetArtifactPath tests getting artifact path for a job.
 func TestLocalBuilderGetArtifactPath(t *testing.T) {
-	signer := gpg.NewSigner("/tmp/test-gpg", "test@example.com", false)
-	builder := NewLocalBuilder(1, signer, nil)
+	builder := NewLocalBuilder(0, testReusableBuilderConfig(t))
 
 	// Test non-existent job
 	_, err := builder.GetArtifactPath("non-existent-job")
@@ -191,8 +272,7 @@ func TestLocalBuilderGetArtifactPath(t *testing.T) {
 
 // TestLocalBuilderGetArtifactInfo tests getting artifact info for a job.
 func TestLocalBuilderGetArtifactInfo(t *testing.T) {
-	signer := gpg.NewSigner("/tmp/test-gpg", "test@example.com", false)
-	builder := NewLocalBuilder(1, signer, nil)
+	builder := NewLocalBuilder(0, testReusableBuilderConfig(t))
 
 	// Test non-existent job
 	_, err := builder.GetArtifactInfo("non-existent-job")

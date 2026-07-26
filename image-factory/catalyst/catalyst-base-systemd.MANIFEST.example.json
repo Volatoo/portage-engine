@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "target": "catalyst-base-systemd",
+  "repository_commit": "1111111111111111111111111111111111111111",
+  "objects": [
+    {
+      "filename": "hello-2.12.1.tar.gz",
+      "uri": "https://distfiles.example.internal/hello-2.12.1.tar.gz",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "size": 0
+    }
+  ]
+}

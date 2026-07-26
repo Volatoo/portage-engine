@@ -1,0 +1,17 @@
+.git
+.github
+.claude
+.vscode
+.local
+bin
+
+**/.terraform
+**/*.tfstate
+**/*.tfstate.*
+**/terraform.tfvars
+
+*.log
+*.tmp
+*.swp
+.DS_Store
+coverage*

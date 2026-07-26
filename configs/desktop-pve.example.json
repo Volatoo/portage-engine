@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "endpoint": "https://pve.example.internal/api2/json",
+  "insecure_skip_tls_verify": false,
+  "ca_bundle_path": "/etc/portage-engine/pve-ca.pem",
+  "node": "pve01",
+  "vmid": 9300,
+  "allowed_snapshot": "clean",
+  "staging_binhost": "http://mirror.example.internal/portage-engine/staging/g1",
+  "staging_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  "guest_agent_path": "/usr/libexec/portage-desktop-agent",
+  "artifact_directory": "/var/lib/portage-engine/desktop-evidence",
+  "lifecycle_timeout_seconds": 300
+}

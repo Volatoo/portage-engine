@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "captured_at": "2026-07-22T00:00:00Z",
+  "valid_until": "2026-07-22T00:30:00Z",
+  "retain_newest": 2,
+  "min_retired_age_hours": 168,
+  "aliases": [
+    {
+      "schema_version": 1,
+      "alias": "stable",
+      "revision": 3,
+      "release_id": "release-2026-07-22-g3",
+      "previous_release_id": "release-2026-07-15-g2",
+      "catalog_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "receipt_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "updated_at": "2026-07-22T00:00:00Z",
+      "reason": "promotion"
+    }
+  ],
+  "generations": [
+    {
+      "release_id": "release-2026-07-22-g3",
+      "catalog_path": "releases/release-2026-07-22-g3/catalog.json",
+      "catalog_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "created_at": "2026-07-22T00:00:00Z"
+    },
+    {
+      "release_id": "release-2026-07-01-g1",
+      "catalog_path": "releases/release-2026-07-01-g1/catalog.json",
+      "catalog_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+      "created_at": "2026-07-01T00:00:00Z",
+      "retired_at": "2026-07-15T00:00:00Z"
+    }
+  ],
+  "leases": [
+    {
+      "lease_id": "builder-job-123",
+      "release_id": "release-2026-07-01-g1",
+      "expires_at": "2026-07-23T00:00:00Z",
+      "state": "active"
+    }
+  ]
+}

@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "target": "base-systemd",
+  "plan_object_id": "build-plan/base-systemd-catalyst-g2",
+  "image_id": "pe/amd64/no-multilib/catalyst-base-g2",
+  "generation": "catalyst-g2",
+  "provider": "pve",
+  "arch": "amd64",
+  "build_mode": "native-gentoo",
+  "source_template": "pe-gentoo-amd64-no-multilib-catalyst-seed-g2-r2",
+  "source_vmid": 9509,
+  "source_provenance_object_id": "qcow2-manifest/catalyst-profile-nomultilib-systemd-g2",
+  "template": "pe-gentoo-amd64-no-multilib-catalyst-base-g2",
+  "template_summary": "Portage Engine amd64/no-multilib/systemd Catalyst base candidate g2",
+  "profile_id": "pe/amd64/no-multilib/systemd/base-v1",
+  "profile_path": "portage-engine/amd64/23.0/no-multilib/systemd/base",
+  "profile_repository": "pe-profiles",
+  "gentoo_repository_key_object_id": "release-key/gentoo-developer",
+  "profile_parents": [
+    {"repository": "gentoo", "profile_path": "default/linux/amd64/23.0/no-multilib/systemd"}
+  ],
+  "profile_repository_key_object_id": "release-key/pe-profiles-g2",
+  "mirror_bundle_id": "mirror/img4f-catalyst-seed-live-v4-2026-07-23",
+  "repositories": {
+    "gentoo": "562f512d37e15e97551769962528e12ceea8714b",
+    "pe-profiles": "70269bf86c3edc1fb901390c4cbcd3d9a6f6379e"
+  },
+  "repository_object_ids": {
+    "gentoo": "repository/gentoo-562f512d",
+    "pe-profiles": "repository/pe-profiles-70269bf"
+  },
+  "repository_uris": {
+    "gentoo": "http://10.31.0.2/local/portage-engine/git/gentoo.git",
+    "pe-profiles": "http://10.31.0.2/local/portage-engine/git/pe-profiles.git"
+  },
+  "rootfs_source": "catalyst-stage4-qcow2",
+  "channel": "candidate",
+  "gentoo_mirror": "http://10.31.0.2/gentoo",
+  "binhost": "",
+  "package_sets": [
+    "pe/runtime-v1",
+    "pe/build-test-v1"
+  ],
+  "packages": [],
+  "desktop": false,
+  "display_model": "std",
+  "cores": 4,
+  "memory": 8192
+}

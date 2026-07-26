@@ -419,3 +419,155 @@ func TestHandleBuildsPage(t *testing.T) {
 		t.Errorf("expected builds page content, got: %s", w.Body.String()[:min(200, w.Body.Len())])
 	}
 }
+
+func TestImageFactoryPageAndStatusProxy(t *testing.T) {
+	const snapshot = `{"configured":true,"catalog":{"version":2,"profiles":[],"images":[],"mirror_bundles":[]},"status":{"schema_version":1,"overall_state":"in_progress","milestones":[],"blockers":[],"desktop_e2e":{"state":"planned"}}}`
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/image-factory/status" || r.Header.Get("X-API-Key") != "dashboard-backend-key" {
+			http.Error(w, "unexpected image factory request", http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(snapshot))
+	}))
+	defer backend.Close()
+
+	dashboard := New(&config.DashboardConfig{ServerURL: backend.URL, ServerAPIKey: "dashboard-backend-key", AllowAnonymous: true})
+	page := httptest.NewRecorder()
+	dashboard.handleImageFactoryPage(page, httptest.NewRequest(http.MethodGet, "/image-factory", nil))
+	if page.Code != http.StatusOK || !strings.Contains(page.Body.String(), "factory-milestones") {
+		t.Fatalf("image factory page was not rendered: status=%d body=%s", page.Code, page.Body.String())
+	}
+	if !strings.Contains(page.Body.String(), "factory-step-details") {
+		t.Fatal("image factory page does not render structured stage-log details")
+	}
+
+	proxied := httptest.NewRecorder()
+	dashboard.handleImageFactoryStatusProxy(proxied, httptest.NewRequest(http.MethodGet, "/api/image-factory/status", nil))
+	if proxied.Code != http.StatusOK || proxied.Body.String() != snapshot {
+		t.Fatalf("image factory status was not proxied exactly: status=%d body=%s", proxied.Code, proxied.Body.String())
+	}
+
+	wrongMethod := httptest.NewRecorder()
+	dashboard.handleImageFactoryStatusProxy(wrongMethod, httptest.NewRequest(http.MethodPost, "/api/image-factory/status", nil))
+	if wrongMethod.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("image factory status accepted mutation method: %d", wrongMethod.Code)
+	}
+}
+
+func TestBuildPagesRenderStructuredLogDetails(t *testing.T) {
+	dashboard := New(&config.DashboardConfig{ServerURL: "http://localhost:8080", AllowAnonymous: true})
+
+	detail := httptest.NewRecorder()
+	dashboard.handleBuildDetail(detail, httptest.NewRequest(http.MethodGet, "/build/job-1", nil))
+	if detail.Code != http.StatusOK || !strings.Contains(detail.Body.String(), `id="stage-log-summary"`) ||
+		!strings.Contains(detail.Body.String(), `id="live-log-meta"`) ||
+		!strings.Contains(detail.Body.String(), `{ key: 'publish'`) {
+		t.Fatalf("build detail does not include structured log detail surfaces: status=%d", detail.Code)
+	}
+
+	logs := httptest.NewRecorder()
+	dashboard.handleBuildLogs(logs, httptest.NewRequest(http.MethodGet, "/logs/job-1", nil))
+	if logs.Code != http.StatusOK || !strings.Contains(logs.Body.String(), `id="log-filters"`) ||
+		!strings.Contains(logs.Body.String(), `id="log-meta"`) {
+		t.Fatalf("build logs page does not include filters and metadata: status=%d", logs.Code)
+	}
+}
+
+func TestSchedulerStatusDoesNotFabricateFallbackData(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	serverURL := backend.URL
+	backend.Close()
+
+	dashboard := New(&config.DashboardConfig{
+		ServerURL:      serverURL,
+		AllowAnonymous: true,
+	})
+	w := httptest.NewRecorder()
+	dashboard.handleSchedulerStatus(w, httptest.NewRequest(http.MethodGet, "/api/scheduler/status", nil))
+
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502, got %d: %s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	if strings.Contains(body, "builder-1") || strings.Contains(body, `"queued_tasks":5`) {
+		t.Fatalf("response contains fabricated scheduler data: %s", body)
+	}
+	if !strings.Contains(body, "backend server unreachable") {
+		t.Fatalf("expected backend error details, got: %s", body)
+	}
+}
+
+func TestLedgerStatusProxyPreservesDegradedState(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/ledger/status" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"enabled":true,"ok":false,"write_errors":2,"last_reconcile":{"consistent":false}}`))
+	}))
+	defer backend.Close()
+
+	dashboard := New(&config.DashboardConfig{ServerURL: backend.URL, AllowAnonymous: true})
+	w := httptest.NewRecorder()
+	dashboard.handleLedgerStatusAPI(w, httptest.NewRequest(http.MethodGet, "/api/ledger/status", nil))
+
+	if w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), `"write_errors":2`) {
+		t.Fatalf("ledger proxy status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	wrongMethod := httptest.NewRecorder()
+	dashboard.handleLedgerStatusAPI(wrongMethod, httptest.NewRequest(http.MethodPost, "/api/ledger/status", nil))
+	if wrongMethod.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("ledger proxy accepted mutation: %d", wrongMethod.Code)
+	}
+}
+
+func TestMonitorRendersJobLedgerSurface(t *testing.T) {
+	dashboard := New(&config.DashboardConfig{ServerURL: "http://localhost:8080", AllowAnonymous: true})
+	w := httptest.NewRecorder()
+	dashboard.handleBuildersMonitor(w, httptest.NewRequest(http.MethodGet, "/monitor", nil))
+
+	body := w.Body.String()
+	if w.Code != http.StatusOK || !strings.Contains(body, `id="ledger"`) ||
+		!strings.Contains(body, `/api/ledger/status`) ||
+		!strings.Contains(body, `id="scheduler"`) ||
+		!strings.Contains(body, `/api/scheduler/status`) ||
+		!strings.Contains(body, `id="runtime-metadata"`) ||
+		!strings.Contains(body, `/api/runtime-metadata/status`) ||
+		!strings.Contains(body, `id="cache-status"`) ||
+		!strings.Contains(body, `/api/cache/status`) ||
+		!strings.Contains(body, `write_errors`) {
+		t.Fatalf("monitor missing ledger surface: status=%d", w.Code)
+	}
+}
+
+func TestBuildCancelAndRetryProxies(t *testing.T) {
+	var requests []string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests = append(requests, r.Method+" "+r.URL.RequestURI())
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer backend.Close()
+	dashboard := New(&config.DashboardConfig{ServerURL: backend.URL, AllowAnonymous: true})
+
+	cancel := httptest.NewRecorder()
+	dashboard.handleBuildCancelProxy(cancel, httptest.NewRequest(
+		http.MethodPost, "/api/builds/cancel?job_id=job%2F1&reason=operator+request", nil,
+	))
+	retry := httptest.NewRecorder()
+	dashboard.handleBuildRetryProxy(retry, httptest.NewRequest(
+		http.MethodPost, "/api/builds/retry?job_id=job%2F1", nil,
+	))
+	if cancel.Code != http.StatusOK || retry.Code != http.StatusOK {
+		t.Fatalf("cancel=%d retry=%d", cancel.Code, retry.Code)
+	}
+	if len(requests) != 2 ||
+		requests[0] != "POST /api/v1/builds/cancel?job_id=job%2F1&reason=operator+request" ||
+		requests[1] != "POST /api/v1/builds/retry?job_id=job%2F1" {
+		t.Fatalf("proxied requests=%v", requests)
+	}
+}

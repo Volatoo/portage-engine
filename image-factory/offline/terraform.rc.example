@@ -1,0 +1,8 @@
+provider_installation {
+  filesystem_mirror {
+    path    = "__PORTAGE_ENGINE_OFFLINE_TERRAFORM_PROVIDERS__"
+    include = ["registry.terraform.io/telmate/proxmox"]
+  }
+}
+
+disable_checkpoint = true

@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "target": "desktop-verifier",
+  "repository_commit": "1111111111111111111111111111111111111111",
+  "objects": [
+    {
+      "filename": "example-desktop-distfile.tar.xz",
+      "uri": "https://distfiles.example.internal/example-desktop-distfile.tar.xz",
+      "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "size": 1
+    }
+  ]
+}

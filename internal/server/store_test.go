@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/slchris/portage-engine/internal/builder"
+	"github.com/slchris/portage-engine/internal/catalog"
 )
 
 func TestServerStore(t *testing.T) {
@@ -33,6 +34,11 @@ func TestServerStore(t *testing.T) {
 			Version:     "3.11",
 			CreatedAt:   time.Now().Add(-time.Hour),
 			UpdatedAt:   time.Now(),
+			ResolvedContext: &catalog.ResolvedBuildContext{
+				CatalogVersion: 1, ProfileID: "pe/amd64/base", ImageID: "pe/base-g1",
+				ImageGeneration: "g1", MirrorBundleID: "mirror/g1",
+				Repositories: []catalog.ResolvedRepository{{ID: "gentoo", Revision: "0123456789abcdef0123456789abcdef01234567"}},
+			},
 		},
 		"job-2": {
 			JobID:       "job-2",
@@ -61,6 +67,9 @@ func TestServerStore(t *testing.T) {
 	}
 	if loaded["job-2"].Status != "building" {
 		t.Errorf("Expected status building, got %s", loaded["job-2"].Status)
+	}
+	if got := loaded["job-1"].ResolvedContext; got == nil || got.ImageGeneration != "g1" || len(got.Repositories) != 1 {
+		t.Fatalf("resolved provenance was not persisted: %+v", got)
 	}
 }
 

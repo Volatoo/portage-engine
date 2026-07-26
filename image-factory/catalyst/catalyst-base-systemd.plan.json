@@ -1,0 +1,39 @@
+{
+  "schema_version": 2,
+  "target": "catalyst-base-systemd",
+  "plan_object_id": "catalyst-plan/base-systemd-g1",
+  "rootfs_id": "rootfs/catalyst-base-systemd-g1",
+  "generation": "g1",
+  "arch": "amd64",
+  "subarch": "amd64",
+  "rel_type": "default",
+  "version_stamp": "pe-g1",
+  "snapshot_id": "pe-g1-111111111111",
+  "profile_id": "pe/amd64/glibc/systemd/base-v1",
+  "profile_path": "default/linux/amd64/23.0/systemd",
+  "profile_repository": "gentoo",
+  "mirror_bundle_id": "mirror/catalyst-candidate-2026-07-22",
+  "repositories": {
+    "gentoo": "1111111111111111111111111111111111111111"
+  },
+  "repository_object_id": "repository/gentoo-1111111",
+  "gentoo_repository_key_object_id": "release-key/gentoo-repository",
+  "stage3_object_id": "stage3/amd64-systemd-20260720",
+  "stage3_digests_object_id": "stage3-digests/amd64-systemd-20260720",
+  "release_key_object_id": "release-key/gentoo-release",
+  "catalyst_runtime_object_id": "catalyst-runtime/4.1.1",
+  "distfile_manifest_object_id": "distfiles/catalyst-base-systemd-manifest",
+  "package_set_catalog_object_id": "package-sets/image-v1",
+  "package_sets": [
+    "pe/catalyst-boot-v1"
+  ],
+  "packages": [],
+  "runtime_gentoo_repository_uri": "https://git-mirror.example.internal/gentoo.git",
+  "runtime_gentoo_mirror": "https://distfiles.example.internal",
+  "runtime_binhost": "https://binpkgs.example.internal",
+  "seed_filename": "stage3-amd64-systemd-20260720T163024Z.tar.xz",
+  "output_filename": "stage4-amd64-pe-g1.tar.xz",
+  "qcow2_filename": "pe-gentoo-amd64-systemd-catalyst-g1.qcow2",
+  "disk_size_gib": 32,
+  "jobs": 4
+}

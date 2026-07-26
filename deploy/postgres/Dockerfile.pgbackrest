@@ -1,0 +1,28 @@
+FROM postgres:18.4-bookworm
+
+ARG PGBACKREST_VERSION=2.59.0
+ARG PGBACKREST_SHA256=faaf8faa14a6392279654ee216a493fcd07b0c513af4b55fe34faec062cb8875
+
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+      build-essential ca-certificates curl meson ninja-build pkg-config \
+      libbz2-dev liblz4-dev libpq-dev libssl-dev libxml2-dev libzstd-dev zlib1g-dev; \
+    curl --fail --location --proto '=https' --tlsv1.2 \
+      --output /tmp/pgbackrest.tar.gz \
+      "https://github.com/pgbackrest/pgbackrest/releases/download/release/${PGBACKREST_VERSION}/pgbackrest-${PGBACKREST_VERSION}.tar.gz"; \
+    echo "${PGBACKREST_SHA256}  /tmp/pgbackrest.tar.gz" | sha256sum --check --strict; \
+    mkdir /tmp/pgbackrest; \
+    tar --extract --gzip --file /tmp/pgbackrest.tar.gz \
+      --directory /tmp/pgbackrest --strip-components=1; \
+    meson setup /tmp/pgbackrest/build /tmp/pgbackrest; \
+    ninja -C /tmp/pgbackrest/build; \
+    install -m 0755 /tmp/pgbackrest/build/src/pgbackrest /usr/local/bin/pgbackrest; \
+    apt-get purge -y --auto-remove \
+      build-essential curl meson ninja-build pkg-config \
+      libbz2-dev liblz4-dev libpq-dev libssl-dev libxml2-dev libzstd-dev zlib1g-dev; \
+    rm -rf /var/lib/apt/lists/* /tmp/pgbackrest /tmp/pgbackrest.tar.gz; \
+    pgbackrest version
+
+RUN install -d -o postgres -g postgres -m 0750 \
+      /var/log/pgbackrest /var/lib/pgbackrest /var/spool/pgbackrest

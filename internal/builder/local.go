@@ -5,6 +5,8 @@ import (
 	"archive/tar"
 	"bufio"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -16,20 +18,23 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/slchris/portage-engine/internal/gpg"
 	"github.com/slchris/portage-engine/internal/notification"
+	"github.com/slchris/portage-engine/internal/signing"
 	"github.com/slchris/portage-engine/pkg/config"
 )
 
 // LocalBuildRequest represents a local package build request.
 type LocalBuildRequest struct {
-	PackageName  string            `json:"package_name"`
-	Version      string            `json:"version"`
-	Arch         string            `json:"arch,omitempty"`
-	UseFlags     map[string]string `json:"use_flags"`
-	Environment  map[string]string `json:"environment"`
-	ConfigBundle *ConfigBundle     `json:"config_bundle,omitempty"`
-	PackageSpecs []PackageSpec     `json:"package_specs,omitempty"`
+	PackageName   string            `json:"package_name"`
+	Version       string            `json:"version"`
+	Arch          string            `json:"arch,omitempty"`
+	ProfileID     string            `json:"profile_id,omitempty"`
+	RepositoryIDs []string          `json:"repository_ids,omitempty"`
+	ResourceClass string            `json:"resource_class,omitempty"`
+	UseFlags      map[string]string `json:"use_flags"`
+	Environment   map[string]string `json:"environment"`
+	ConfigBundle  *ConfigBundle     `json:"config_bundle,omitempty"`
+	PackageSpecs  []PackageSpec     `json:"package_specs,omitempty"`
 }
 
 // BuildJob represents a build job with its status.
@@ -82,13 +87,6 @@ func (j *BuildJob) setArtifactURL(url string) {
 	j.mu.Unlock()
 }
 
-// setLog replaces the job log under the job lock.
-func (j *BuildJob) setLog(s string) {
-	j.mu.Lock()
-	j.Log = s
-	j.mu.Unlock()
-}
-
 // snapshot returns a copy of the status and artifact URL under the job lock.
 func (j *BuildJob) snapshot() (status, artifactURL string) {
 	j.mu.Lock()
@@ -122,22 +120,16 @@ func (j *BuildJob) Clone() *BuildJob {
 	return c
 }
 
-// LocalBuilder handles build jobs locally using Docker or native builds.
+// LocalBuilder handles build jobs in a native Gentoo disposable root.
 type LocalBuilder struct {
 	workers          int
 	jobQueue         chan *BuildJob
 	jobs             map[string]*BuildJob
 	jobsMutex        sync.RWMutex
-	signer           *gpg.Signer
-	gpgClient        *GPGKeyClient
 	storageUpload    *StorageUploader
 	workDir          string
 	artifactDir      string
-	useDocker        bool
-	dockerImage      string
-	containerRuntime ContainerRuntime
 	executor         *BuildExecutor
-	dockerExecutor   *DockerBuildExecutor
 	notifier         *notification.Notifier
 	jobStore         *JobStore
 	persister        *JobPersister
@@ -145,56 +137,63 @@ type LocalBuilder struct {
 	architecture     string
 	pkgMgr           PackageManager
 	cfg              *config.BuilderConfig
+	nativeStateMu    sync.Mutex
+	nativeJobPolicy  string
+	nativeConsumed   bool
+	nativeMarkerPath string
+	nativeJobID      string
+}
+
+// ErrNativeBuilderDraining means a single-use native builder has already
+// accepted its lifetime BuildJob. The host root may now contain arbitrary VDB,
+// filesystem and ebuild post-install state, so only an external snapshot/VM
+// reset can make it eligible again.
+var ErrNativeBuilderDraining = errors.New("native builder is single-use and already consumed; reset the VM/rootfs snapshot before accepting another job")
+
+type nativeTaintRecord struct {
+	JobID      string    `json:"job_id"`
+	ReservedAt time.Time `json:"reserved_at"`
+	Reason     string    `json:"reason"`
 }
 
 // NewLocalBuilder creates a new local builder instance.
-func NewLocalBuilder(workers int, signer *gpg.Signer, cfg *config.BuilderConfig) *LocalBuilder {
-	return newLocalBuilderWithConfig(workers, signer, cfg)
+func NewLocalBuilder(workers int, cfg *config.BuilderConfig) *LocalBuilder {
+	return newLocalBuilderWithConfig(workers, cfg)
 }
 
 // newLocalBuilderWithConfig creates a new local builder with the given configuration.
-func newLocalBuilderWithConfig(workers int, signer *gpg.Signer, cfg *config.BuilderConfig) *LocalBuilder {
+func newLocalBuilderWithConfig(workers int, cfg *config.BuilderConfig) *LocalBuilder {
 	workDir := getWorkDir(cfg)
 	artifactDir := getArtifactDir(cfg)
-	useDocker := getUseDocker(cfg)
-	dockerImage := getDockerImage(cfg)
-	containerRuntimeName := getContainerRuntime(cfg)
-	containerRuntime := NewContainerRuntime(containerRuntimeName)
-
-	log.Printf("Container runtime: %s", containerRuntime.Name())
-
 	ensureDirectories(workDir, artifactDir)
 	notifier := loadNotifier(cfg)
-	gpgClient := initGPGClient(cfg)
 	storageUpload := initStorageUploader(cfg)
-	executor := initBuildExecutor(cfg, containerRuntime, dockerImage)
-	dockerExecutor := initDockerExecutor(cfg, containerRuntime, dockerImage)
+	executor := initBuildExecutor(cfg)
 	pkgMgr := initPackageManager(cfg)
 	jobStore := initJobStore(cfg)
 
 	instanceID := generateInstanceID(cfg)
 	architecture := getArchitecture(cfg)
+	nativeJobPolicy, nativeMarkerPath, nativeConsumed, nativeJobID := nativeReuseState(cfg)
 
 	lb := &LocalBuilder{
 		workers:          workers,
 		jobQueue:         make(chan *BuildJob, 100),
 		jobs:             make(map[string]*BuildJob),
-		signer:           signer,
-		gpgClient:        gpgClient,
 		storageUpload:    storageUpload,
 		workDir:          workDir,
 		artifactDir:      artifactDir,
-		useDocker:        useDocker,
-		dockerImage:      dockerImage,
-		containerRuntime: containerRuntime,
 		executor:         executor,
-		dockerExecutor:   dockerExecutor,
 		notifier:         notifier,
 		jobStore:         jobStore,
 		instanceID:       instanceID,
 		architecture:     architecture,
 		pkgMgr:           pkgMgr,
 		cfg:              cfg,
+		nativeJobPolicy:  nativeJobPolicy,
+		nativeConsumed:   nativeConsumed,
+		nativeMarkerPath: nativeMarkerPath,
+		nativeJobID:      nativeJobID,
 	}
 
 	if jobStore != nil {
@@ -221,6 +220,138 @@ func newLocalBuilderWithConfig(workers int, signer *gpg.Signer, cfg *config.Buil
 	return lb
 }
 
+func nativeReuseState(cfg *config.BuilderConfig) (policy, markerPath string, consumed bool, jobID string) {
+	// Native-only builders fail safe even when constructed without a config.
+	policy = "single-use"
+	if cfg != nil {
+		switch cfg.NativeJobPolicy {
+		case "", "single-use":
+			policy = "single-use"
+		case "unsafe-reuse":
+			policy = "unsafe-reuse"
+		default:
+			policy = "single-use"
+		}
+	}
+	if policy != "single-use" {
+		return policy, "", false, ""
+	}
+
+	dataDir := "/var/lib/portage-engine"
+	if cfg != nil && cfg.DataDir != "" {
+		dataDir = cfg.DataDir
+	}
+	markerPath = filepath.Join(dataDir, "native-builder-tainted.json")
+	data, err := os.ReadFile(markerPath)
+	if os.IsNotExist(err) {
+		return policy, markerPath, false, ""
+	}
+	if err != nil {
+		// An unreadable marker is still evidence that a prior native job may
+		// have consumed this root. Never turn a permissions/disk fault into a
+		// clean-builder decision.
+		return policy, markerPath, true, ""
+	}
+	var record nativeTaintRecord
+	if json.Unmarshal(data, &record) == nil {
+		jobID = record.JobID
+	}
+	return policy, markerPath, true, jobID
+}
+
+// reserveNativeLifetime atomically consumes a single-use native builder before
+// the job is queued. The durable marker makes a service restart fail closed:
+// restarting only the process cannot clean a host root mutated by emerge.
+func (lb *LocalBuilder) reserveNativeLifetime(jobID string) error {
+	if lb.nativeJobPolicy != "single-use" {
+		return nil
+	}
+	lb.nativeStateMu.Lock()
+	defer lb.nativeStateMu.Unlock()
+	if lb.nativeConsumed {
+		return ErrNativeBuilderDraining
+	}
+	if err := os.MkdirAll(filepath.Dir(lb.nativeMarkerPath), 0o750); err != nil {
+		return fmt.Errorf("create native taint state directory: %w", err)
+	}
+	record, err := json.Marshal(nativeTaintRecord{
+		JobID:      jobID,
+		ReservedAt: time.Now().UTC(),
+		Reason:     "native emerge can mutate the host root; external reset required",
+	})
+	if err != nil {
+		return err
+	}
+	marker, err := os.OpenFile(lb.nativeMarkerPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		if os.IsExist(err) {
+			lb.nativeConsumed = true
+			return ErrNativeBuilderDraining
+		}
+		return fmt.Errorf("create native taint marker: %w", err)
+	}
+	// From this point on, fail closed even if writing or syncing the marker
+	// fails. The exclusive marker exists, and a storage fault must not make
+	// this process advertise the root as reusable.
+	lb.nativeConsumed = true
+	lb.nativeJobID = jobID
+	if _, err := marker.Write(record); err != nil {
+		_ = marker.Close()
+		return err
+	}
+	if err := marker.Sync(); err != nil {
+		_ = marker.Close()
+		return err
+	}
+	if err := marker.Close(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// releaseNativeLifetime is used only when queue admission fails before any
+// worker can execute the job. Once admitted, the marker is intentionally never
+// cleared by the builder process.
+func (lb *LocalBuilder) releaseNativeLifetime(jobID string) {
+	if lb.nativeJobPolicy != "single-use" {
+		return
+	}
+	lb.nativeStateMu.Lock()
+	defer lb.nativeStateMu.Unlock()
+	if !lb.nativeConsumed || lb.nativeJobID != jobID {
+		return
+	}
+	if err := os.Remove(lb.nativeMarkerPath); err != nil && !os.IsNotExist(err) {
+		log.Printf("Warning: failed to roll back unused native taint marker: %v", err)
+		return
+	}
+	lb.nativeConsumed = false
+	lb.nativeJobID = ""
+}
+
+// AcceptingBuilds reports whether this service may accept another BuildJob.
+// Artifact/status/verification endpoints remain available while draining.
+func (lb *LocalBuilder) AcceptingBuilds() bool {
+	lb.nativeStateMu.Lock()
+	defer lb.nativeStateMu.Unlock()
+	return lb.nativeJobPolicy != "single-use" || !lb.nativeConsumed
+}
+
+// Capacity is the currently safe admission capacity. A fresh native single-use
+// builder can accept one lifetime job even if legacy configuration requested
+// more worker goroutines; once consumed it advertises zero.
+func (lb *LocalBuilder) Capacity() int {
+	if lb.nativeJobPolicy == "single-use" {
+		lb.nativeStateMu.Lock()
+		defer lb.nativeStateMu.Unlock()
+		if lb.nativeConsumed {
+			return 0
+		}
+		return 1
+	}
+	return lb.workers
+}
+
 // getWorkDir returns the work directory from config or environment.
 func getWorkDir(cfg *config.BuilderConfig) string {
 	workDir := os.Getenv("BUILD_WORK_DIR")
@@ -243,38 +374,6 @@ func getArtifactDir(cfg *config.BuilderConfig) string {
 		return "/var/tmp/portage-artifacts"
 	}
 	return artifactDir
-}
-
-// getUseDocker returns whether to use Docker from config or environment.
-func getUseDocker(cfg *config.BuilderConfig) bool {
-	if cfg != nil && cfg.UseDocker {
-		return true
-	}
-	return os.Getenv("USE_DOCKER") == "true"
-}
-
-// getDockerImage returns the Docker image from config or environment.
-func getDockerImage(cfg *config.BuilderConfig) string {
-	dockerImage := os.Getenv("DOCKER_IMAGE")
-	if dockerImage == "" {
-		if cfg != nil && cfg.DockerImage != "" {
-			return cfg.DockerImage
-		}
-		return "gentoo/stage3:latest"
-	}
-	return dockerImage
-}
-
-// getContainerRuntime returns the container runtime from config or environment.
-func getContainerRuntime(cfg *config.BuilderConfig) string {
-	containerRuntime := os.Getenv("CONTAINER_RUNTIME")
-	if containerRuntime == "" {
-		if cfg != nil && cfg.ContainerRuntime != "" {
-			return cfg.ContainerRuntime
-		}
-		return "docker"
-	}
-	return containerRuntime
 }
 
 // ensureDirectories creates and verifies the work and artifact directories.
@@ -316,46 +415,6 @@ func loadNotifier(cfg *config.BuilderConfig) *notification.Notifier {
 	return nil
 }
 
-// initGPGClient initializes the GPG key client if configured.
-func initGPGClient(cfg *config.BuilderConfig) *GPGKeyClient {
-	if cfg == nil || cfg.ServerURL == "" {
-		return nil
-	}
-
-	gpgClient := NewGPGKeyClient(cfg.ServerURL)
-	if cfg.GPGHome != "" {
-		gpgClient = gpgClient.WithGnupgHome(cfg.GPGHome)
-	}
-	log.Printf("GPG key client initialized with server URL: %s", cfg.ServerURL)
-
-	if cfg.GPGAutoSync && cfg.GPGEnabled {
-		syncGPGKey(gpgClient, cfg)
-	}
-
-	return gpgClient
-}
-
-// syncGPGKey imports the server's public key so the builder can verify
-// server-signed material. It does NOT change cfg.GPGKeyID: that is the builder's
-// own signing key, and signing requires a private key (the server key is public
-// only). Overwriting it would break binpkg-signing.
-func syncGPGKey(gpgClient *GPGKeyClient, cfg *config.BuilderConfig) {
-	gpgKeyPath := filepath.Join(cfg.GPGHome, "server-public.asc")
-
-	if err := gpgClient.FetchAndImportGPGKey(gpgKeyPath); err != nil {
-		log.Printf("Failed to sync GPG key from server: %v", err)
-		return
-	}
-
-	keyID, err := gpgClient.GetKeyID(gpgKeyPath)
-	if err != nil {
-		log.Printf("Failed to get server GPG key ID: %v", err)
-		return
-	}
-
-	log.Printf("Imported server GPG public key for verification: %s", keyID)
-}
-
 // initStorageUploader initializes the storage uploader if configured.
 func initStorageUploader(cfg *config.BuilderConfig) *StorageUploader {
 	if cfg == nil {
@@ -384,49 +443,22 @@ func initStorageUploader(cfg *config.BuilderConfig) *StorageUploader {
 	return uploader
 }
 
-// containerGnupgHome is where the signing key's GNUPGHOME is mounted inside the
-// build container for the config-bundle executor path.
-const containerGnupgHome = "/gpg-signing"
-
-// buildOptionsFromConfig derives the executor's format/signing options from the
-// builder config. Native binpkg signing is enabled only when GPG is enabled and
-// a key ID is configured, and only for the (signable) gpkg format. forDocker
-// selects the in-container GNUPGHOME path (the keyring is bind-mounted) vs the
-// real host path used by the native executor.
-func buildOptionsFromConfig(cfg *config.BuilderConfig, forDocker bool) BuildOptions {
+// buildOptionsFromConfig derives the executor's unsigned output format. Signing
+// is deliberately absent from builders: only the isolated signer may hold the
+// private key or mutate a verified artifact generation.
+func buildOptionsFromConfig(cfg *config.BuilderConfig) BuildOptions {
 	format := "gpkg"
 	if cfg != nil && cfg.BinpkgFormat != "" {
 		format = cfg.BinpkgFormat
 	}
-	opts := BuildOptions{Format: format}
-	if cfg != nil && cfg.GPGEnabled && cfg.GPGKeyID != "" && format != "xpak" {
-		opts.SignKeyID = cfg.GPGKeyID
-		opts.SignHostGnupgHome = cfg.GPGHome
-		if forDocker {
-			// The Docker executor bind-mounts the host keyring into the container
-			// at containerGnupgHome; emerge inside the container reads it there.
-			opts.SignGnupgHome = containerGnupgHome
-		} else {
-			// The native executor runs emerge directly on the host, so it must
-			// point BINPKG_GPG_SIGNING_GPG_HOME at the real host keyring.
-			opts.SignGnupgHome = cfg.GPGHome
-		}
-	}
-	return opts
+	return BuildOptions{Format: format}
 }
 
 // initBuildExecutor initializes the build executor.
-func initBuildExecutor(cfg *config.BuilderConfig, _ ContainerRuntime, _ string) *BuildExecutor {
+func initBuildExecutor(cfg *config.BuilderConfig) *BuildExecutor {
 	workDir := getWorkDir(cfg)
 	artifactDir := getArtifactDir(cfg)
-	return NewBuildExecutorWithOptions(workDir, artifactDir, buildOptionsFromConfig(cfg, false))
-}
-
-// initDockerExecutor initializes the Docker build executor.
-func initDockerExecutor(cfg *config.BuilderConfig, containerRuntime ContainerRuntime, dockerImage string) *DockerBuildExecutor {
-	workDir := getWorkDir(cfg)
-	artifactDir := getArtifactDir(cfg)
-	return NewDockerBuildExecutorWithOptions(workDir, artifactDir, dockerImage, containerRuntime, buildOptionsFromConfig(cfg, true))
+	return NewBuildExecutorWithOptions(workDir, artifactDir, buildOptionsFromConfig(cfg))
 }
 
 // initPackageManager initializes the package manager.
@@ -513,14 +545,16 @@ func getArchitecture(cfg *config.BuilderConfig) string {
 // SubmitBuild submits a new build job.
 func (lb *LocalBuilder) SubmitBuild(req *LocalBuildRequest) (string, error) {
 	// Validate every untrusted field before the request can reach any build
-	// path (the legacy Docker shell script, the native emerge argv, or the
-	// config-bundle executor). This is the single choke point that closes shell
-	// injection and emerge option injection.
+	// native emerge argv. This is the single choke point that closes emerge
+	// option injection.
 	if err := validateLocalBuildRequest(req); err != nil {
 		return "", fmt.Errorf("invalid build request: %w", err)
 	}
 
 	jobID := uuid.New().String()
+	if err := lb.reserveNativeLifetime(jobID); err != nil {
+		return "", err
+	}
 
 	job := &BuildJob{
 		ID:        jobID,
@@ -543,6 +577,7 @@ func (lb *LocalBuilder) SubmitBuild(req *LocalBuildRequest) (string, error) {
 		lb.jobsMutex.Lock()
 		delete(lb.jobs, jobID)
 		lb.jobsMutex.Unlock()
+		lb.releaseNativeLifetime(jobID)
 		return "", fmt.Errorf("builder queue full")
 	}
 }
@@ -642,33 +677,37 @@ func (lb *LocalBuilder) GetStatus() map[string]interface{} {
 	if building >= lb.workers {
 		status = "busy"
 	}
+	if !lb.AcceptingBuilds() {
+		status = "draining"
+	}
 
 	return map[string]interface{}{
-		"instance_id":    lb.instanceID,
-		"architecture":   lb.architecture,
-		"status":         status,
-		"workers":        lb.workers,
-		"capacity":       lb.workers,
-		"current_load":   building,
-		"queued":         queued,
-		"building":       building,
-		"completed":      completed,
-		"failed":         failed,
-		"total":          len(lb.jobs),
-		"success_builds": completed,
-		"failed_builds":  failed,
-		"total_builds":   completed + failed,
-		"use_docker":     lb.useDocker,
-		"docker_image":   lb.dockerImage,
-		"cpu_usage":      sysInfo.CPUUsage,
-		"memory_usage":   sysInfo.MemoryUsage,
-		"disk_usage":     sysInfo.DiskUsage,
-		"cpu_count":      sysInfo.CPUCount,
-		"memory_total":   sysInfo.MemoryTotal,
-		"memory_used":    sysInfo.MemoryUsed,
-		"disk_total":     sysInfo.DiskTotal,
-		"disk_used":      sysInfo.DiskUsed,
-		"enabled":        true,
+		"instance_id":       lb.instanceID,
+		"architecture":      lb.architecture,
+		"status":            status,
+		"workers":           lb.workers,
+		"capacity":          lb.Capacity(),
+		"current_load":      building,
+		"queued":            queued,
+		"building":          building,
+		"completed":         completed,
+		"failed":            failed,
+		"total":             len(lb.jobs),
+		"success_builds":    completed,
+		"failed_builds":     failed,
+		"total_builds":      completed + failed,
+		"execution_backend": "native-gentoo",
+		"native_job_policy": lb.nativeJobPolicy,
+		"accepting_builds":  lb.AcceptingBuilds(),
+		"cpu_usage":         sysInfo.CPUUsage,
+		"memory_usage":      sysInfo.MemoryUsage,
+		"disk_usage":        sysInfo.DiskUsage,
+		"cpu_count":         sysInfo.CPUCount,
+		"memory_total":      sysInfo.MemoryTotal,
+		"memory_used":       sysInfo.MemoryUsed,
+		"disk_total":        sysInfo.DiskTotal,
+		"disk_used":         sysInfo.DiskUsed,
+		"enabled":           true,
 	}
 }
 
@@ -692,12 +731,8 @@ func (lb *LocalBuilder) worker(id int) {
 		if job.Request.ConfigBundle != nil {
 			err = lb.executeConfigBundleBuild(job)
 		} else {
-			// Legacy build method
-			if lb.useDocker {
-				err = lb.executeDockerBuild(job)
-			} else {
-				err = lb.executeNativeBuild(job)
-			}
+			// Legacy request shape, executed by the same native backend.
+			err = lb.executeNativeBuild(job)
 		}
 
 		job.mu.Lock()
@@ -767,138 +802,7 @@ func (lb *LocalBuilder) executeConfigBundleBuild(job *BuildJob) error {
 		}
 	}
 
-	var err error
-	if lb.useDocker {
-		err = lb.dockerExecutor.ExecuteBuild(ctx, bundle, job)
-	} else {
-		err = lb.executor.ExecuteBuild(ctx, bundle, job)
-	}
-
-	return err
-}
-
-// generateBuildScript creates a Gentoo build script for Docker container.
-func (lb *LocalBuilder) generateBuildScript(pkgAtom string, useFlags string, gpgKeyID string) string {
-	features := "buildpkg"
-	buildFeatures := "-userpriv -usersandbox"
-	if lb.cfg != nil && lb.cfg.BuildFeatures != "" {
-		buildFeatures = lb.cfg.BuildFeatures
-	}
-	buildFeaturesLine := ""
-	if strings.TrimSpace(buildFeatures) != "" {
-		buildFeaturesLine = fmt.Sprintf("FEATURES=\"${FEATURES} %s\"", buildFeatures)
-	}
-	gpgSetup := ""
-	if gpgKeyID != "" {
-		features = "buildpkg binpkg-signing gpg-keepalive"
-		gpgSetup = fmt.Sprintf(`
-# Setup GPG for package signing with the secret key.
-export GNUPGHOME=/root/.gnupg
-mkdir -p $GNUPGHOME
-chmod 700 $GNUPGHOME
-# No TTY in the build container: force loopback pinentry and provide the
-# lock dir portage's signing wrapper flocks on.
-mkdir -p /run/lock
-echo "allow-loopback-pinentry" >> $GNUPGHOME/gpg-agent.conf
-echo "pinentry-mode loopback" >> $GNUPGHOME/gpg.conf
-gpgconf --kill gpg-agent 2>/dev/null || true
-
-# Import secret key for signing (required for binpkg-signing).
-if [ -f /gpg-keys/secret.asc ]; then
-    gpg --batch --yes --import /gpg-keys/secret.asc 2>/dev/null || true
-    echo "GPG secret key imported for signing"
-fi
-if [ -f /gpg-keys/public.asc ]; then
-    gpg --batch --yes --import /gpg-keys/public.asc 2>/dev/null || true
-fi
-echo -e "5\ny\n" | gpg --batch --yes --command-fd 0 --edit-key "%s" trust quit 2>/dev/null || true
-
-# Configure portage for GPG signing in the now-writable make.conf. Neutralize
-# the trust helper HERE (make.conf, not env — portage reads it from config):
-# its default is getuto, which portage re-runs as root right before verifying
-# and resets /etc/portage/gnupg back to root ownership, breaking the portage
-# user's post-sign verification. We pre-build the store ourselves below.
-cat >> /etc/portage/make.conf <<'GPGEOF'
-BINPKG_FORMAT="gpkg"
-BINPKG_GPG_SIGNING_GPG_HOME="/root/.gnupg"
-BINPKG_GPG_SIGNING_KEY="%s"
-PORTAGE_TRUST_HELPER="/bin/true"
-%s
-GPGEOF
-
-# Build the trust store portage checks the fresh signature against. getuto
-# creates /etc/portage/gnupg (root-owned, seeded with the Gentoo release keys);
-# we add our own signing key + ultimate ownertrust into it. With userpriv off
-# (see FEATURES above) the post-sign verification runs as root and uses this
-# root-owned store directly — do NOT chown it to portage, which would make the
-# root verifier hit "unsafe ownership". PORTAGE_TRUST_HELPER is neutralized so
-# portage does not rebuild the store (dropping our key) right before verifying.
-if command -v getuto >/dev/null 2>&1; then
-    getuto 2>/dev/null || true
-fi
-mkdir -p /etc/portage/gnupg && chmod 700 /etc/portage/gnupg
-if [ -f /gpg-keys/public.asc ]; then
-    gpg --homedir /etc/portage/gnupg --batch --yes --import /gpg-keys/public.asc 2>/dev/null || true
-    gpg --homedir /etc/portage/gnupg --with-colons --list-keys 2>/dev/null | awk -F: '/^fpr:/{print $10":6:"}' | gpg --homedir /etc/portage/gnupg --batch --yes --import-ownertrust 2>/dev/null || true
-fi
-`, gpgKeyID, gpgKeyID, buildFeaturesLine)
-	}
-
-	// Build emerge command with automatic dependency conflict resolution
-	emergeOpts := "--usepkg=n --autounmask --autounmask-write --autounmask-continue --backtrack=50"
-
-	return fmt.Sprintf(`#!/bin/bash
-set -e
-export USE="%s"
-export FEATURES="%s"
-
-# /etc/portage is bind-mounted read-only at /tmp/pconf; copy it to a writable
-# /etc/portage so signing config and getuto's trust store can be created.
-if [ -d /tmp/pconf ]; then
-    mkdir -p /etc/portage
-    cp -a /tmp/pconf/. /etc/portage/ 2>/dev/null || true
-fi
-%s
-echo "Starting Gentoo package build for %s"
-
-# Run emerge with automatic dependency resolution
-# First attempt: try with autounmask options
-if ! emerge %s %s; then
-    echo "First emerge attempt failed, applying autounmask changes..."
-    # Dispatch any pending config updates
-    etc-update --automode -5 2>/dev/null || true
-    dispatch-conf --use-rcs 2>/dev/null || true
-    # Retry emerge after applying changes
-    emerge %s %s || exit 1
-fi
-
-echo "Build completed, copying artifacts..."
-cd /var/cache/binpkgs && find . -type f \( -name '*.gpkg.tar' -o -name '*.tbz2' \) | while read -r f; do rel="${f#./}"; mkdir -p "/output/$(dirname "$rel")"; cp "$f" "/output/$rel"; done; cd /
-ls -lh /output/
-`, useFlags, features, gpgSetup, pkgAtom, emergeOpts, pkgAtom, emergeOpts, pkgAtom)
-}
-
-// executeDockerBuild performs the build using Docker container.
-func (lb *LocalBuilder) executeDockerBuild(job *BuildJob) error {
-	jobWorkDir, err := lb.prepareJobWorkDir(job.ID)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = os.RemoveAll(jobWorkDir) }()
-
-	script := lb.prepareDockerBuildScript(job)
-	outputDir := filepath.Join(jobWorkDir, "output")
-	_ = os.MkdirAll(outputDir, 0750)
-
-	gpgKeyDir := lb.prepareGPGKeys(jobWorkDir)
-	args := lb.buildDockerArgs(outputDir, gpgKeyDir)
-	args = append(args, lb.dockerImage, "/bin/bash", "-c", script)
-
-	if err := lb.runDockerBuild(job, args); err != nil {
-		return err
-	}
-
-	return lb.collectAndUploadArtifact(job, outputDir)
+	return lb.executor.ExecuteBuild(ctx, bundle, job)
 }
 
 // prepareJobWorkDir creates and returns the job-specific work directory.
@@ -908,20 +812,6 @@ func (lb *LocalBuilder) prepareJobWorkDir(jobID string) (string, error) {
 		return "", fmt.Errorf("failed to create work directory: %w", err)
 	}
 	return jobWorkDir, nil
-}
-
-// prepareDockerBuildScript generates the build script for Docker.
-func (lb *LocalBuilder) prepareDockerBuildScript(job *BuildJob) string {
-	req := job.Request
-	pkgAtom := req.PackageName
-	if req.Version != "" {
-		pkgAtom = fmt.Sprintf("=%s-%s", req.PackageName, req.Version)
-	}
-
-	useFlags := buildUseFlagsString(req.UseFlags)
-	gpgKeyID := lb.getGPGKeyID()
-
-	return lb.generateBuildScript(pkgAtom, useFlags, gpgKeyID)
 }
 
 // buildUseFlagsString constructs the USE flags string.
@@ -935,99 +825,6 @@ func buildUseFlagsString(useFlags map[string]string) string {
 		}
 	}
 	return flags
-}
-
-// getGPGKeyID returns the GPG key ID if signing is enabled.
-func (lb *LocalBuilder) getGPGKeyID() string {
-	if lb.cfg != nil && lb.cfg.GPGEnabled && lb.cfg.GPGKeyID != "" {
-		return lb.cfg.GPGKeyID
-	}
-	return ""
-}
-
-// prepareGPGKeys exports GPG keys for container signing.
-func (lb *LocalBuilder) prepareGPGKeys(jobWorkDir string) string {
-	gpgKeyID := lb.getGPGKeyID()
-	if gpgKeyID == "" || lb.signer == nil || !lb.signer.IsEnabled() {
-		return ""
-	}
-
-	gpgKeyDir := filepath.Join(jobWorkDir, "gpg-keys")
-	if err := os.MkdirAll(gpgKeyDir, 0700); err != nil {
-		log.Printf("Warning: failed to create GPG key directory: %v", err)
-		return ""
-	}
-
-	_, _, err := lb.signer.ExportKeyPair(gpgKeyDir)
-	if err != nil {
-		log.Printf("Warning: failed to export GPG keys: %v", err)
-		return ""
-	}
-
-	log.Printf("GPG keys exported to %s for container signing", gpgKeyDir)
-	return gpgKeyDir
-}
-
-// buildDockerArgs constructs the Docker run arguments.
-func (lb *LocalBuilder) buildDockerArgs(outputDir, gpgKeyDir string) []string {
-	args := []string{"--rm", "-i", "-v", outputDir + ":/output"}
-
-	if gpgKeyDir != "" {
-		args = append(args, "-v", gpgKeyDir+":/gpg-keys:ro")
-	}
-
-	if lb.cfg != nil {
-		args = lb.addPackageManagerMounts(args)
-		args = lb.addEnvironmentVars(args)
-	} else {
-		args = lb.addDefaultGentooMounts(args)
-	}
-
-	return args
-}
-
-// addPackageManagerMounts adds package manager specific mounts.
-func (lb *LocalBuilder) addPackageManagerMounts(args []string) []string {
-	mounts := lb.pkgMgr.GetDockerMounts(lb.cfg)
-	for _, m := range mounts {
-		args = append(args, "-v", m.String())
-	}
-	return args
-}
-
-// addEnvironmentVars adds package manager specific environment variables.
-func (lb *LocalBuilder) addEnvironmentVars(args []string) []string {
-	envVars := lb.pkgMgr.GetEnvVars(lb.cfg)
-	for k, v := range envVars {
-		args = append(args, "-e", fmt.Sprintf("%s=%s", k, v))
-	}
-	return args
-}
-
-// addDefaultGentooMounts adds default Gentoo mounts for backward compatibility.
-func (lb *LocalBuilder) addDefaultGentooMounts(args []string) []string {
-	return append(args,
-		"-v", "/var/db/repos:/var/db/repos:ro",
-		"-v", "/etc/portage/make.conf:/etc/portage/make.conf:ro",
-		"-v", "/etc/portage/repos.conf:/etc/portage/repos.conf:ro",
-	)
-}
-
-// runDockerBuild executes the Docker build command.
-func (lb *LocalBuilder) runDockerBuild(job *BuildJob, args []string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Hour)
-	defer cancel()
-
-	output, err := lb.containerRuntime.Run(ctx, args)
-	job.setLog(string(output))
-
-	if err != nil {
-		log.Printf("Container build failed for job %s: %v", job.ID, err)
-		return fmt.Errorf("container build failed: %w", err)
-	}
-
-	log.Printf("Container build completed for job %s, output size: %d bytes", job.ID, len(output))
-	return nil
 }
 
 // collectAndUploadArtifact finds, copies, signs, and uploads the artifact.
@@ -1063,18 +860,10 @@ func (lb *LocalBuilder) collectAndUploadArtifact(job *BuildJob, outputDir string
 	job.setArtifactURL(destPath)
 	job.setArtifacts(rels)
 
-	// In native mode the gpkg is already signed in-emerge (binpkg-signing);
-	// detect that rather than adding a redundant detached signature. In docker
-	// mode the container signs and the Go signer (if configured) is a fallback.
+	// Builders are an unsigned trust domain. Reject embedded signatures rather
+	// than accepting a package signed by a builder-controlled key.
 	if gpkgIsSigned(destPath) {
-		if job.Metadata == nil {
-			job.Metadata = map[string]interface{}{}
-		}
-		job.Metadata["signed"] = true
-	} else {
-		for _, rel := range rels {
-			lb.signArtifact(job, filepath.Join(lb.artifactDir, rel))
-		}
+		return errors.New("builder produced a signed GPKG; signing is restricted to the isolated signer")
 	}
 	lb.uploadArtifact(job, destPath)
 
@@ -1171,18 +960,6 @@ func primaryArtifact(rels []string, pkgName string, sizeOf func(string) int64) s
 	return best
 }
 
-// signArtifact signs the artifact if a signer is available.
-func (lb *LocalBuilder) signArtifact(job *BuildJob, artifactPath string) {
-	if lb.signer != nil && lb.signer.IsEnabled() {
-		if err := lb.signer.SignPackage(artifactPath); err != nil {
-			log.Printf("Warning: failed to sign package: %v", err)
-		} else {
-			job.Metadata["signed"] = true
-			log.Printf("Package signed: %s", artifactPath)
-		}
-	}
-}
-
 // uploadArtifact uploads the artifact to storage if configured.
 func (lb *LocalBuilder) uploadArtifact(job *BuildJob, artifactPath string) {
 	if lb.storageUpload != nil && lb.storageUpload.IsEnabled() {
@@ -1221,8 +998,8 @@ func (lb *LocalBuilder) executeNativeBuild(job *BuildJob) error {
 		return err
 	}
 
-	// Same collector as the docker path: copy every produced gpkg into the
-	// artifact dir (category preserved), pick the requested package as primary.
+	// Copy every produced gpkg into the artifact dir (category preserved), then
+	// pick the requested package as primary.
 	return lb.collectAndUploadArtifact(job, pkgDir)
 }
 
@@ -1403,39 +1180,64 @@ func (lb *LocalBuilder) GetArtifactInfo(jobID string) (*ArtifactInfo, error) {
 	}, nil
 }
 
-// VerifyInstall proves the freshly built binary package is actually
-// installable: a pristine container resolves the atom from the configured
-// binhost (--usepkgonly, no source fallback) and installs it. Output is
-// returned for the job log; a non-nil error means verification failed.
-//
-// The portage config is copied into the container (not mounted at
-// /etc/portage) so getuto can create /etc/portage/gnupg — a read-only mount
-// there breaks portage's trust helper. binpkg-request-signature is also
-// subtracted until the signing chain is wired end-to-end.
-// verifyInstallNative confirms the freshly built binpkg installs from the
-// binhost on a native Gentoo VM (no Docker): it emerges the package into a
-// throwaway --root using only binary packages, so signature/trust and
-// dependency resolution are exercised without touching the host system.
-func (lb *LocalBuilder) verifyInstallNative(pkgAtom, binhostURL string, requireSignature bool) (string, error) {
+// verifyInstallNative installs one digest-bound generation from a fresh local
+// PKGDIR. Remote fetches finish before emerge starts, so Portage cannot reuse a
+// package downloaded by the earlier unsigned gate or contact another binhost.
+func (lb *LocalBuilder) verifyInstallNative(request VerifyInstallRequest) (string, error) {
 	root, err := os.MkdirTemp("", "pe-verify-root")
 	if err != nil {
 		return "", err
 	}
 	defer func() { _ = os.RemoveAll(root) }()
 
-	// Seed the throwaway root with the trust anchors portage needs to verify a
-	// signed binpkg: the Gentoo release keys (so its trust helper getuto can
-	// initialize the store in the root) and the host's already-configured
-	// signing store (which trusts our key). Without this getuto fails because
-	// the empty root has no /usr/share/openpgp-keys/gentoo-release.asc.
-	seed := fmt.Sprintf(
-		"mkdir -p %[1]s/usr/share/openpgp-keys %[1]s/etc/portage && "+
-			"cp -a /usr/share/openpgp-keys/. %[1]s/usr/share/openpgp-keys/ 2>/dev/null || true; "+
-			"cp -a /etc/portage/gnupg %[1]s/etc/portage/gnupg && "+
-			"chown -R nobody:nobody %[1]s/etc/portage/gnupg",
-		root)
+	seed := nativeVerifySeedCommand(root, request.RequireSignature)
 	if out, err := exec.Command("bash", "-c", seed).CombinedOutput(); err != nil {
-		return string(out), fmt.Errorf("failed to seed verify root: %w", err)
+		return string(out), fmt.Errorf("failed to seed verify root: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	if err := removeBuiltPackagesFromVDB(root, request.BuiltPackages); err != nil {
+		return "", fmt.Errorf("failed to prepare baseline package database: %w", err)
+	}
+
+	pkgDir := filepath.Join(root, "var", "cache", "binpkgs")
+	if err := os.MkdirAll(pkgDir, 0o755); err != nil {
+		return "", err
+	}
+	if err := prefetchVerificationGeneration(request.BinhostURL, pkgDir, request.Artifacts); err != nil {
+		return "", fmt.Errorf("prefetch exact %s generation: %w", request.Generation, err)
+	}
+
+	gpgHome := ""
+	fingerprint := ""
+	if request.RequireSignature {
+		gpgHome = filepath.Join(root, "etc", "portage", "gnupg")
+		fingerprint, err = installVerifierPublicKey(gpgHome, []byte(request.GPGPubkey))
+		if err != nil {
+			return "", fmt.Errorf("failed to install signer public key in verify root: %w", err)
+		}
+		if !strings.HasSuffix(strings.ToUpper(fingerprint), strings.ToUpper(request.ExpectedKeyID)) {
+			return "", fmt.Errorf("signer public-key fingerprint %s does not match expected key ID %s", fingerprint, request.ExpectedKeyID)
+		}
+		for _, artifact := range request.Artifacts {
+			file := filepath.Join(pkgDir, filepath.FromSlash(artifact.RelativePath))
+			if err := (signing.GPG{Home: gpgHome, KeyID: request.ExpectedKeyID}).VerifyGPKG(file); err != nil {
+				return "", fmt.Errorf("signed artifact %q failed independent GPG verification: %w", artifact.RelativePath, err)
+			}
+		}
+		if out, err := exec.Command("chown", "-R", "nobody:nobody", gpgHome).CombinedOutput(); err != nil {
+			return string(out), fmt.Errorf("failed to assign verify keyring ownership: %w: %s", err, strings.TrimSpace(string(out)))
+		}
+	}
+
+	var audit strings.Builder
+	fmt.Fprintf(&audit, "verification generation=%s signature_required=%t artifacts=%d",
+		request.Generation, request.RequireSignature, len(request.Artifacts))
+	if fingerprint != "" {
+		fmt.Fprintf(&audit, " signer_fingerprint=%s", fingerprint)
+	}
+	audit.WriteByte('\n')
+	for _, artifact := range request.Artifacts {
+		fmt.Fprintf(&audit, "verified input path=%s size=%d sha256=%s\n",
+			artifact.RelativePath, artifact.Size, artifact.SHA256)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
@@ -1443,96 +1245,139 @@ func (lb *LocalBuilder) verifyInstallNative(pkgAtom, binhostURL string, requireS
 	args := []string{
 		"--root=" + root,
 		"--usepkgonly=y",
-		"--getbinpkg=y",
+		"--getbinpkg=n",
 		"--oneshot",
 		"--color=n", "-q",
 		"--",
-		pkgAtom,
+		request.PackageName,
 	}
 	cmd := exec.CommandContext(ctx, "emerge", args...)
-	env := os.Environ()
-	if binhostURL != "" {
-		env = append(env, "PORTAGE_BINHOST="+binhostURL)
-	}
 	feature := "-binpkg-request-signature"
-	if requireSignature {
+	if request.RequireSignature {
 		feature = "binpkg-request-signature"
 	}
-	env = append(env, "FEATURES="+feature)
+	env := append(os.Environ(),
+		"PKGDIR="+pkgDir,
+		"DISTDIR="+filepath.Join(root, "var", "cache", "distfiles"),
+		"PORTAGE_TMPDIR="+filepath.Join(root, "var", "tmp"),
+		"FEATURES="+feature,
+		"PORTAGE_BINHOST=",
+	)
+	if gpgHome != "" {
+		env = append(env, "BINPKG_GPG_VERIFY_GPG_HOME="+gpgHome)
+	}
 	cmd.Env = env
 
 	out, err := cmd.CombinedOutput()
+	audit.Write(out)
 	if err != nil {
-		return string(out), fmt.Errorf("native install verification failed: %w", err)
+		return audit.String(), fmt.Errorf("native install verification failed: %w", err)
 	}
-	return string(out), nil
+	if request.RequireSignature {
+		if err := assertVerifierKeyring(gpgHome, fingerprint); err != nil {
+			return audit.String(), err
+		}
+	}
+	if err := verifyLocalArtifactSet(pkgDir, request.Artifacts); err != nil {
+		return audit.String(), fmt.Errorf("post-install artifact proof failed: %w", err)
+	}
+	return audit.String(), nil
 }
 
-// VerifyInstall confirms a freshly built package installs from the binhost:
-// natively via a seeded throwaway --root, or in a pristine docker container.
-func (lb *LocalBuilder) VerifyInstall(pkgAtom, binhostURL, gpgPubkey string, requireSignature bool) (string, error) {
-	// pkgAtom reaches a shell (docker script) and an emerge argv; validate it
-	// against the atom allowlist — as SubmitBuild does for builds — so the
-	// verify endpoint cannot be used for shell/option injection (it rejects a
-	// leading dash and every shell metacharacter).
-	if !atomPattern.MatchString(pkgAtom) {
-		return "", fmt.Errorf("invalid package atom %q", pkgAtom)
-	}
-	if lb.cfg == nil || !lb.cfg.UseDocker {
-		return lb.verifyInstallNative(pkgAtom, binhostURL, requireSignature)
-	}
-
-	reposPath := lb.cfg.PortageReposPath
-	if reposPath == "" {
-		reposPath = "/var/db/repos"
-	}
-	confPath := lb.cfg.PortageConfPath
-	if confPath == "" {
-		confPath = "/etc/portage"
-	}
-
-	features := "-binpkg-request-signature"
+// nativeVerifySeedCommand seeds only the installed-package database required
+// for dependency resolution. It deliberately does not copy host binpkg
+// caches, configured binhosts, or Gentoo release-key bundles.
+func nativeVerifySeedCommand(root string, requireSignature bool) string {
+	seed := fmt.Sprintf(
+		"chmod 0755 %[1]s && "+
+			"mkdir -p %[1]s/etc/portage %[1]s/var/db %[1]s/var/cache/distfiles %[1]s/var/tmp && "+
+			"cp -a /var/db/pkg %[1]s/var/db/pkg",
+		root)
 	if requireSignature {
-		features = "binpkg-request-signature"
+		seed += fmt.Sprintf("; install -d -m 0700 %[1]s/etc/portage/gnupg", root)
 	}
-	args := []string{"--rm",
-		"-v", reposPath + ":/var/db/repos:ro",
-		"-v", confPath + ":/tmp/pconf:ro",
-		"-e", "FEATURES=" + features,
-	}
-	if binhostURL != "" {
-		args = append(args, "-e", "PORTAGE_BINHOST="+binhostURL)
-	}
+	return seed
+}
 
-	// The binhost signing pubkey rides in on a bind mount and is imported into
-	// the container's portage keyring so signed packages verify.
-	keyImport := ""
-	if gpgPubkey != "" {
-		keyDir, err := os.MkdirTemp("", "pe-verify-key")
-		if err != nil {
-			return "", fmt.Errorf("failed to stage verify pubkey: %w", err)
-		}
-		defer func() { _ = os.RemoveAll(keyDir) }()
-		keyFile := filepath.Join(keyDir, "pubkey.asc")
-		if err := os.WriteFile(keyFile, []byte(gpgPubkey), 0600); err != nil {
-			return "", fmt.Errorf("failed to write verify pubkey: %w", err)
-		}
-		args = append(args, "-v", keyFile+":/tmp/pe-pubkey.asc:ro")
-		keyImport = "gpg --homedir /etc/portage/gnupg --batch --yes --import /tmp/pe-pubkey.asc >/dev/null 2>&1 || true; " +
-			"gpg --homedir /etc/portage/gnupg --with-colons --list-keys 2>/dev/null | awk -F: '/^fpr:/{print $10\":6:\"}' | gpg --homedir /etc/portage/gnupg --batch --yes --import-ownertrust >/dev/null 2>&1 || true; "
+// installVerifierPublicKey creates a job-local trust store containing exactly
+// one isolated-signer public key and returns its primary fingerprint.
+func installVerifierPublicKey(gpgHome string, publicKey []byte) (string, error) {
+	if len(publicKey) == 0 {
+		return "", fmt.Errorf("signer public key is empty")
 	}
-
-	script := "cp -a /tmp/pconf/. /etc/portage/ 2>/dev/null || true; " +
-		"getuto >/dev/null 2>&1 || true; " +
-		keyImport +
-		"emerge --color=n -q --getbinpkg=y --usepkgonly=y " + pkgAtom
-	args = append(args, lb.dockerImage, "sh", "-c", script)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
-	defer cancel()
-	out, err := lb.containerRuntime.Run(ctx, args)
+	if len(publicKey) > 1<<20 {
+		return "", fmt.Errorf("signer public key exceeds 1 MiB")
+	}
+	if err := os.MkdirAll(gpgHome, 0o700); err != nil {
+		return "", err
+	}
+	if err := os.Chmod(gpgHome, 0o700); err != nil {
+		return "", err
+	}
+	keyFile, err := os.CreateTemp(filepath.Dir(gpgHome), ".signer-public-*.asc")
 	if err != nil {
-		return string(out), fmt.Errorf("install verification failed: %w", err)
+		return "", err
 	}
-	return string(out), nil
+	keyPath := keyFile.Name()
+	defer func() { _ = os.Remove(keyPath) }()
+	if err := keyFile.Chmod(0o600); err != nil {
+		_ = keyFile.Close()
+		return "", err
+	}
+	if _, err := keyFile.Write(publicKey); err != nil {
+		_ = keyFile.Close()
+		return "", err
+	}
+	if err := keyFile.Close(); err != nil {
+		return "", err
+	}
+
+	show := exec.Command("gpg", "--homedir", gpgHome, "--batch", "--with-colons",
+		"--import-options", "show-only", "--import", keyPath)
+	output, err := show.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("inspect public key: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	fingerprints := parsePrimaryFingerprints(output)
+	if len(fingerprints) != 1 {
+		return "", fmt.Errorf("public key bundle must contain exactly one primary key, found %d", len(fingerprints))
+	}
+
+	importKey := exec.Command("gpg", "--homedir", gpgHome, "--batch", "--import", keyPath)
+	if output, err := importKey.CombinedOutput(); err != nil {
+		return "", fmt.Errorf("import public key: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	ownerTrust := exec.Command("gpg", "--homedir", gpgHome, "--batch", "--import-ownertrust")
+	ownerTrust.Stdin = strings.NewReader(fingerprints[0] + ":6:\n")
+	if output, err := ownerTrust.CombinedOutput(); err != nil {
+		return "", fmt.Errorf("trust public key: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	return fingerprints[0], nil
+}
+
+// removeBuiltPackagesFromVDB turns the copied host VDB into a template
+// baseline. Every package produced by this job is removed so emerge must fetch
+// it from the tested binhost, while image-contract packages such as glibc stay
+// satisfied by the baseline.
+func removeBuiltPackagesFromVDB(root string, cpvs []string) error {
+	for _, cpv := range cpvs {
+		if !atomPattern.MatchString(cpv) || strings.Count(cpv, "/") != 1 {
+			return fmt.Errorf("invalid built package CPV %q", cpv)
+		}
+		parts := strings.SplitN(cpv, "/", 2)
+		target := filepath.Join(root, "var", "db", "pkg", parts[0], parts[1])
+		if err := os.RemoveAll(target); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// VerifyInstall confirms the exact expected generation installs through a
+// seeded throwaway native --root.
+func (lb *LocalBuilder) VerifyInstall(request VerifyInstallRequest) (string, error) {
+	if err := validateVerifyInstallRequest(request); err != nil {
+		return "", err
+	}
+	return lb.verifyInstallNative(request)
 }

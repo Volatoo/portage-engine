@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -59,8 +58,7 @@ const (
 	terraformDestroyTimeout = 30 * time.Minute
 	terraformOutputTimeout  = 2 * time.Minute
 	sshCommandTimeout       = 5 * time.Minute
-	// sshDeployTimeout bounds the bootstrap script run: docker install plus a
-	// full portage tree sync legitimately takes tens of minutes.
+	// sshDeployTimeout bounds native Gentoo bootstrap and Portage setup.
 	sshDeployTimeout = 40 * time.Minute
 )
 
@@ -83,37 +81,32 @@ type ProvisionRequest struct {
 	// BuilderBinaryURL is fetched by the bootstrap script on the instance
 	// itself. Path wins when both are set. With neither, the instance can only
 	// build if its image/template ships /opt/portage-builder/portage-builder.
-	BuilderBinaryPath string `json:"-"`
-	BuilderBinaryURL  string `json:"builder_binary_url"`
+	BuilderBinaryPath   string `json:"-"`
+	BuilderBinaryURL    string `json:"builder_binary_url"`
+	BuilderBinarySHA256 string `json:"builder_binary_sha256"`
 
 	// Mirror acceleration for instance bootstrap (all optional; see the
 	// dashboard's Mirrors settings panel).
-	AptMirror            string `json:"apt_mirror"`
-	DockerDownloadMirror string `json:"docker_download_mirror"`
-	DockerRegistryMirror string `json:"docker_registry_mirror"`
-	GentooMirror         string `json:"gentoo_mirror"`
-	PortageSyncURI       string `json:"portage_sync_uri"`
-	PortageSyncMethod    string `json:"portage_sync_method"`
-	DockerImage          string `json:"docker_image"`
+	GentooMirror      string `json:"gentoo_mirror"`
+	PortageSyncURI    string `json:"portage_sync_uri"`
+	PortageSyncMethod string `json:"portage_sync_method"`
 	// MakeConfExtra is appended to the generated make.conf on build instances.
 	MakeConfExtra string `json:"make_conf_extra"`
-	// BuildFeatures is appended to the build container's make.conf FEATURES.
+	// BuildFeatures is appended to the native root's make.conf FEATURES.
 	BuildFeatures string `json:"build_features"`
 
-	// BuildMode selects the build environment: "" or "docker" uses the
-	// Debian+Docker bootstrap; "native-gentoo" deploys onto a native Gentoo VM
-	// (cloned from the Gentoo cloud-init template) with in-emerge signing.
+	// BuildMode is fixed to "native-gentoo"; it remains in provenance so older
+	// and unsupported modes can be rejected explicitly.
 	BuildMode string `json:"build_mode"`
-
-	// GPGKeyID + GPGSecretKey enable binpkg signing on the deployed builder.
-	// The armored secret key never lands in any JSON/log output.
-	GPGKeyID     string `json:"-"`
-	GPGSecretKey []byte `json:"-"`
 
 	// LogSink, when set, receives human-readable provisioning progress lines
 	// (terraform output, deployment steps) as they happen, so the server can
 	// stream them into the build job's log for live troubleshooting in the UI.
 	LogSink func(string) `json:"-"`
+	// Lifecycle durably records the workspace before terraform init/apply and
+	// every later terminal cleanup result. Returning an error from the initial
+	// "provisioning" event aborts before any cloud-side effect.
+	Lifecycle func(*Instance, string, string, *time.Time) error `json:"-"`
 }
 
 // sinkf writes a formatted progress line to a log sink, if one is set.
@@ -145,6 +138,7 @@ type Instance struct {
 	// Terminate reuses it so `terraform destroy` authenticates the same way as
 	// apply did. Not serialized (contains secrets).
 	destroyEnv []string
+	lifecycle  func(*Instance, string, string, *time.Time) error
 }
 
 // Manager manages infrastructure provisioning using Terraform.
@@ -158,21 +152,53 @@ type Manager struct {
 	// stateFile, when set, persists the instance map across restarts so live
 	// VMs are never orphaned by a server restart.
 	stateFile string
+	// credentialResolver supplies destroy credentials from the server's
+	// in-memory settings after a restart. Secrets must never be persisted in
+	// the instance state file.
+	credentialResolver func(string) *CloudCredentials
 }
 
-// persistedInstance is the on-disk form of an Instance, including the fields
-// the in-memory JSON representation hides (terraform dir and the credential
-// env needed to destroy). The state file must be mode 0600.
+// persistedInstance is the on-disk form of an Instance. TerraformDir is safe
+// to persist; destroy credentials are deliberately excluded and must be
+// supplied again by the server's secret-backed runtime configuration.
+//
+// LegacyDestroyEnv only exists to decode and remove state written by versions
+// that persisted credentials. It is never populated when writing new state.
 type persistedInstance struct {
 	Instance
-	TerraformDirP string   `json:"terraform_dir"`
-	DestroyEnvP   []string `json:"destroy_env"`
+	TerraformDirP    string   `json:"terraform_dir"`
+	LegacyDestroyEnv []string `json:"destroy_env,omitempty"`
+}
+
+const resourceIdentityFile = "portage-resource.json"
+
+// resourceIdentity is written before terraform has permission to create
+// anything. Terraform state may still be empty when a control plane is killed
+// during an asynchronous provider operation, so cleanup also needs a
+// provider-native identity that is independent of the state file.
+type resourceIdentity struct {
+	Provider string `json:"provider"`
+	Name     string `json:"name"`
+	Node     string `json:"node,omitempty"`
+	Endpoint string `json:"endpoint,omitempty"`
+	Insecure bool   `json:"insecure,omitempty"`
 }
 
 // WithStateFile enables instance persistence at the given path.
 func WithStateFile(path string) ManagerOption {
 	return func(m *Manager) {
 		m.stateFile = path
+	}
+}
+
+// WithWorkspaceDir stores Terraform configuration and state in a durable
+// directory. Cloud instances cannot be safely destroyed after a server restart
+// if their workspace lived under an OS-cleaned temporary directory.
+func WithWorkspaceDir(path string) ManagerOption {
+	return func(m *Manager) {
+		if path != "" {
+			m.workspaceDir = path
+		}
 	}
 }
 
@@ -185,7 +211,7 @@ func (m *Manager) persistInstances() {
 	m.mu.RLock()
 	list := make([]persistedInstance, 0, len(m.instances))
 	for _, inst := range m.instances {
-		list = append(list, persistedInstance{Instance: *inst, TerraformDirP: inst.TerraformDir, DestroyEnvP: inst.destroyEnv})
+		list = append(list, persistedInstance{Instance: *inst, TerraformDirP: inst.TerraformDir})
 	}
 	m.mu.RUnlock()
 
@@ -215,11 +241,15 @@ func (m *Manager) loadInstances() {
 	if json.Unmarshal(data, &list) != nil {
 		return
 	}
+	hadLegacySecrets := false
 	m.mu.Lock()
 	for i := range list {
 		inst := list[i].Instance
 		inst.TerraformDir = list[i].TerraformDirP
-		inst.destroyEnv = list[i].DestroyEnvP
+		// Never restore credential material from disk. Current credentials are
+		// resolved from the server's in-memory settings when destroy runs.
+		inst.destroyEnv = nil
+		hadLegacySecrets = hadLegacySecrets || len(list[i].LegacyDestroyEnv) > 0
 		inst.ActiveTasks = 0 // whatever was in-flight died with the old process
 		m.instances[inst.ID] = &inst
 	}
@@ -228,42 +258,32 @@ func (m *Manager) loadInstances() {
 	if n > 0 {
 		fmt.Printf("Restored %d cloud instance(s) from %s\n", n, m.stateFile)
 	}
+	if hadLegacySecrets {
+		// Rewrite immediately to scrub secrets left by an older release.
+		m.persistInstances()
+	}
 }
 
-// reconcileLoadedInstances probes restored instances: healthy builders rejoin
-// the warm pool; unreachable ones are marked for destroy so nothing leaks.
+// reconcileLoadedInstances reclaims every instance restored after a control
+// plane restart. Native builders are single-use, and the server can no longer
+// prove whether a restored root was mutated before the crash, so health must
+// never make that VM eligible for another job.
 func (m *Manager) reconcileLoadedInstances() {
 	m.mu.RLock()
-	total := len(m.instances)
-	var candidates []*Instance
-	for _, inst := range m.instances {
-		if inst.Status == "running" {
-			candidates = append(candidates, inst)
-		}
+	ids := make([]string, 0, len(m.instances))
+	for id := range m.instances {
+		ids = append(ids, id)
 	}
 	m.mu.RUnlock()
-	if total == 0 {
-		return
-	}
 
-	client := &http.Client{Timeout: 5 * time.Second}
-	for _, inst := range candidates {
-		healthy := false
-		if inst.BuilderEndpoint != "" {
-			if resp, err := client.Get(strings.TrimRight(inst.BuilderEndpoint, "/") + "/health"); err == nil {
-				healthy = resp.StatusCode == http.StatusOK
-				_ = resp.Body.Close()
-			}
+	for _, id := range ids {
+		fmt.Printf("Reclaiming restored single-use instance %s\n", id)
+		if err := m.Terminate(id); err != nil {
+			// Terminate persists destroy_failed; cleanupExpiredInstances retries
+			// it regardless of TTL.
+			fmt.Printf("Restored instance %s could not be reclaimed immediately: %v\n", id, err)
 		}
-		if healthy {
-			fmt.Printf("Adopted warm instance %s (%s)\n", inst.ID, inst.IPAddress)
-			m.UpdateInstanceActivity(inst.ID)
-			continue
-		}
-		fmt.Printf("Restored instance %s is unreachable; scheduling destroy\n", inst.ID)
-		m.setInstanceStatus(inst, "destroy_failed") // cleanup routine retries destroys
 	}
-	m.persistInstances()
 }
 
 // ManagerOption is a functional option for configuring the Manager.
@@ -299,10 +319,22 @@ func NewManager(opts ...ManagerOption) *Manager {
 	for _, opt := range opts {
 		opt(m)
 	}
+	_ = os.MkdirAll(m.workspaceDir, 0o750)
 
 	m.loadInstances()
 
 	return m
+}
+
+// SetCredentialResolver configures the source of cloud credentials used when
+// destroying an instance restored from disk. The resolver must return secrets
+// from memory, environment, or a secret manager; its result is never persisted.
+// Configure it before StartCleanupRoutine so restored instances can be safely
+// reconciled and reclaimed.
+func (m *Manager) SetCredentialResolver(resolver func(string) *CloudCredentials) {
+	m.mu.Lock()
+	m.credentialResolver = resolver
+	m.mu.Unlock()
 }
 
 // StartCleanupRoutine starts the background cleanup routine for expired instances.
@@ -396,28 +428,6 @@ func (m *Manager) SetInstanceActiveTasks(instanceID string, count int) {
 	m.persistInstances()
 }
 
-// AcquireIdleInstance atomically claims a running, idle instance of the given
-// provider (and arch, when non-empty) for a new build, so warm instances are
-// reused instead of provisioning a fresh VM per build. Returns nil when none
-// is available. The caller must release it with SetInstanceActiveTasks(id, 0)
-// when done; idle instances are reclaimed by the TTL cleanup.
-func (m *Manager) AcquireIdleInstance(provider, arch string) *Instance {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	for _, inst := range m.instances {
-		if inst.Status != "running" || inst.ActiveTasks != 0 || inst.Provider != provider {
-			continue
-		}
-		if arch != "" && inst.Arch != "" && inst.Arch != arch {
-			continue
-		}
-		inst.ActiveTasks = 1
-		inst.LastActivity = time.Now()
-		return inst
-	}
-	return nil
-}
-
 // GetExpiredInstances returns a list of instances that have exceeded their TTL.
 func (m *Manager) GetExpiredInstances() []*Instance {
 	m.mu.RLock()
@@ -466,6 +476,16 @@ func (m *Manager) Provision(req *ProvisionRequest) (*Instance, error) {
 	if err := os.MkdirAll(terraformDir, 0750); err != nil {
 		return nil, fmt.Errorf("failed to create terraform directory: %w", err)
 	}
+	if req.Spec == nil {
+		req.Spec = make(map[string]string)
+	}
+	// Make the provider resource name deterministic from the durable instance
+	// ID. Provider configuration, the lifecycle row, and the crash-cleanup
+	// manifest must all refer to exactly the same name.
+	if req.Spec["resource_name"] == "" {
+		req.Spec["resource_name"] = fmt.Sprintf("portage-builder-%s-%s",
+			req.Arch, strings.TrimPrefix(instanceID, req.Provider+"-"))
+	}
 
 	// Set defaults
 	if req.BuilderPort == 0 {
@@ -492,6 +512,20 @@ func (m *Manager) Provision(req *ProvisionRequest) (*Instance, error) {
 	fwFile := filepath.Join(terraformDir, "firewall.tf")
 	if err := os.WriteFile(fwFile, []byte(firewallConfig), 0600); err != nil {
 		return nil, fmt.Errorf("failed to write firewall config: %w", err)
+	}
+	identity := resourceIdentity{
+		Provider: req.Provider,
+		Name:     req.Spec["resource_name"],
+		Node:     req.Spec["node"],
+		Endpoint: req.Spec["endpoint"],
+		Insecure: getOrDefault(req.Spec, "insecure", "false") == "true",
+	}
+	identityJSON, err := json.MarshalIndent(identity, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("encode infrastructure resource identity: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(terraformDir, resourceIdentityFile), identityJSON, 0600); err != nil {
+		return nil, fmt.Errorf("write infrastructure resource identity: %w", err)
 	}
 
 	// Set environment variables for cloud credentials
@@ -521,11 +555,22 @@ func (m *Manager) Provision(req *ProvisionRequest) (*Instance, error) {
 		TTL:           ttl,
 		LastActivity:  now,
 		destroyEnv:    env,
+		lifecycle:     req.Lifecycle,
 	}
 	m.mu.Lock()
 	m.instances[instanceID] = instance
 	m.mu.Unlock()
 	m.persistInstances()
+	if instance.lifecycle != nil {
+		if err := instance.lifecycle(instance, "provisioning", "", nil); err != nil {
+			m.mu.Lock()
+			delete(m.instances, instanceID)
+			m.mu.Unlock()
+			m.persistInstances()
+			_ = os.RemoveAll(terraformDir)
+			return nil, fmt.Errorf("persist infrastructure ownership before terraform apply: %w", err)
+		}
+	}
 
 	// Run Terraform init with a bounded timeout so a hung init cannot block the
 	// build worker forever.
@@ -602,6 +647,12 @@ func (m *Manager) Provision(req *ProvisionRequest) (*Instance, error) {
 	}
 
 	m.setInstanceStatus(instance, "running")
+	if instance.lifecycle != nil {
+		if err := instance.lifecycle(instance, "running", "", nil); err != nil {
+			m.rollback(instance)
+			return nil, fmt.Errorf("persist running infrastructure state: %w", err)
+		}
+	}
 	return instance, nil
 }
 
@@ -615,15 +666,29 @@ func (m *Manager) setInstanceStatus(instance *Instance, status string) {
 }
 
 // rollback destroys a partially- or fully-provisioned instance and, on success,
-// stops tracking it. If destroy fails the instance is kept (with its terraform
-// dir and credential env) so the cleanup routine can retry it later.
+// stops tracking it. If destroy fails the instance is kept with its Terraform
+// workspace so the cleanup routine can retry it later.
 func (m *Manager) rollback(instance *Instance) {
 	if err := m.destroyInstance(instance); err != nil {
 		fmt.Printf("Warning: rollback destroy failed for %s (will retry later): %v\n", instance.ID, err)
 		m.mu.Lock()
 		instance.Status = "destroy_failed"
 		m.mu.Unlock()
+		if instance.lifecycle != nil {
+			_ = instance.lifecycle(instance, "destroy_failed", err.Error(), nil)
+		}
 		return
+	}
+	if instance.lifecycle != nil {
+		now := time.Now().UTC()
+		if err := instance.lifecycle(instance, "destroyed", "", &now); err != nil {
+			m.mu.Lock()
+			instance.Status = "destroy_failed"
+			m.mu.Unlock()
+			m.persistInstances()
+			fmt.Printf("Warning: destroyed %s but could not persist cleanup result (will reconcile): %v\n", instance.ID, err)
+			return
+		}
 	}
 	m.mu.Lock()
 	delete(m.instances, instance.ID)
@@ -632,14 +697,23 @@ func (m *Manager) rollback(instance *Instance) {
 	_ = os.RemoveAll(instance.TerraformDir)
 }
 
-// destroyInstance runs `terraform destroy` for an instance using the credential
-// environment captured at provision time. It returns an error if destroy fails
-// so callers can decide whether to keep tracking the instance for a retry.
+// destroyInstance runs `terraform destroy` for an instance. Fresh instances use
+// the credential environment captured only in memory at provision time;
+// restored instances resolve current credentials from the server's secret-backed
+// runtime configuration.
 func (m *Manager) destroyInstance(instance *Instance) error {
 	m.mu.RLock()
-	env := instance.destroyEnv
+	env := append([]string(nil), instance.destroyEnv...)
 	dir := instance.TerraformDir
+	resolver := m.credentialResolver
+	provider := instance.Provider
 	m.mu.RUnlock()
+	if len(env) == 0 && resolver != nil {
+		env = m.prepareEnvironment(&ProvisionRequest{
+			Provider:    provider,
+			Credentials: resolver(provider),
+		})
+	}
 
 	// Bounded timeout so a hung destroy cannot block the cleanup routine forever.
 	ctx, cancel := context.WithTimeout(context.Background(), terraformDestroyTimeout)
@@ -647,13 +721,57 @@ func (m *Manager) destroyInstance(instance *Instance) error {
 	if err := m.runTerraformCommand(ctx, dir, env, nil, "destroy", "-auto-approve"); err != nil {
 		return fmt.Errorf("terraform destroy failed: %w", err)
 	}
+	if provider == "pve" {
+		identity, err := readResourceIdentity(dir)
+		if err != nil {
+			return fmt.Errorf("verify PVE cleanup identity: %w", err)
+		}
+		if identity.Name != "" {
+			if resolver == nil {
+				return fmt.Errorf("verify PVE cleanup: credential resolver is unavailable")
+			}
+			credentials := resolver(provider)
+			if credentials == nil {
+				return fmt.Errorf("verify PVE cleanup: credentials are unavailable")
+			}
+			auth := PVEAuth{
+				TokenID: credentials.PVETokenID, TokenSecret: credentials.PVETokenSecret,
+				Username: credentials.PVEUsername, Password: credentials.PVEPassword,
+				Insecure: identity.Insecure,
+			}
+			endpoint := identity.Endpoint
+			if endpoint == "" {
+				endpoint = getOrDefault(instance.Metadata, "endpoint", "")
+			}
+			if err := EnsurePVEVMAbsent(ctx, endpoint, auth, identity.Node, identity.Name); err != nil {
+				return fmt.Errorf("provider-native PVE cleanup verification: %w", err)
+			}
+		}
+	}
 	return nil
 }
 
+func readResourceIdentity(terraformDir string) (*resourceIdentity, error) {
+	data, err := os.ReadFile(filepath.Join(terraformDir, resourceIdentityFile))
+	if err != nil {
+		if os.IsNotExist(err) {
+			// Workspaces created before the identity manifest was introduced
+			// still rely on Terraform state. Do not break their cleanup.
+			return &resourceIdentity{}, nil
+		}
+		return nil, err
+	}
+	var identity resourceIdentity
+	if err := json.Unmarshal(data, &identity); err != nil {
+		return nil, err
+	}
+	return &identity, nil
+}
+
 // Terminate destroys an instance. If destroy succeeds the instance is untracked
-// and its terraform dir removed. If destroy FAILS the instance is kept (state
-// and credentials intact) so the cleanup routine can retry — otherwise the VM
-// would keep billing with no way left to destroy it.
+// and its terraform dir removed. If destroy FAILS the instance and Terraform
+// state are kept so the cleanup routine can retry — otherwise the VM would keep
+// billing with no way left to destroy it.
 func (m *Manager) Terminate(instanceID string) error {
 	m.mu.RLock()
 	instance, exists := m.instances[instanceID]
@@ -667,8 +785,22 @@ func (m *Manager) Terminate(instanceID string) error {
 		m.mu.Lock()
 		instance.Status = "destroy_failed"
 		m.mu.Unlock()
+		m.persistInstances()
+		if instance.lifecycle != nil {
+			_ = instance.lifecycle(instance, "destroy_failed", err.Error(), nil)
+		}
 		fmt.Printf("Warning: %v (instance %s kept for retry)\n", err, instanceID)
 		return err
+	}
+	if instance.lifecycle != nil {
+		now := time.Now().UTC()
+		if err := instance.lifecycle(instance, "destroyed", "", &now); err != nil {
+			m.mu.Lock()
+			instance.Status = "destroy_failed"
+			m.mu.Unlock()
+			m.persistInstances()
+			return fmt.Errorf("terraform destroy succeeded but durable cleanup acknowledgement failed: %w", err)
+		}
 	}
 
 	// Destroy succeeded — clean up state and stop tracking.
@@ -676,7 +808,88 @@ func (m *Manager) Terminate(instanceID string) error {
 	m.mu.Lock()
 	delete(m.instances, instanceID)
 	m.mu.Unlock()
+	m.persistInstances()
 
+	return nil
+}
+
+// DestroyRecorded reclaims a workspace selected by PostgreSQL. It does not
+// require the instance to exist in this process's map, which is what permits a
+// second control-plane replica to clean up after the original process dies.
+func (m *Manager) DestroyRecorded(provider, instanceID, terraformDir string) error {
+	if !supportedProviders[provider] {
+		return fmt.Errorf("provider %q not implemented", provider)
+	}
+	if instanceID == "" || terraformDir == "" {
+		return fmt.Errorf("recorded infrastructure requires instance id and terraform workspace")
+	}
+	root, err := filepath.Abs(m.workspaceDir)
+	if err != nil {
+		return fmt.Errorf("resolve terraform workspace root: %w", err)
+	}
+	dir, err := filepath.Abs(terraformDir)
+	if err != nil {
+		return fmt.Errorf("resolve recorded terraform workspace: %w", err)
+	}
+	rel, err := filepath.Rel(root, dir)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("recorded terraform workspace is outside the configured shared state root")
+	}
+	info, err := os.Stat(dir)
+	if err != nil {
+		return fmt.Errorf("inspect recorded terraform workspace: %w", err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("recorded terraform workspace is not a directory")
+	}
+
+	instance := &Instance{ID: instanceID, Provider: provider, TerraformDir: dir}
+	if m.credentialResolver != nil {
+		instance.destroyEnv = m.prepareEnvironment(&ProvisionRequest{
+			Provider:    provider,
+			Credentials: m.credentialResolver(provider),
+		})
+	}
+	// Another replica or a newer control-plane image may have a different
+	// backend working-directory fingerprint. Reinitialize the retained
+	// workspace before destroy so cleanup does not loop forever on Terraform's
+	// "Backend initialization required" guard.
+	initCtx, initCancel := context.WithTimeout(context.Background(), terraformInitTimeout)
+	initErr := m.runTerraformCommand(initCtx, dir, instance.destroyEnv, nil,
+		"init", "-reconfigure", "-input=false")
+	initCancel()
+	if initErr != nil {
+		return fmt.Errorf("reinitialize recorded terraform workspace: %w", initErr)
+	}
+	if err := m.destroyInstance(instance); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	delete(m.instances, instanceID)
+	m.mu.Unlock()
+	m.persistInstances()
+	return nil
+}
+
+// RemoveRecordedWorkspace removes state only after PostgreSQL has acknowledged
+// the successful destroy. A crash before acknowledgement therefore retains
+// enough Terraform state for an idempotent retry.
+func (m *Manager) RemoveRecordedWorkspace(terraformDir string) error {
+	root, err := filepath.Abs(m.workspaceDir)
+	if err != nil {
+		return fmt.Errorf("resolve terraform workspace root: %w", err)
+	}
+	dir, err := filepath.Abs(terraformDir)
+	if err != nil {
+		return fmt.Errorf("resolve recorded terraform workspace: %w", err)
+	}
+	rel, err := filepath.Rel(root, dir)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("recorded terraform workspace is outside the configured shared state root")
+	}
+	if err := os.RemoveAll(dir); err != nil {
+		return fmt.Errorf("remove destroyed terraform workspace: %w", err)
+	}
 	return nil
 }
 
@@ -887,18 +1100,6 @@ func (m *Manager) deployBuilder(instance *Instance, req *ProvisionRequest) error
 		return fmt.Errorf("failed to copy deployment script: %w", err)
 	}
 
-	// Push the vendored docker install script when a download mirror is
-	// configured, so the bootstrap installs docker from the mirror.
-	if req.DockerDownloadMirror != "" {
-		scriptPath := filepath.Join(instance.TerraformDir, "docker-install.sh")
-		if err := os.WriteFile(scriptPath, dockerInstallScript, 0600); err != nil {
-			return fmt.Errorf("failed to write docker install script: %w", err)
-		}
-		if err := m.sshCopyFile(instance, req.SSH, scriptPath, "/tmp/docker-install.sh"); err != nil {
-			return fmt.Errorf("failed to copy docker install script: %w", err)
-		}
-	}
-
 	// Push a locally-built builder binary, if configured. It is staged in /tmp
 	// and moved into place before the bootstrap script runs, so the script's
 	// final "is the builder present" check enables and starts the service.
@@ -913,28 +1114,8 @@ func (m *Manager) deployBuilder(instance *Instance, req *ProvisionRequest) error
 		}
 	}
 
-	// Push the binhost signing key so the bootstrap can import it before the
-	// builder service starts (the script removes the staged copy).
-	if len(req.GPGSecretKey) > 0 {
-		keyPath := filepath.Join(instance.TerraformDir, "gpg-secret.asc")
-		if err := os.WriteFile(keyPath, req.GPGSecretKey, 0600); err != nil {
-			return fmt.Errorf("failed to stage signing key: %w", err)
-		}
-		err := m.sshCopyFile(instance, req.SSH, keyPath, "/tmp/pe-gpg-secret.asc")
-		_ = os.Remove(keyPath)
-		if err != nil {
-			return fmt.Errorf("failed to copy signing key: %w", err)
-		}
-		sinkf(req.LogSink, "[deploy] binhost signing key staged")
-	}
-
-	// Execute deployment script, streaming its output (docker install, portage
-	// tree sync, service start) into the live job log.
-	bootstrapMsg := "[deploy] running bootstrap script (docker install + portage tree sync — this takes several minutes)…"
-	if req.BuildMode == "native-gentoo" {
-		bootstrapMsg = "[deploy] configuring native Gentoo build node (make.conf + signing + builder)…"
-	}
-	sinkf(req.LogSink, "%s", bootstrapMsg)
+	// Execute the native Gentoo deployment script and stream progress.
+	sinkf(req.LogSink, "[deploy] configuring native Gentoo build node (make.conf + unsigned builder)…")
 	if err := m.sshExecuteStream(instance, req.SSH, "chmod +x /tmp/deploy.sh && /tmp/deploy.sh", req.LogSink); err != nil {
 		return fmt.Errorf("failed to execute deployment script: %w", err)
 	}
@@ -990,8 +1171,8 @@ func (m *Manager) waitForSSH(instance *Instance, cfg *SSHConfig, timeout time.Du
 
 // sshExecuteStream runs a long command on the instance via SSH, streaming
 // combined output line-by-line into the sink (live UI logs). It uses a much
-// longer timeout than sshExecute: the deployment script installs docker and
-// syncs the portage tree, which takes well beyond sshCommandTimeout.
+// longer timeout than sshExecute because native bootstrap and Portage/signing
+// setup can take well beyond sshCommandTimeout.
 func (m *Manager) sshExecuteStream(instance *Instance, cfg *SSHConfig, command string, sink func(string)) error {
 	keyPath := ""
 	if cfg != nil {
@@ -1113,71 +1294,34 @@ func (m *Manager) sshCopyFile(instance *Instance, cfg *SSHConfig, localPath, rem
 	return nil
 }
 
-// generateDeploymentScript generates a shell script to deploy the builder onto
-// a provisioned instance.
+// generateDeploymentScript configures a native Gentoo build root. Container
+// builders are intentionally unsupported.
 func (m *Manager) generateDeploymentScript(req *ProvisionRequest) string {
 	arch := req.Arch
 	if arch == "" {
 		arch = "amd64"
 	}
-	if req.BuildMode == "native-gentoo" {
-		return m.generateGentooNativeScript(req, arch)
-	}
-	portageMirror := "https://distfiles.gentoo.org"
-	if req.GentooMirror != "" {
-		portageMirror = req.GentooMirror
-	}
-	dockerImage := "gentoo/stage3:latest"
-	if req.DockerImage != "" {
-		dockerImage = req.DockerImage
-	}
-	config := &CloudInitConfig{
-		DockerImage:          dockerImage,
-		PullLatestImage:      true,
-		PortageTreeSync:      true,
-		PortageMirror:        portageMirror,
-		AptMirror:            req.AptMirror,
-		DockerDownloadMirror: req.DockerDownloadMirror,
-		DockerRegistryMirror: req.DockerRegistryMirror,
-		PortageSyncURI:       req.PortageSyncURI,
-		PortageSyncMethod:    req.PortageSyncMethod,
-		MakeConfExtra:        req.MakeConfExtra,
-		BuilderBinaryURL:     req.BuilderBinaryURL,
-		PortageBinpkgHost:    req.BinpkgHost,
-		BuilderPort:          req.BuilderPort,
-		BuilderToken:         req.BuilderToken,
-		ServerCallbackURL:    req.ServerCallback,
-		Architecture:         arch,
-		DataDir:              "/var/lib/portage-engine",
-		WorkDir:              "/var/tmp/portage-builds",
-		ArtifactDir:          "/var/tmp/portage-artifacts",
-		SwapSizeGB:           4,
-		EnableFirewall:       true,
-		GPGKeyID:             req.GPGKeyID,
-		BuildFeatures:        req.BuildFeatures,
-	}
-
-	return GenerateCloudInitScript(config)
+	return m.generateGentooNativeScript(req, arch)
 }
 
-// generateGentooNativeScript builds the deployment script for a native Gentoo
-// VM (no Docker; in-emerge signing).
+// generateGentooNativeScript builds the deployment script for a disposable
+// native Gentoo VM. The VM never receives signing private-key material.
 func (m *Manager) generateGentooNativeScript(req *ProvisionRequest, arch string) string {
 	config := &CloudInitConfig{
-		Architecture:      arch,
-		AptMirror:         req.AptMirror,
-		PortageMirror:     req.GentooMirror,
-		PortageSyncURI:    req.PortageSyncURI,
-		PortageSyncMethod: req.PortageSyncMethod,
-		MakeConfExtra:     req.MakeConfExtra,
-		PortageBinpkgHost: req.BinpkgHost,
-		BuilderPort:       req.BuilderPort,
-		BuilderToken:      req.BuilderToken,
-		ServerCallbackURL: req.ServerCallback,
-		GPGKeyID:          req.GPGKeyID,
-		DataDir:           "/var/lib/portage-engine",
-		WorkDir:           "/var/tmp/portage-builds",
-		ArtifactDir:       "/var/tmp/portage-artifacts",
+		Architecture:        arch,
+		PortageMirror:       req.GentooMirror,
+		PortageSyncURI:      req.PortageSyncURI,
+		PortageSyncMethod:   req.PortageSyncMethod,
+		MakeConfExtra:       req.MakeConfExtra,
+		BuilderBinaryURL:    req.BuilderBinaryURL,
+		BuilderBinarySHA256: req.BuilderBinarySHA256,
+		PortageBinpkgHost:   req.BinpkgHost,
+		BuilderPort:         req.BuilderPort,
+		BuilderToken:        req.BuilderToken,
+		ServerCallbackURL:   req.ServerCallback,
+		DataDir:             "/var/lib/portage-engine",
+		WorkDir:             "/var/tmp/portage-builds",
+		ArtifactDir:         "/var/tmp/portage-artifacts",
 	}
 	return GenerateGentooNativeScript(config)
 }
@@ -1757,6 +1901,9 @@ func (m *Manager) generatePVEConfig(req *ProvisionRequest) (string, error) {
 		return "", fmt.Errorf("failed to create PVE provisioner: %w", err)
 	}
 
-	instanceName := fmt.Sprintf("portage-builder-%s-%d", req.Arch, time.Now().Unix())
+	instanceName := getOrDefault(req.Spec, "resource_name",
+		fmt.Sprintf("portage-builder-%s-%d", req.Arch, time.Now().Unix()))
+	req.Spec["resource_name"] = instanceName
+	req.Spec["node"] = spec.Node
 	return provisioner.GenerateMainTF(spec, instanceName), nil
 }

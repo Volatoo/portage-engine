@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "proxmox_url": "https://pve.example.internal:8006/api2/json",
+  "proxmox_node": "pve01",
+  "proxmox_pool": "portage-engine",
+  "proxmox_storage": "local-lvm",
+  "proxmox_bridge": "vmbr0",
+  "proxmox_insecure": false,
+  "proxmox_host_memory_headroom_mb": 4096,
+  "ssh_username": "root",
+  "ssh_private_key_file": "/secure/path/to/packer_ed25519"
+}

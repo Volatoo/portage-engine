@@ -1,157 +1,411 @@
-# Portage Engine Docker Compose Example
-# This demonstrates the full architecture:
-#   - Server (local): Receives requests and dispatches to builders
-#   - Builder 1 & 2 (remote): Build packages using Docker containers
-#   - Dashboard (local): Web UI for monitoring
+# Portage Engine local control-plane stack.
 #
-# NOTE: The builders run real Gentoo builds inside Docker containers
-# (USE_DOCKER=true), so they need access to a Docker daemon. This example
-# bind-mounts the host's Docker socket (/var/run/docker.sock) into each builder
-# and installs the docker CLI at startup. This is "Docker-out-of-Docker": the
-# builders drive the HOST Docker daemon. Ensure the host user running Compose
-# can access the Docker socket.
+# Package builders are deliberately absent. Builds run only in disposable
+# native Gentoo roots/VMs; this Compose project hosts the control plane and its
+# local development dependencies.
 #
-# The Go base image (golang:1.25.3) matches the version in go.mod; an older
-# image (e.g. golang:1.21) cannot build this project.
+# All published ports bind to 127.0.0.1 and can be overridden with
+# .env.compose (copy .env.compose.example). Run scripts/check-compose-ports.sh
+# before starting when other local stacks are active.
+
+x-default-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
 
 services:
-  # Portage Engine Server (local control plane)
+  postgres:
+    image: postgres:18.4-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${PORTAGE_POSTGRES_DB:-portage_engine}
+      POSTGRES_USER: ${PORTAGE_POSTGRES_USER:-portage}
+      POSTGRES_PASSWORD: ${PORTAGE_POSTGRES_PASSWORD:-portage-postgres-local}
+      PORTAGE_POSTGRES_APP_USER: ${PORTAGE_POSTGRES_APP_USER:-portage_app}
+      PORTAGE_POSTGRES_APP_PASSWORD: ${PORTAGE_POSTGRES_APP_PASSWORD:-portage-app-local}
+      PORTAGE_POSTGRES_SIGNER_PASSWORD: ${PORTAGE_POSTGRES_SIGNER_PASSWORD:-portage-signer-local}
+      OTEL_POSTGRES_PASSWORD: ${PORTAGE_OTEL_POSTGRES_PASSWORD:-portage-otel-local}
+    ports:
+      - "127.0.0.1:${PORTAGE_POSTGRES_PORT:-25432}:5432"
+    volumes:
+      # PostgreSQL 18 uses a major-version-specific PGDATA below this path.
+      - postgres-data:/var/lib/postgresql
+      - ./deploy/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\"",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    networks:
+      - portage-net
+    logging: *default-logging
+
+  redis:
+    image: redis:8.8.0-alpine
+    restart: unless-stopped
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --appendfsync
+      - everysec
+      - --requirepass
+      - ${PORTAGE_REDIS_PASSWORD:-portage-redis-local}
+    environment:
+      REDIS_PASSWORD: ${PORTAGE_REDIS_PASSWORD:-portage-redis-local}
+    ports:
+      - "127.0.0.1:${PORTAGE_REDIS_PORT:-26379}:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "redis-cli --no-auth-warning -a \"$${REDIS_PASSWORD}\" ping | grep PONG",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+    networks:
+      - portage-net
+    logging: *default-logging
+
+  loki:
+    image: grafana/loki:3.7.2
+    restart: unless-stopped
+    command: ["-config.file=/etc/loki/local-config.yaml"]
+    ports:
+      - "127.0.0.1:${PORTAGE_LOKI_PORT:-23100}:3100"
+    volumes:
+      - ./deploy/observability/loki.yaml:/etc/loki/local-config.yaml:ro
+      - loki-data:/loki
+    networks:
+      - portage-net
+    logging: *default-logging
+
+  tempo:
+    image: grafana/tempo:2.10.5
+    restart: unless-stopped
+    command: ["-config.file=/etc/tempo/tempo.yaml"]
+    ports:
+      - "127.0.0.1:${PORTAGE_TEMPO_PORT:-23200}:3200"
+    volumes:
+      - ./deploy/observability/tempo.yaml:/etc/tempo/tempo.yaml:ro
+      - tempo-data:/var/tempo
+    networks:
+      - portage-net
+    logging: *default-logging
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.153.0
+    restart: unless-stopped
+    command:
+      - --config=/etc/otelcol-contrib/config.yaml
+      - --feature-gates=receiver.postgresql.separateSchemaAttr
+    environment:
+      POSTGRES_USER: portage_otel
+      POSTGRES_PASSWORD: ${PORTAGE_OTEL_POSTGRES_PASSWORD:-portage-otel-local}
+      POSTGRES_DB: ${PORTAGE_POSTGRES_DB:-portage_engine}
+      REDIS_PASSWORD: ${PORTAGE_REDIS_PASSWORD:-portage-redis-local}
+    ports:
+      - "127.0.0.1:${PORTAGE_OTLP_GRPC_PORT:-24317}:4317"
+      - "127.0.0.1:${PORTAGE_OTLP_HTTP_PORT:-24318}:4318"
+      - "127.0.0.1:${PORTAGE_OTEL_HEALTH_PORT:-23133}:13133"
+    volumes:
+      - ./deploy/observability/otel-collector.yaml:/etc/otelcol-contrib/config.yaml:ro
+      - portage-logs:/var/log/portage-engine:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      loki:
+        condition: service_started
+      tempo:
+        condition: service_started
+    networks:
+      - portage-net
+    logging: *default-logging
+
+  prometheus:
+    image: prom/prometheus:v3.11.2
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=7d
+      - --web.enable-lifecycle
+    ports:
+      - "127.0.0.1:${PORTAGE_PROMETHEUS_PORT:-29090}:9090"
+    volumes:
+      - ./deploy/observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    depends_on:
+      otel-collector:
+        condition: service_started
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "wget -q --spider http://127.0.0.1:9090/-/ready || exit 1",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    networks:
+      - portage-net
+    logging: *default-logging
+
+  grafana:
+    image: grafana/grafana:13.1.0
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: ${PORTAGE_GRAFANA_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${PORTAGE_GRAFANA_PASSWORD:-portage-grafana-local}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
+      GF_PLUGINS_PREINSTALL_DISABLED: "true"
+      GF_PLUGINS_PLUGIN_ADMIN_ENABLED: "false"
+    ports:
+      - "127.0.0.1:${PORTAGE_GRAFANA_PORT:-23000}:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./deploy/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./deploy/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./deploy/grafana/portage-engine-dashboard.json:/var/lib/grafana/dashboards/portage-engine-dashboard.json:ro
+    depends_on:
+      prometheus:
+        condition: service_healthy
+      loki:
+        condition: service_started
+      tempo:
+        condition: service_started
+    networks:
+      - portage-net
+    logging: *default-logging
+
+  portage-migrate:
+    image: portage-engine-control-plane:local
+    build:
+      context: .
+    command: ["/usr/local/bin/portage-migrate", "-config", "/nonexistent.conf", "up"]
+    environment:
+      DATABASE_ENABLED: "true"
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGDATABASE: ${PORTAGE_POSTGRES_DB:-portage_engine}
+      PGUSER: ${PORTAGE_POSTGRES_USER:-portage}
+      PGPASSWORD: ${PORTAGE_POSTGRES_PASSWORD:-portage-postgres-local}
+      # The Compose bridge is private to this host. Shared/remote deployments
+      # keep the application default (verify-full) and provide a trusted CA.
+      PGSSLMODE: disable
+    depends_on:
+      portage-db-bootstrap:
+        condition: service_completed_successfully
+    networks:
+      - portage-net
+    logging: *default-logging
+
+  # Init scripts run only for a new PostgreSQL volume. This repeatable bootstrap
+  # also creates/repairs the least-privilege signer role on upgraded volumes.
+  portage-db-bootstrap:
+    image: postgres:18.4-alpine
+    restart: "no"
+    environment:
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGDATABASE: ${PORTAGE_POSTGRES_DB:-portage_engine}
+      PGUSER: ${PORTAGE_POSTGRES_USER:-portage}
+      PGPASSWORD: ${PORTAGE_POSTGRES_PASSWORD:-portage-postgres-local}
+      SIGNER_PASSWORD: ${PORTAGE_POSTGRES_SIGNER_PASSWORD:-portage-signer-local}
+    command:
+      - /bin/sh
+      - -ec
+      - |
+        psql --set=ON_ERROR_STOP=1 --set=signer_password="$${SIGNER_PASSWORD}" <<'EOSQL'
+        SELECT format('CREATE ROLE portage_signer LOGIN PASSWORD %L', :'signer_password')
+        WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'portage_signer')
+        \gexec
+        SELECT format('ALTER ROLE portage_signer LOGIN PASSWORD %L', :'signer_password')
+        \gexec
+        SELECT format('GRANT CONNECT ON DATABASE %I TO portage_signer', current_database())
+        \gexec
+        GRANT USAGE ON SCHEMA public TO portage_signer;
+        SELECT 'GRANT SELECT, UPDATE ON signing_tasks TO portage_signer'
+        WHERE to_regclass('public.signing_tasks') IS NOT NULL
+        \gexec
+        SELECT 'GRANT SELECT ON build_jobs, build_attempts, worker_leases, workers, artifacts, goose_db_version TO portage_signer'
+        WHERE to_regclass('public.signing_tasks') IS NOT NULL
+        \gexec
+        EOSQL
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - portage-net
+    logging: *default-logging
+
   portage-server:
-    image: golang:1.25.3
-    container_name: portage-server
-    working_dir: /app
-    volumes:
-      - ./:/app
-      - gomod-cache:/go/pkg/mod
-      - gobuild-cache:/root/.cache/go-build
-    ports:
-      - "18080:8080"
-    # Build the binary OUTSIDE the bind mount (so host-built darwin binaries in
-    # ./bin are not clobbered), then run it with a non-existent config path so
-    # the server uses built-in defaults + the environment below. (Passing a
-    # shipped .conf would win over these env vars — config-file values take
-    # precedence — and point the demo at placeholder hosts.)
+    image: portage-engine-control-plane:local
+    build:
+      context: .
+    restart: unless-stopped
     command: >
-      sh -c "go build -o /usr/local/bin/portage-server cmd/server/main.go &&
-             portage-server -config /nonexistent.conf"
+      bash -o pipefail -c "portage-server -config /nonexistent.conf 2>&1 |
+      rotating-log-tee /var/log/portage-engine/server.log"
     environment:
-      # Env var names must match what pkg/config reads (see config.go).
-      - REMOTE_BUILDERS=http://builder1:9090,http://builder2:9090
-      - DATA_DIR=/tmp/portage-engine/server
-      - BINPKG_PATH=/tmp/portage-engine/binpkgs
-      - STORAGE_LOCAL_DIR=/tmp/portage-engine/binpkgs
-    networks:
-      - portage-net
+      DATA_DIR: /var/lib/portage-engine/server
+      CONTROL_PLANE_ID: compose-primary
+      BINPKG_PATH: /var/lib/portage-engine/binpkgs
+      STORAGE_LOCAL_DIR: /var/lib/portage-engine/binpkgs
+      METRICS_ENABLED: "true"
+      DATABASE_ENABLED: "true"
+      DATABASE_REQUIRED: "true"
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGDATABASE: ${PORTAGE_POSTGRES_DB:-portage_engine}
+      PGUSER: ${PORTAGE_POSTGRES_APP_USER:-portage_app}
+      PGPASSWORD: ${PORTAGE_POSTGRES_APP_PASSWORD:-portage-app-local}
+      PGSSLMODE: disable
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_PASSWORD: ${PORTAGE_REDIS_PASSWORD:-portage-redis-local}
+      REDIS_ENABLED: "true"
+      REDIS_REQUIRED: "false"
+      REDIS_KEY_PREFIX: portage-engine-local
+      RATE_LIMIT_PER_MINUTE: ${PORTAGE_RATE_LIMIT_PER_MINUTE:-120}
+      RATE_LIMIT_BURST: ${PORTAGE_RATE_LIMIT_BURST:-30}
+      OTEL_SERVICE_NAME: portage-server
+      OTEL_RESOURCE_ATTRIBUTES: deployment.environment.name=local,service.namespace=portage-engine
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
+      GPG_ENABLED: "true"
+      GPG_PUBLIC_KEY_PATH: /var/lib/portage-engine/signing/public.asc
+      SIGNER_WAIT_TIMEOUT_SECONDS: "600"
+    ports:
+      - "127.0.0.1:${PORTAGE_SERVER_PORT:-18080}:8080"
+    volumes:
+      - portage-logs:/var/log/portage-engine
+      - portage-state:/var/lib/portage-engine
     depends_on:
-      - builder1
-      - builder2
-
-  # Builder Instance 1 (remote builder)
-  builder1:
-    image: golang:1.25.3
-    container_name: portage-builder1
-    working_dir: /app
-    volumes:
-      - ./:/app
-      - gomod-cache:/go/pkg/mod
-      - gobuild-cache:/root/.cache/go-build
-      # Docker-out-of-Docker: builders drive the host Docker daemon.
-      - /var/run/docker.sock:/var/run/docker.sock
-      - builder1-work:/var/tmp/portage-builds
-      - builder1-artifacts:/var/tmp/portage-artifacts
-    ports:
-      - "9091:9090"
-    # Install the docker CLI (needed for USE_DOCKER builds), build, then run.
-    command: >
-      sh -c "(apt-get update && apt-get install -y --no-install-recommends docker.io || true) &&
-             go build -o /usr/local/bin/portage-builder cmd/builder/main.go &&
-             portage-builder -config /nonexistent.conf -port 9090"
-    environment:
-      - BUILDER_WORKERS=2
-      - USE_DOCKER=true
-      - DOCKER_IMAGE=gentoo/stage3:latest
-      - BUILD_WORK_DIR=/var/tmp/portage-builds
-      - BUILD_ARTIFACT_DIR=/var/tmp/portage-artifacts
-      - GPG_ENABLED=false
-      # Register + heartbeat with the server so the dashboard's Build Nodes
-      # page shows this builder.
-      - SERVER_URL=http://portage-server:8080
-      - BUILDER_ADVERTISE_URL=http://builder1:9090
-      - INSTANCE_ID=builder1
-      - ARCHITECTURE=amd64
+      portage-migrate:
+        condition: service_completed_successfully
+      portage-signer:
+        condition: service_started
+      redis:
+        condition: service_healthy
+      otel-collector:
+        condition: service_started
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "bash -ec 'exec 3<>/dev/tcp/127.0.0.1/8080'",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
     networks:
       - portage-net
+    logging: *default-logging
 
-  # Builder Instance 2 (remote builder)
-  builder2:
-    image: golang:1.25.3
-    container_name: portage-builder2
-    working_dir: /app
-    volumes:
-      - ./:/app
-      - gomod-cache:/go/pkg/mod
-      - gobuild-cache:/root/.cache/go-build
-      # Docker-out-of-Docker: builders drive the host Docker daemon.
-      - /var/run/docker.sock:/var/run/docker.sock
-      - builder2-work:/var/tmp/portage-builds
-      - builder2-artifacts:/var/tmp/portage-artifacts
-    ports:
-      - "9092:9090"
-    command: >
-      sh -c "(apt-get update && apt-get install -y --no-install-recommends docker.io || true) &&
-             go build -o /usr/local/bin/portage-builder cmd/builder/main.go &&
-             portage-builder -config /nonexistent.conf -port 9090"
+  portage-signer:
+    image: portage-engine-control-plane:local
+    build:
+      context: .
+    restart: unless-stopped
+    command:
+      - /usr/local/bin/portage-signer
+      - -config
+      - /nonexistent.conf
     environment:
-      - BUILDER_WORKERS=2
-      - USE_DOCKER=true
-      - DOCKER_IMAGE=gentoo/stage3:latest
-      - BUILD_WORK_DIR=/var/tmp/portage-builds
-      - BUILD_ARTIFACT_DIR=/var/tmp/portage-artifacts
-      - GPG_ENABLED=false
-      - SERVER_URL=http://portage-server:8080
-      - BUILDER_ADVERTISE_URL=http://builder2:9090
-      - INSTANCE_ID=builder2
-      - ARCHITECTURE=amd64
+      BINPKG_PATH: /var/lib/portage-engine/binpkgs
+      DATABASE_ENABLED: "true"
+      DATABASE_REQUIRED: "true"
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGDATABASE: ${PORTAGE_POSTGRES_DB:-portage_engine}
+      PGUSER: portage_signer
+      PGPASSWORD: ${PORTAGE_POSTGRES_SIGNER_PASSWORD:-portage-signer-local}
+      PGSSLMODE: disable
+      GPG_ENABLED: "true"
+      GPG_KEY_ID: ${PORTAGE_SIGNER_GPG_KEY_ID:-}
+      GPG_AUTO_CREATE: ${PORTAGE_SIGNER_GPG_AUTO_CREATE:-true}
+      GPG_KEY_NAME: Portage Engine Isolated Signer
+      GPG_KEY_EMAIL: signer@portage-engine.local
+      GPG_HOME: /var/lib/portage-signer/gpg
+      GPG_PUBLIC_KEY_PATH: /var/lib/portage-engine/signing/public.asc
+    volumes:
+      - portage-state:/var/lib/portage-engine
+      - portage-signer-key:/var/lib/portage-signer
+    depends_on:
+      portage-migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "kill -0 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
     networks:
       - portage-net
+    logging: *default-logging
 
-  # Dashboard (local web UI). Auth is enabled so the full experience —
-  # landing page → sign in → console — can be exercised. Demo credentials:
-  # admin / portage-demo (change for anything beyond a local demo).
   portage-dashboard:
-    image: golang:1.25.3
-    container_name: portage-dashboard
-    working_dir: /app
-    volumes:
-      - ./:/app
-      - gomod-cache:/go/pkg/mod
-      - gobuild-cache:/root/.cache/go-build
-    ports:
-      - "8081:8081"
+    image: portage-engine-control-plane:local
+    build:
+      context: .
+    restart: unless-stopped
     command: >
-      sh -c "go build -o /usr/local/bin/portage-dashboard cmd/dashboard/main.go &&
-             portage-dashboard -config /nonexistent.conf"
+      bash -o pipefail -c "portage-dashboard -config /nonexistent.conf 2>&1 |
+      rotating-log-tee /var/log/portage-engine/dashboard.log"
     environment:
-      # Point the dashboard at the server service on the compose network.
-      - SERVER_URL=http://portage-server:8080
-      - AUTH_ENABLED=true
-      - JWT_SECRET=compose-demo-jwt-secret-0123456789abcdef
-      - ADMIN_USER=admin
-      - ADMIN_PASSWORD=portage-demo
-      - ALLOW_ANONYMOUS=false
+      SERVER_URL: http://portage-server:8080
+      AUTH_ENABLED: "true"
+      JWT_SECRET: ${PORTAGE_DASHBOARD_JWT_SECRET:-compose-demo-jwt-secret-0123456789abcdef}
+      ADMIN_USER: ${PORTAGE_DASHBOARD_USER:-admin}
+      ADMIN_PASSWORD: ${PORTAGE_DASHBOARD_PASSWORD:-portage-demo}
+      ALLOW_ANONYMOUS: "false"
+      OTEL_SERVICE_NAME: portage-dashboard
+      OTEL_RESOURCE_ATTRIBUTES: deployment.environment.name=local,service.namespace=portage-engine
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
+    ports:
+      - "127.0.0.1:${PORTAGE_DASHBOARD_PORT:-18081}:8081"
+    volumes:
+      - portage-logs:/var/log/portage-engine
+    depends_on:
+      portage-server:
+        condition: service_healthy
     networks:
       - portage-net
-    depends_on:
-      - portage-server
+    logging: *default-logging
 
 networks:
   portage-net:
     driver: bridge
 
 volumes:
+  postgres-data:
+  redis-data:
+  loki-data:
+  tempo-data:
+  prometheus-data:
+  grafana-data:
+  portage-logs:
+  portage-state:
+  portage-signer-key:
   gomod-cache:
   gobuild-cache:
-  builder1-work:
-  builder1-artifacts:
-  builder2-work:
-  builder2-artifacts:

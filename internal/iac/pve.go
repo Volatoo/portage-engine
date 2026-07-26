@@ -294,8 +294,10 @@ resource "proxmox_vm_qemu" "portage_builder" {
   name        = "%s"
   target_node = "%s"
 %s%s
-  cores       = %d
-  sockets     = %d
+  cpu {
+    cores   = %d
+    sockets = %d
+  }
   memory      = %d
   agent       = %d
   onboot      = %t
@@ -480,6 +482,11 @@ func (p *PVEProvisioner) generateNetworkConfig(spec *PVEInstanceSpec) string {
 
 // generateCloudInitConfig generates cloud-init configuration.
 func (p *PVEProvisioner) generateCloudInitConfig(spec *PVEInstanceSpec, _ string) string {
+	// PVE defaults ciupgrade to enabled on cloud-init VMs. On Gentoo that
+	// translates into an unbounded `emerge --sync` during first boot, which is
+	// both an implicit network dependency and a source of non-reproducibility.
+	// Keep package updates under Portage Engine's locked build plan instead.
+	ciupgradeBlock := `  ciupgrade = false`
 	ipConfigBlock := ""
 	if spec.IPConfig == "dhcp" {
 		ipConfigBlock = `  ipconfig0 = "ip=dhcp"`
@@ -513,7 +520,8 @@ func (p *PVEProvisioner) generateCloudInitConfig(spec *PVEInstanceSpec, _ string
   cicustom = "%s"`, spec.CICustom)
 	}
 
-	return fmt.Sprintf(`%s%s%s%s`, ipConfigBlock, nameserverBlock, ciuserBlock, cicustomBlock)
+	return fmt.Sprintf(`%s
+%s%s%s%s`, ciupgradeBlock, ipConfigBlock, nameserverBlock, ciuserBlock, cicustomBlock)
 }
 
 // GenerateVariablesTF generates variables.tf for PVE.

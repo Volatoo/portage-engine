@@ -5,8 +5,10 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -16,14 +18,12 @@ import (
 	"time"
 
 	"github.com/slchris/portage-engine/internal/builder"
-	"github.com/slchris/portage-engine/internal/gpg"
 	"github.com/slchris/portage-engine/pkg/config"
 )
 
 func main() {
 	cfg := loadConfig()
-	signer := initGPGSigner(cfg)
-	bldr := builder.NewLocalBuilder(cfg.Workers, signer, cfg)
+	bldr := builder.NewLocalBuilder(cfg.Workers, cfg)
 
 	mux := setupHTTPHandlers(bldr)
 	handler := authMiddleware(cfg.AuthToken, mux)
@@ -64,11 +64,15 @@ func startHeartbeat(cfg *config.BuilderConfig, bldr *builder.LocalBuilder) func(
 	}
 
 	send := func() {
+		status := "online"
+		if !bldr.AcceptingBuilds() {
+			status = "draining"
+		}
 		hb := &builder.HeartbeatRequest{
 			BuilderID:  builderID,
-			Status:     "online",
+			Status:     status,
 			Endpoint:   endpoint,
-			Capacity:   cfg.Workers,
+			Capacity:   bldr.Capacity(),
 			ActiveJobs: bldr.ActiveJobs(),
 			Timestamp:  time.Now(),
 		}
@@ -145,53 +149,16 @@ func loadConfig() *config.BuilderConfig {
 	return cfg
 }
 
-// initGPGSigner initializes the GPG signer if enabled. It ensures a signing
-// keypair exists in the builder's GNUPGHOME (auto-creating one when no key ID is
-// configured) so emerge's native binpkg-signing has a private key to sign with,
-// and propagates the resolved key ID into the config for the executor.
-func initGPGSigner(cfg *config.BuilderConfig) *gpg.Signer {
-	if !cfg.GPGEnabled {
-		return nil
-	}
-
-	// GPG setup failures disable signing with a loud warning rather than
-	// crashing the builder: an environment without gpg / entropy / a writable
-	// GPG_HOME can still run builds (they will just be unsigned).
-	if err := gpg.CheckGPG(); err != nil {
-		log.Printf("WARNING: GPG unavailable (%v); builds will be UNSIGNED", err)
-		cfg.GPGEnabled = false
-		return nil
-	}
-
-	opts := []gpg.SignerOption{}
-	if cfg.GPGHome != "" {
-		opts = append(opts, gpg.WithGnupgHome(cfg.GPGHome))
-	}
-	// If no key ID is configured, auto-create a builder signing key.
-	if cfg.GPGKeyID == "" {
-		opts = append(opts, gpg.WithAutoCreate("Portage Engine Builder", "builder@portage-engine"))
-	}
-
-	signer := gpg.NewSigner(cfg.GPGKeyID, cfg.GPGKeyPath, true, opts...)
-	if err := signer.Initialize(); err != nil {
-		log.Printf("WARNING: failed to initialize GPG signing key (%v); builds will be UNSIGNED", err)
-		cfg.GPGEnabled = false
-		cfg.GPGKeyID = ""
-		return nil
-	}
-
-	// Propagate the resolved key ID so the build executor enables binpkg-signing.
-	cfg.GPGKeyID = signer.KeyID()
-	log.Printf("GPG signing enabled with key: %s (GNUPGHOME=%s)", cfg.GPGKeyID, cfg.GPGHome)
-	return signer
-}
-
 // setupHTTPHandlers sets up all HTTP handlers.
 func setupHTTPHandlers(bldr *builder.LocalBuilder) *http.ServeMux {
 	mux := http.NewServeMux()
 
 	// Health check
 	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
+		if !bldr.AcceptingBuilds() {
+			http.Error(w, "DRAINING: native builder requires an external VM/rootfs reset", http.StatusServiceUnavailable)
+			return
+		}
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("OK"))
 	})
@@ -210,14 +177,25 @@ func setupHTTPHandlers(bldr *builder.LocalBuilder) *http.ServeMux {
 			return
 		}
 
+		r.Body = http.MaxBytesReader(w, r.Body, builder.MaxBuildRequestBodyBytes)
+		decoder := json.NewDecoder(r.Body)
+		decoder.DisallowUnknownFields()
 		var req builder.LocalBuildRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "Invalid request", http.StatusBadRequest)
+		if err := decoder.Decode(&req); err != nil {
+			writeBuilderDecodeError(w, err)
+			return
+		}
+		if err := decoder.Decode(&struct{}{}); err != io.EOF {
+			writeBuilderDecodeError(w, err)
 			return
 		}
 
 		jobID, err := bldr.SubmitBuild(&req)
 		if err != nil {
+			if errors.Is(err, builder.ErrNativeBuilderDraining) {
+				http.Error(w, err.Error(), http.StatusServiceUnavailable)
+				return
+			}
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -275,23 +253,18 @@ func setupHTTPHandlers(bldr *builder.LocalBuilder) *http.ServeMux {
 	})
 
 	// Install-verification endpoint: proves a freshly built binpkg installs
-	// cleanly from the binhost in a pristine container.
+	// cleanly from the binhost in a throwaway native Portage root.
 	mux.HandleFunc("/api/v1/verify", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		var req struct {
-			PackageName      string `json:"package_name"`
-			BinhostURL       string `json:"binhost_url"`
-			GPGPubkey        string `json:"gpg_pubkey"`
-			RequireSignature bool   `json:"require_signature"`
-		}
+		var req builder.VerifyInstallRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.PackageName == "" {
 			http.Error(w, "package_name required", http.StatusBadRequest)
 			return
 		}
-		out, err := bldr.VerifyInstall(req.PackageName, req.BinhostURL, req.GPGPubkey, req.RequireSignature)
+		out, err := bldr.VerifyInstall(req)
 		w.Header().Set("Content-Type", "application/json")
 		resp := map[string]any{"ok": err == nil, "log": out}
 		if err != nil {
@@ -346,6 +319,15 @@ func setupHTTPHandlers(bldr *builder.LocalBuilder) *http.ServeMux {
 	})
 
 	return mux
+}
+
+func writeBuilderDecodeError(w http.ResponseWriter, err error) {
+	var maxBytesErr *http.MaxBytesError
+	if errors.As(err, &maxBytesErr) {
+		http.Error(w, "Request body too large", http.StatusRequestEntityTooLarge)
+		return
+	}
+	http.Error(w, "Invalid request", http.StatusBadRequest)
 }
 
 // startServer starts the HTTP server.

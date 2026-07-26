@@ -1,0 +1,126 @@
+{
+  "version": 1,
+  "profiles": [
+    {
+      "id": "pe/amd64/glibc/systemd/base-v1",
+      "arch": "amd64",
+      "profile_path": "portage-engine/amd64/23.0/systemd/base",
+      "binhost_path": "releases/amd64/binpackages/23.0/x86-64_pe-systemd-base-v1",
+      "profile_repository_id": "pe-profiles",
+      "parents": [
+        {
+          "repository_id": "gentoo",
+          "profile_path": "default/linux/amd64/23.0/systemd"
+        }
+      ],
+      "legacy_profiles": ["default/linux/amd64/23.0"],
+      "repository_ids": ["gentoo", "pe-profiles"],
+      "image_id": "pe/amd64/base-g1",
+      "mirror_bundle_id": "mirror/candidate-2026-07-22",
+      "default_resource_class": "medium",
+      "default": true,
+      "channel": "candidate"
+    },
+    {
+      "id": "pe/amd64/glibc/systemd/desktop-verifier-v1",
+      "arch": "amd64",
+      "profile_path": "portage-engine/amd64/23.0/systemd/desktop-verifier",
+      "binhost_path": "releases/amd64/binpackages/23.0/x86-64_pe-desktop-verifier-v1",
+      "profile_repository_id": "pe-profiles",
+      "parents": [
+        {
+          "repository_id": "pe-profiles",
+          "profile_path": "portage-engine/amd64/23.0/systemd/base"
+        }
+      ],
+      "repository_ids": ["gentoo", "pe-profiles"],
+      "image_id": "pe/amd64/desktop-verifier-g1",
+      "mirror_bundle_id": "mirror/candidate-2026-07-22",
+      "default_resource_class": "medium",
+      "channel": "candidate"
+    }
+  ],
+  "repositories": [
+    {
+      "id": "gentoo",
+      "name": "gentoo",
+      "location": "/var/db/repos/gentoo",
+      "sync_type": "git",
+      "sync_uri": "https://git-mirror.example.internal/gentoo.git",
+      "revision": "1111111111111111111111111111111111111111",
+      "channel": "candidate"
+    },
+    {
+      "id": "pe-profiles",
+      "name": "pe-profiles",
+      "location": "/var/db/repos/pe-profiles",
+      "sync_type": "git",
+      "sync_uri": "https://git-mirror.example.internal/portage-engine-profiles.git",
+      "revision": "2222222222222222222222222222222222222222",
+      "priority": 50,
+      "channel": "candidate"
+    }
+  ],
+  "images": [
+    {
+      "id": "pe/amd64/base-g1",
+      "profile_id": "pe/amd64/glibc/systemd/base-v1",
+      "generation": "g1",
+      "provider": "pve",
+      "arch": "amd64",
+      "build_mode": "native-gentoo",
+      "template": "pe-gentoo-amd64-systemd-base-g1",
+      "digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+      "rootfs_source": "existing-template",
+      "display_model": "std",
+      "rootfs_manifest_digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+      "package_sets": ["pe/runtime-v1", "pe/build-test-v1"],
+      "package_set_catalog_digest": "sha256:8888888888888888888888888888888888888888888888888888888888888888",
+      "channel": "candidate"
+    },
+    {
+      "id": "pe/amd64/desktop-verifier-g1",
+      "profile_id": "pe/amd64/glibc/systemd/desktop-verifier-v1",
+      "generation": "desktop-g1",
+      "provider": "pve",
+      "arch": "amd64",
+      "build_mode": "native-gentoo",
+      "template": "pe-gentoo-amd64-desktop-verifier-g1",
+      "digest": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
+      "rootfs_source": "packer-base-image",
+      "display_model": "qxl",
+      "rootfs_manifest_digest": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+      "package_sets": ["pe/desktop-verifier-v1"],
+      "package_set_catalog_digest": "sha256:8888888888888888888888888888888888888888888888888888888888888888",
+      "channel": "candidate"
+    }
+  ],
+  "mirror_bundles": [
+    {
+      "id": "mirror/candidate-2026-07-22",
+      "digest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+      "created_at": "2026-07-22T00:00:00Z",
+      "fresh_until": "2026-08-05T00:00:00Z",
+      "advisory_watermark": "2026-07-22T00:00:00Z",
+      "channel": "candidate"
+    }
+  ],
+  "resource_classes": [
+    {
+      "id": "small",
+      "machine_spec": {
+        "cores": "2",
+        "memory": "4096",
+        "disk_size": "40"
+      }
+    },
+    {
+      "id": "medium",
+      "machine_spec": {
+        "cores": "4",
+        "memory": "8192",
+        "disk_size": "50"
+      }
+    }
+  ]
+}

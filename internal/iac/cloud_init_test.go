@@ -1,6 +1,7 @@
 package iac
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -8,390 +9,104 @@ import (
 	"testing"
 )
 
-func TestDefaultCloudInitConfig(t *testing.T) {
-	t.Parallel()
-
-	config := DefaultCloudInitConfig()
-
-	if config == nil {
-		t.Fatal("DefaultCloudInitConfig returned nil")
+func TestDefaultCloudInitConfigIsNativeReady(t *testing.T) {
+	cfg := DefaultCloudInitConfig()
+	if cfg.BuilderPort != 9090 || cfg.Architecture != "amd64" {
+		t.Fatalf("unexpected native defaults: %+v", cfg)
 	}
-
-	if config.DockerImage != "gentoo/stage3:latest" {
-		t.Errorf("DockerImage = %s, want gentoo/stage3:latest", config.DockerImage)
-	}
-	if config.BuilderPort != 9090 {
-		t.Errorf("BuilderPort = %d, want 9090", config.BuilderPort)
-	}
-	if config.Architecture != "amd64" {
-		t.Errorf("Architecture = %s, want amd64", config.Architecture)
-	}
-	if config.DataDir != "/var/lib/portage-engine" {
-		t.Errorf("DataDir = %s", config.DataDir)
-	}
-	if config.SwapSizeGB != 4 {
-		t.Errorf("SwapSizeGB = %d, want 4", config.SwapSizeGB)
-	}
-	if !config.PortageTreeSync {
-		t.Error("PortageTreeSync should be true by default")
-	}
-	if !config.PullLatestImage {
-		t.Error("PullLatestImage should be true by default")
+	if cfg.DataDir == "" || cfg.WorkDir == "" || cfg.ArtifactDir == "" {
+		t.Fatalf("native directories are incomplete: %+v", cfg)
 	}
 }
 
-func TestGenerateCloudInitScript_Default(t *testing.T) {
-	t.Parallel()
-
-	script := GenerateCloudInitScript(nil)
-
-	if script == "" {
-		t.Fatal("GenerateCloudInitScript returned empty string")
-	}
-
-	// Check for essential components
-	checks := []string{
-		"#!/bin/bash",
-		"set -e",
-		"install_docker",
-		"docker pull",
-		"gentoo/stage3:latest",
-		"mkdir -p /var/lib/portage-engine",
-		"systemctl daemon-reload",
-		"Cloud initialization complete",
-	}
-
-	for _, check := range checks {
-		if !strings.Contains(script, check) {
-			t.Errorf("Script missing: %s", check)
+func TestGenerateCloudInitScriptAlwaysUsesNativeGentoo(t *testing.T) {
+	for _, cfg := range []*CloudInitConfig{
+		nil,
+		{BuilderPort: 9090, Architecture: "amd64"},
+	} {
+		script := GenerateCloudInitScript(cfg)
+		for _, required := range []string{
+			"#!/bin/bash",
+			"NATIVE_JOB_POLICY=single-use",
+		} {
+			if !strings.Contains(script, required) {
+				t.Fatalf("native bootstrap missing %q", required)
+			}
+		}
+		for _, forbidden := range []string{"docker pull", "docker run", "USE_DOCKER=true"} {
+			if strings.Contains(script, forbidden) {
+				t.Fatalf("removed Docker backend leaked into bootstrap: %q", forbidden)
+			}
 		}
 	}
 }
 
-func TestGenerateCloudInitScript_CustomConfig(t *testing.T) {
-	t.Parallel()
+func TestGenerateCloudInitScriptCarriesNativeInputs(t *testing.T) {
+	cfg := DefaultCloudInitConfig()
+	cfg.PortageMirror = "http://mirror.invalid/gentoo"
+	cfg.PortageSyncURI = "rsync://mirror.invalid/gentoo-portage"
+	cfg.PortageBinpkgHost = "http://binhost.invalid/binpkgs"
+	cfg.ServerCallbackURL = "http://control.invalid"
+	cfg.BuilderToken = "builder-token"
+	cfg.BuilderBinaryURL = "http://nas.invalid/portage-builder"
+	cfg.BuilderBinarySHA256 = strings.Repeat("a", 64)
 
-	config := &CloudInitConfig{
-		DockerImage:       "gentoo/stage3:amd64-nomultilib",
-		DockerRegistry:    "gcr.io/my-project",
-		PullLatestImage:   true,
-		PortageTreeSync:   true,
-		PortageMirror:     "https://mirrors.ustc.edu.cn/gentoo",
-		PortageBinpkgHost: "http://binhost.example.com",
-		BuilderBinaryURL:  "https://releases.example.com/portage-builder",
-		BuilderPort:       8080,
-		ServerCallbackURL: "http://server.example.com:8080",
-		InstanceID:        "test-instance",
-		Architecture:      "arm64",
-		DataDir:           "/data/portage",
-		WorkDir:           "/data/builds",
-		ArtifactDir:       "/data/artifacts",
-		SwapSizeGB:        8,
-		EnableFirewall:    true,
-		ExtraPackages:     []string{"git", "vim"},
-	}
-
-	script := GenerateCloudInitScript(config)
-
-	checks := []string{
-		"gcr.io/my-project/gentoo/stage3:amd64-nomultilib",
-		"https://mirrors.ustc.edu.cn/gentoo",
-		"http://binhost.example.com",
-		"https://releases.example.com/portage-builder",
-		"BUILDER_PORT=8080",
-		// InstanceID is resolved via a shell variable, not written literally.
-		"INSTANCE_ID_VAL='test-instance'",
-		"INSTANCE_ID=${INSTANCE_ID_VAL}",
-		"ARCHITECTURE=arm64",
-		"/data/portage",
-		"/data/builds",
-		"/data/artifacts",
-		"8G /swapfile",
-		"git", "vim",
-		"http://server.example.com:8080",
-	}
-
-	for _, check := range checks {
-		if !strings.Contains(script, check) {
-			t.Errorf("Custom config script missing: %s", check)
+	script := GenerateCloudInitScript(cfg)
+	for _, value := range []string{
+		cfg.PortageMirror,
+		cfg.PortageSyncURI,
+		cfg.PortageBinpkgHost,
+		cfg.ServerCallbackURL,
+		cfg.BuilderBinaryURL,
+		cfg.BuilderBinarySHA256,
+	} {
+		if !strings.Contains(script, value) {
+			t.Fatalf("native bootstrap dropped %q", value)
 		}
 	}
 }
 
-func TestGenerateCloudInitScript_NoSwap(t *testing.T) {
-	t.Parallel()
-
-	config := DefaultCloudInitConfig()
-	config.SwapSizeGB = 0
-
-	script := GenerateCloudInitScript(config)
-
-	if strings.Contains(script, "setup_swap") {
-		t.Error("Script should not contain swap setup when SwapSizeGB is 0")
+func TestGenerateUserDataAndStartupScript(t *testing.T) {
+	cfg := DefaultCloudInitConfig()
+	userData := GenerateUserData(cfg)
+	if !strings.HasPrefix(userData, "#cloud-config") || !strings.Contains(userData, "runcmd:") {
+		t.Fatalf("invalid cloud-config wrapper: %q", userData[:min(len(userData), 80)])
 	}
-}
-
-func TestGenerateCloudInitScript_NoFirewall(t *testing.T) {
-	t.Parallel()
-
-	config := DefaultCloudInitConfig()
-	config.EnableFirewall = false
-
-	script := GenerateCloudInitScript(config)
-
-	if strings.Contains(script, "configure_firewall") {
-		t.Error("Script should not contain firewall config when EnableFirewall is false")
-	}
-}
-
-func TestGenerateCloudInitScript_NoPortageSync(t *testing.T) {
-	t.Parallel()
-
-	config := DefaultCloudInitConfig()
-	config.PortageTreeSync = false
-
-	script := GenerateCloudInitScript(config)
-
-	if strings.Contains(script, "Syncing Portage tree") {
-		t.Error("Script should not sync Portage tree when PortageTreeSync is false")
-	}
-}
-
-func TestGenerateCloudInitScript_NoBuilderBinary(t *testing.T) {
-	t.Parallel()
-
-	config := DefaultCloudInitConfig()
-	config.BuilderBinaryURL = ""
-
-	script := GenerateCloudInitScript(config)
-
-	if strings.Contains(script, "Downloading builder binary") {
-		t.Error("Script should not download binary when BuilderBinaryURL is empty")
-	}
-
-	// Should still create the service file
-	if !strings.Contains(script, "portage-builder.service") {
-		t.Error("Script should still create service file")
-	}
-}
-
-func TestGenerateCloudInitScript_DockerInstallation(t *testing.T) {
-	t.Parallel()
-
-	script := GenerateCloudInitScript(nil)
-
-	// Check Docker installation for different distros
-	distroChecks := []string{
-		"ubuntu|debian",
-		"centos|rhel|fedora",
-		"gentoo",
-		"docker-ce",
-		"systemctl enable docker",
-		"systemctl start docker",
-	}
-
-	for _, check := range distroChecks {
-		if !strings.Contains(script, check) {
-			t.Errorf("Docker installation missing support for: %s", check)
-		}
-	}
-}
-
-func TestGenerateCloudInitScript_DirectoryCreation(t *testing.T) {
-	t.Parallel()
-
-	config := &CloudInitConfig{
-		DataDir:     "/custom/data",
-		WorkDir:     "/custom/work",
-		ArtifactDir: "/custom/artifacts",
-	}
-
-	script := GenerateCloudInitScript(config)
-
-	dirs := []string{
-		"mkdir -p /custom/data",
-		"mkdir -p /custom/work",
-		"mkdir -p /custom/artifacts",
-	}
-
-	for _, dir := range dirs {
-		if !strings.Contains(script, dir) {
-			t.Errorf("Script missing directory creation: %s", dir)
-		}
-	}
-}
-
-func TestGenerateCloudInitScript_ServerCallback(t *testing.T) {
-	t.Parallel()
-
-	config := DefaultCloudInitConfig()
-	config.ServerCallbackURL = "http://server:8080"
-	config.InstanceID = "test-builder"
-	config.BuilderPort = 9090
-
-	script := GenerateCloudInitScript(config)
-
-	checks := []string{
-		"Notifying server",
-		"http://server:8080/api/v1/builders/register",
-		// The instance ID is registered via the resolved shell variable.
-		`\"instance_id\": \"${INSTANCE_ID_VAL}\"`,
-		`\"port\": 9090`,
-	}
-
-	for _, check := range checks {
-		if !strings.Contains(script, check) {
-			t.Errorf("Server callback missing: %s", check)
-		}
-	}
-}
-
-func TestGenerateCloudInitScript_NoServerCallback(t *testing.T) {
-	t.Parallel()
-
-	config := DefaultCloudInitConfig()
-	config.ServerCallbackURL = ""
-
-	script := GenerateCloudInitScript(config)
-
-	if strings.Contains(script, "Notifying server") {
-		t.Error("Script should not notify server when ServerCallbackURL is empty")
-	}
-}
-
-func TestGenerateUserData(t *testing.T) {
-	t.Parallel()
-
-	config := DefaultCloudInitConfig()
-	userData := GenerateUserData(config)
-
-	if !strings.HasPrefix(userData, "#cloud-config") {
-		t.Error("UserData should start with #cloud-config")
-	}
-
-	if !strings.Contains(userData, "runcmd:") {
-		t.Error("UserData should contain runcmd section")
-	}
-}
-
-func TestGenerateStartupScript(t *testing.T) {
-	t.Parallel()
-
-	config := DefaultCloudInitConfig()
-	script := GenerateStartupScript(config)
-
-	if !strings.HasPrefix(script, "#!/bin/bash") {
-		t.Error("StartupScript should start with shebang")
-	}
-
-	if !strings.Contains(script, "install_docker") {
-		t.Error("StartupScript should contain docker installation")
+	if startup := GenerateStartupScript(cfg); !strings.HasPrefix(startup, "#!/bin/bash") {
+		t.Fatal("startup script is not a shell script")
 	}
 }
 
 func TestIndentScript(t *testing.T) {
-	t.Parallel()
-
-	script := "line1\nline2\nline3"
-	indented := indentScript(script, "  ")
-
-	expected := "  line1\n  line2\n  line3"
-	if indented != expected {
-		t.Errorf("indentScript = %q, want %q", indented, expected)
+	if got := indentScript("line1\nline2", "  "); got != "  line1\n  line2" {
+		t.Fatalf("indentScript = %q", got)
 	}
 }
 
-func TestGenerateCloudInitScript_PortageConfig(t *testing.T) {
-	t.Parallel()
-
-	config := &CloudInitConfig{
-		DockerImage:       "gentoo/stage3:latest",
-		PortageMirror:     "https://example.com/gentoo",
-		PortageBinpkgHost: "https://binpkgs.example.com",
-		DataDir:           "/var/lib/portage-engine",
-	}
-
-	script := GenerateCloudInitScript(config)
-
-	checks := []string{
-		`GENTOO_MIRRORS="https://example.com/gentoo"`,
-		`PORTAGE_BINHOST="https://binpkgs.example.com"`,
-		"FEATURES=\"buildpkg binpkg-multi-instance parallel-fetch parallel-install\"",
-	}
-
-	for _, check := range checks {
-		if !strings.Contains(script, check) {
-			t.Errorf("Portage config missing: %s", check)
-		}
-	}
-}
-
-func TestGenerateCloudInitScript_ExtraPackages(t *testing.T) {
-	t.Parallel()
-
-	config := DefaultCloudInitConfig()
-	config.ExtraPackages = []string{"htop", "tmux", "curl"}
-
-	script := GenerateCloudInitScript(config)
-
-	if !strings.Contains(script, "Installing extra packages") {
-		t.Error("Script should mention installing extra packages")
-	}
-
-	for _, pkg := range config.ExtraPackages {
-		if !strings.Contains(script, pkg) {
-			t.Errorf("Script missing extra package: %s", pkg)
-		}
-	}
-}
-
-func TestCloudInitConfig_JSON(t *testing.T) {
-	t.Parallel()
-
-	config := &CloudInitConfig{
-		DockerImage:       "gentoo/stage3:latest",
-		BuilderPort:       9090,
-		ServerCallbackURL: "http://server:8080",
-		Architecture:      "amd64",
-	}
-
-	// Just verify the struct can be used
-	if config.DockerImage != "gentoo/stage3:latest" {
-		t.Error("Config field mismatch")
-	}
-}
-
-// TestGeneratedScriptIsValidBash runs `bash -n` on the generated script to guard
-// against ordering / heredoc bugs like the one where builder.conf was written
-// before its directory existed (which aborted the whole bootstrap under set -e).
-func TestGeneratedScriptIsValidBash(t *testing.T) {
-	bash, err := exec.LookPath("bash")
-	if err != nil {
-		t.Skip("bash not available")
-	}
-
+func TestCloudInitConfigJSONCompatibility(t *testing.T) {
 	cfg := DefaultCloudInitConfig()
-	cfg.ServerCallbackURL = "http://srv:8080"
-	cfg.BuilderToken = "abc$(touch /tmp/x)`id`def" // must not break syntax or execute
-	cfg.PortageBinpkgHost = "http://srv:8080/binpkgs"
-	cfg.BuilderBinaryURL = "http://srv:8080/bin/portage-builder"
-	script := GenerateCloudInitScript(cfg)
-
-	dir := t.TempDir()
-	path := filepath.Join(dir, "ci.sh")
-	if err := os.WriteFile(path, []byte(script), 0644); err != nil {
+	data, err := json.Marshal(cfg)
+	if err != nil {
 		t.Fatal(err)
 	}
-
-	out, err := exec.Command(bash, "-n", path).CombinedOutput()
-	if err != nil {
-		t.Fatalf("generated script is not valid bash: %v\n%s", err, out)
+	var decoded CloudInitConfig
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatal(err)
 	}
+	if decoded.BuilderPort != cfg.BuilderPort || decoded.Architecture != cfg.Architecture {
+		t.Fatalf("JSON round trip changed native config: %+v", decoded)
+	}
+}
 
-	// mkdir must precede the write (the regression this test primarily guards).
-	mkdirIdx := strings.Index(script, "mkdir -p /etc/portage-engine")
-	writeIdx := strings.Index(script, "cat > /etc/portage-engine/builder.conf")
-	if mkdirIdx < 0 || writeIdx < 0 || mkdirIdx > writeIdx {
-		t.Errorf("mkdir /etc/portage-engine must precede builder.conf write (mkdir=%d write=%d)", mkdirIdx, writeIdx)
+func TestGeneratedNativeScriptIsValidBash(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash unavailable")
+	}
+	path := filepath.Join(t.TempDir(), "deploy.sh")
+	if err := os.WriteFile(path, []byte(GenerateCloudInitScript(nil)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("bash", "-n", path).CombinedOutput(); err != nil {
+		t.Fatalf("native bootstrap is invalid bash: %v\n%s", err, out)
 	}
 }

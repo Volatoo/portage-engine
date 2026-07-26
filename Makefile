@@ -1,10 +1,14 @@
-.PHONY: all build clean test run-server run-dashboard run-builder run-client
+.PHONY: all build clean test run-server run-dashboard run-builder run-client build-image-factory build-desktop-runner build-migrate build-signer
 
 # Variables
 BINARY_SERVER=bin/portage-server
 BINARY_DASHBOARD=bin/portage-dashboard
 BINARY_BUILDER=bin/portage-builder
 BINARY_CLIENT=bin/portage-client
+BINARY_IMAGE_FACTORY=bin/portage-image-factory
+BINARY_DESKTOP_RUNNER=bin/portage-desktop-runner
+BINARY_MIGRATE=bin/portage-migrate
+BINARY_SIGNER=bin/portage-signer
 GO=go
 GOFLAGS=-v
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
@@ -15,7 +19,7 @@ LDFLAGS=-ldflags "-X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.bu
 all: build
 
 # Build all binaries
-build: build-server build-dashboard build-builder build-client
+build: build-server build-dashboard build-builder build-client build-image-factory build-desktop-runner build-migrate build-signer
 
 # Build server
 build-server:
@@ -40,6 +44,29 @@ build-client:
 	@echo "Building Portage Engine Client..."
 	@mkdir -p bin
 	$(GO) build $(GOFLAGS) -o $(BINARY_CLIENT) cmd/client/main.go
+
+# Build the offline image-factory control binary
+build-image-factory:
+	@echo "Building Portage Engine Image Factory..."
+	@mkdir -p bin
+	$(GO) build $(GOFLAGS) -o $(BINARY_IMAGE_FACTORY) cmd/image-factory/main.go
+
+# Build the deterministic desktop verification runner
+build-desktop-runner:
+	@echo "Building Portage Engine Desktop Runner..."
+	@mkdir -p bin
+	$(GO) build $(GOFLAGS) -o $(BINARY_DESKTOP_RUNNER) cmd/desktop-runner/main.go
+
+# Build the one-shot PostgreSQL schema migration binary
+build-migrate:
+	@echo "Building Portage Engine Migration CLI..."
+	@mkdir -p bin
+	$(GO) build $(GOFLAGS) -ldflags "-X main.version=$(VERSION)" -o $(BINARY_MIGRATE) cmd/migrate/main.go
+
+build-signer:
+	@echo "Building isolated Portage signer..."
+	@mkdir -p bin
+	$(GO) build $(GOFLAGS) $(LDFLAGS) -o $(BINARY_SIGNER) cmd/signer/main.go
 
 # Clean build artifacts
 clean:
@@ -96,6 +123,7 @@ install: build
 	@cp $(BINARY_DASHBOARD) /usr/local/bin/
 	@cp $(BINARY_BUILDER) /usr/local/bin/
 	@cp $(BINARY_CLIENT) /usr/local/bin/
+	@cp $(BINARY_MIGRATE) /usr/local/bin/
 	@echo "Installation complete"
 
 # Build for multiple architectures

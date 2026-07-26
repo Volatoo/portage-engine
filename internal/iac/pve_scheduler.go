@@ -1,11 +1,16 @@
 package iac
 
 import (
+	"context"
 	"crypto/tls"
+	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -21,6 +26,8 @@ import (
 // cannot stall a build worker.
 const pveNodeQueryTimeout = 10 * time.Second
 
+var pveCleanupPollInterval = 2 * time.Second
+
 // pveClusterResource is one entry of GET /api2/json/cluster/resources. The
 // same list carries nodes (type "node") and guests (type "qemu"/"lxc").
 type pveClusterResource struct {
@@ -28,6 +35,7 @@ type pveClusterResource struct {
 	Node     string  `json:"node"`
 	Name     string  `json:"name"`
 	Status   string  `json:"status"`
+	VMID     int     `json:"vmid"`
 	Template int     `json:"template"`
 	MaxMem   int64   `json:"maxmem"`
 	Mem      int64   `json:"mem"`
@@ -172,39 +180,237 @@ func pveHTTPClient(insecure bool) *http.Client {
 // pveTicket exchanges username+password for an auth ticket (the PVE cookie
 // auth flow — API tokens don't need this).
 func pveTicket(endpoint string, auth PVEAuth) (string, error) {
+	ticket, _, err := pveLogin(context.Background(), endpoint, auth)
+	return ticket, err
+}
+
+func pveLogin(ctx context.Context, endpoint string, auth PVEAuth) (string, string, error) {
 	form := url.Values{}
 	form.Set("username", auth.Username)
 	form.Set("password", auth.Password)
 
-	req, err := http.NewRequest(http.MethodPost,
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		strings.TrimRight(endpoint, "/")+"/api2/json/access/ticket",
 		strings.NewReader(form.Encode()))
 	if err != nil {
-		return "", fmt.Errorf("build ticket request: %w", err)
+		return "", "", fmt.Errorf("build ticket request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
 	resp, err := pveHTTPClient(auth.Insecure).Do(req)
 	if err != nil {
-		return "", fmt.Errorf("PVE ticket request: %w", err)
+		return "", "", fmt.Errorf("PVE ticket request: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("PVE authentication failed (status %d) — check username/password", resp.StatusCode)
+		return "", "", fmt.Errorf("PVE authentication failed (status %d) — check username/password", resp.StatusCode)
 	}
 
 	var payload struct {
 		Data struct {
-			Ticket string `json:"ticket"`
+			Ticket              string `json:"ticket"`
+			CSRFPreventionToken string `json:"CSRFPreventionToken"`
 		} `json:"data"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-		return "", fmt.Errorf("decode ticket response: %w", err)
+		return "", "", fmt.Errorf("decode ticket response: %w", err)
 	}
 	if payload.Data.Ticket == "" {
-		return "", fmt.Errorf("PVE returned an empty auth ticket")
+		return "", "", fmt.Errorf("PVE returned an empty auth ticket")
 	}
-	return payload.Data.Ticket, nil
+	return payload.Data.Ticket, payload.Data.CSRFPreventionToken, nil
+}
+
+type pveAPIClient struct {
+	endpoint string
+	auth     PVEAuth
+	ticket   string
+	csrf     string
+	client   *http.Client
+}
+
+func newPVEAPIClient(ctx context.Context, endpoint string, auth PVEAuth) (*pveAPIClient, error) {
+	if strings.TrimSpace(endpoint) == "" {
+		return nil, fmt.Errorf("PVE endpoint is required")
+	}
+	if !auth.valid() {
+		return nil, fmt.Errorf("PVE credentials are required")
+	}
+	client := &pveAPIClient{
+		endpoint: strings.TrimRight(endpoint, "/"),
+		auth:     auth,
+		client:   pveHTTPClient(auth.Insecure),
+	}
+	if auth.TokenID == "" || auth.TokenSecret == "" {
+		ticket, csrf, err := pveLogin(ctx, endpoint, auth)
+		if err != nil {
+			return nil, err
+		}
+		client.ticket = ticket
+		client.csrf = csrf
+	}
+	return client, nil
+}
+
+func (c *pveAPIClient) do(ctx context.Context, method, path string, form url.Values, output any) error {
+	var body io.Reader
+	requestURL := c.endpoint + path
+	// PVE's API proxy rejects request bodies on DELETE with HTTP 501. DELETE
+	// parameters must be encoded in the query string.
+	if method == http.MethodDelete && len(form) > 0 {
+		separator := "?"
+		if strings.Contains(requestURL, "?") {
+			separator = "&"
+		}
+		requestURL += separator + form.Encode()
+	} else if len(form) > 0 {
+		body = strings.NewReader(form.Encode())
+	}
+	req, err := http.NewRequestWithContext(ctx, method, requestURL, body)
+	if err != nil {
+		return err
+	}
+	if len(form) > 0 && method != http.MethodDelete {
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	}
+	if c.ticket != "" {
+		req.AddCookie(&http.Cookie{Name: "PVEAuthCookie", Value: c.ticket})
+		if method != http.MethodGet && method != http.MethodHead {
+			req.Header.Set("CSRFPreventionToken", c.csrf)
+		}
+	} else {
+		req.Header.Set("Authorization", fmt.Sprintf("PVEAPIToken=%s=%s", c.auth.TokenID, c.auth.TokenSecret))
+	}
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		detail, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return fmt.Errorf("PVE API %s %s returned status %d: %s",
+			method, path, resp.StatusCode, strings.TrimSpace(string(detail)))
+	}
+	if output != nil {
+		if err := json.NewDecoder(resp.Body).Decode(output); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (c *pveAPIClient) clusterResources(ctx context.Context) ([]pveClusterResource, error) {
+	var payload struct {
+		Data []pveClusterResource `json:"data"`
+	}
+	err := c.do(ctx, http.MethodGet, "/api2/json/cluster/resources?type=vm", nil, &payload)
+	return payload.Data, err
+}
+
+// EnsurePVEVMAbsent closes the state-before-resource crash window in the
+// Terraform provider. A killed apply can leave an asynchronous clone in PVE
+// before the provider writes it to terraform.tfstate; `terraform destroy`
+// then reports success while doing nothing. This function discovers only the
+// exact pre-registered builder name, waits out any clone lock, and removes it
+// through the PVE API. A clone inherits the template's tags until Terraform
+// reaches its later configuration step, so tags cannot be an ownership
+// requirement in precisely this pre-state crash window. The exact name comes
+// from the private workspace manifest written before apply and cannot be
+// supplied through the public build request.
+func EnsurePVEVMAbsent(ctx context.Context, endpoint string, auth PVEAuth, expectedNode, expectedName string) error {
+	if !strings.HasPrefix(expectedName, "portage-builder-") {
+		return fmt.Errorf("refusing PVE cleanup for unexpected resource name %q", expectedName)
+	}
+	client, err := newPVEAPIClient(ctx, endpoint, auth)
+	if err != nil {
+		return err
+	}
+
+	for {
+		resources, err := client.clusterResources(ctx)
+		if err != nil {
+			return fmt.Errorf("discover PVE cleanup target: %w", err)
+		}
+		var matches []pveClusterResource
+		for _, resource := range resources {
+			if resource.Type == "qemu" && resource.Template == 0 && resource.Name == expectedName {
+				matches = append(matches, resource)
+			}
+		}
+		if len(matches) == 0 {
+			return nil
+		}
+		if len(matches) != 1 {
+			return fmt.Errorf("PVE cleanup identity %q matched %d VMs", expectedName, len(matches))
+		}
+		target := matches[0]
+		if target.VMID <= 0 || target.Node == "" {
+			return fmt.Errorf("PVE cleanup target %q has incomplete identity", expectedName)
+		}
+		if expectedNode != "" && target.Node != expectedNode {
+			// Migration is legitimate, but make the mismatch explicit while
+			// still using the authoritative current node returned by PVE.
+			expectedNode = target.Node
+		}
+
+		configPath := fmt.Sprintf("/api2/json/nodes/%s/qemu/%d/config",
+			url.PathEscape(target.Node), target.VMID)
+		var configPayload struct {
+			Data struct {
+				Name string `json:"name"`
+				Tags string `json:"tags"`
+				Lock string `json:"lock"`
+			} `json:"data"`
+		}
+		if err := client.do(ctx, http.MethodGet, configPath, nil, &configPayload); err != nil {
+			return fmt.Errorf("inspect PVE cleanup target: %w", err)
+		}
+		if configPayload.Data.Name != expectedName {
+			return fmt.Errorf("refusing to delete mismatched PVE VM %d (%q, expected %q)",
+				target.VMID, configPayload.Data.Name, expectedName)
+		}
+		if configPayload.Data.Lock != "" {
+			if err := waitPVEInterval(ctx, pveCleanupPollInterval); err != nil {
+				return fmt.Errorf("wait for PVE VM %d lock %q: %w", target.VMID, configPayload.Data.Lock, err)
+			}
+			continue
+		}
+		if target.Status != "stopped" {
+			stopPath := fmt.Sprintf("/api2/json/nodes/%s/qemu/%d/status/stop",
+				url.PathEscape(target.Node), target.VMID)
+			if err := client.do(ctx, http.MethodPost, stopPath, url.Values{}, nil); err != nil {
+				return fmt.Errorf("stop residual PVE VM %d: %w", target.VMID, err)
+			}
+			if err := waitPVEInterval(ctx, pveCleanupPollInterval); err != nil {
+				return err
+			}
+			continue
+		}
+
+		deletePath := fmt.Sprintf("/api2/json/nodes/%s/qemu/%d",
+			url.PathEscape(target.Node), target.VMID)
+		deleteForm := url.Values{
+			"purge":                      {"1"},
+			"destroy-unreferenced-disks": {"1"},
+		}
+		if err := client.do(ctx, http.MethodDelete, deletePath, deleteForm, nil); err != nil {
+			return fmt.Errorf("delete residual PVE VM %d: %w", target.VMID, err)
+		}
+		if err := waitPVEInterval(ctx, pveCleanupPollInterval); err != nil {
+			return err
+		}
+	}
+}
+
+func waitPVEInterval(ctx context.Context, interval time.Duration) error {
+	timer := time.NewTimer(interval)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 // fetchPVEClusterResources reads the cluster resource list, authenticating
@@ -313,6 +519,146 @@ func WaitForPVEGuestIP(endpoint string, auth PVEAuth, node string, vmid string, 
 		time.Sleep(5 * time.Second)
 	}
 	return "", fmt.Errorf("guest agent did not report an IPv4 address within %s (is qemu-guest-agent installed in the template?)", timeout)
+}
+
+// PVEGuestExec runs one bounded command through the authenticated PVE/QEMU
+// guest-agent channel. Callers must not retry stateful commands after an
+// ambiguous response. It is used by the image smoke gate only for read-only
+// identity material that must be bound before opening SSH.
+func PVEGuestExec(ctx context.Context, endpoint string, auth PVEAuth, node, vmid string, command []string) (string, error) {
+	if !auth.valid() {
+		return "", fmt.Errorf("PVE guest exec requires credentials")
+	}
+	if node == "" || vmid == "" || len(command) == 0 {
+		return "", fmt.Errorf("PVE guest exec requires node, VMID, and command")
+	}
+	values := url.Values{}
+	for _, argument := range command {
+		if argument == "" || len(argument) > 4096 || strings.ContainsRune(argument, '\x00') {
+			return "", fmt.Errorf("invalid PVE guest command argument")
+		}
+		values.Add("command", argument)
+	}
+
+	ticket := ""
+	if auth.TokenID == "" || auth.TokenSecret == "" {
+		var err error
+		ticket, err = pveTicket(endpoint, auth)
+		if err != nil {
+			return "", err
+		}
+	}
+	authorize := func(request *http.Request) {
+		if ticket != "" {
+			request.AddCookie(&http.Cookie{Name: "PVEAuthCookie", Value: ticket})
+		} else {
+			request.Header.Set("Authorization", fmt.Sprintf("PVEAPIToken=%s=%s", auth.TokenID, auth.TokenSecret))
+		}
+	}
+
+	base := fmt.Sprintf("%s/api2/json/nodes/%s/qemu/%s/agent",
+		strings.TrimRight(endpoint, "/"), url.PathEscape(node), url.PathEscape(vmid))
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/exec", strings.NewReader(values.Encode()))
+	if err != nil {
+		return "", err
+	}
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	authorize(request)
+	response, err := pveHTTPClient(auth.Insecure).Do(request)
+	if err != nil {
+		return "", fmt.Errorf("start PVE guest exec: %w", err)
+	}
+	defer func() { _ = response.Body.Close() }()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		message, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
+		return "", fmt.Errorf("PVE guest exec returned HTTP %d: %s", response.StatusCode, strings.TrimSpace(string(message)))
+	}
+	var started struct {
+		Data struct {
+			PID int `json:"pid"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&started); err != nil || started.Data.PID < 1 {
+		return "", fmt.Errorf("PVE guest exec returned an invalid PID")
+	}
+
+	for {
+		query := url.Values{"pid": []string{strconv.Itoa(started.Data.PID)}}
+		statusRequest, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/exec-status?"+query.Encode(), nil)
+		if err != nil {
+			return "", err
+		}
+		authorize(statusRequest)
+		statusResponse, err := pveHTTPClient(auth.Insecure).Do(statusRequest)
+		if err != nil {
+			return "", fmt.Errorf("query PVE guest exec: %w", err)
+		}
+		if statusResponse.StatusCode < 200 || statusResponse.StatusCode >= 300 {
+			message, _ := io.ReadAll(io.LimitReader(statusResponse.Body, 4096))
+			_ = statusResponse.Body.Close()
+			return "", fmt.Errorf("PVE guest exec status returned HTTP %d: %s", statusResponse.StatusCode, strings.TrimSpace(string(message)))
+		}
+		var status struct {
+			Data struct {
+				Exited       int    `json:"exited"`
+				ExitCode     int    `json:"exitcode"`
+				OutData      string `json:"out-data"`
+				ErrData      string `json:"err-data"`
+				OutTruncated int    `json:"out-truncated"`
+				ErrTruncated int    `json:"err-truncated"`
+			} `json:"data"`
+		}
+		decodeErr := json.NewDecoder(io.LimitReader(statusResponse.Body, 1<<20)).Decode(&status)
+		_ = statusResponse.Body.Close()
+		if decodeErr != nil {
+			return "", fmt.Errorf("decode PVE guest exec status: %w", decodeErr)
+		}
+		if status.Data.Exited == 1 {
+			if status.Data.OutTruncated != 0 || status.Data.ErrTruncated != 0 {
+				return "", fmt.Errorf("PVE guest exec output was truncated")
+			}
+			if status.Data.ExitCode != 0 {
+				message := strings.TrimSpace(status.Data.ErrData)
+				if message == "" {
+					message = strings.TrimSpace(status.Data.OutData)
+				}
+				return "", fmt.Errorf("PVE guest exec exited %d: %s", status.Data.ExitCode, message)
+			}
+			return status.Data.OutData, nil
+		}
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
+}
+
+// WaitForPVEGuestHostKey obtains the guest's ED25519 SSH public host key over
+// QGA, so a smoke runner can pin it before the first SSH connection.
+func WaitForPVEGuestHostKey(endpoint string, auth PVEAuth, node, vmid string, timeout time.Duration) (string, error) {
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		output, err := PVEGuestExec(ctx, endpoint, auth, node, vmid,
+			[]string{"/usr/bin/cat", "/etc/ssh/ssh_host_ed25519_key.pub"})
+		cancel()
+		if err == nil {
+			fields := strings.Fields(output)
+			if len(fields) >= 2 && len(fields) <= 3 && fields[0] == "ssh-ed25519" {
+				decoded, decodeErr := base64.StdEncoding.DecodeString(fields[1])
+				if decodeErr == nil && len(decoded) == 51 && binary.BigEndian.Uint32(decoded[:4]) == 11 && string(decoded[4:15]) == "ssh-ed25519" && binary.BigEndian.Uint32(decoded[15:19]) == 32 {
+					return fields[0] + " " + fields[1], nil
+				}
+			}
+			lastErr = fmt.Errorf("guest returned an invalid ED25519 SSH host key")
+		} else {
+			lastErr = err
+		}
+		time.Sleep(2 * time.Second)
+	}
+	return "", fmt.Errorf("guest ED25519 SSH host key was not available within %s: %w", timeout, lastErr)
 }
 
 // mapKeys returns the keys of a string set for error messages.

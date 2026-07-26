@@ -82,19 +82,21 @@ func (s *Server) handleBuildersStatus(w http.ResponseWriter, r *http.Request) {
 
 // BuilderStatusInfo represents status information from a builder.
 type BuilderStatusInfo struct {
-	ID            string  `json:"id"`
-	Endpoint      string  `json:"endpoint"`
-	Architecture  string  `json:"architecture"`
-	Status        string  `json:"status"`
-	Capacity      int     `json:"capacity"`
-	CurrentLoad   int     `json:"current_load"`
-	Enabled       bool    `json:"enabled"`
-	CPUUsage      float64 `json:"cpu_usage"`
-	MemoryUsage   float64 `json:"memory_usage"`
-	DiskUsage     float64 `json:"disk_usage"`
-	TotalBuilds   int     `json:"total_builds"`
-	SuccessBuilds int     `json:"success_builds"`
-	FailedBuilds  int     `json:"failed_builds"`
+	ID              string  `json:"id"`
+	Endpoint        string  `json:"endpoint"`
+	Architecture    string  `json:"architecture"`
+	Status          string  `json:"status"`
+	Capacity        int     `json:"capacity"`
+	CurrentLoad     int     `json:"current_load"`
+	Enabled         bool    `json:"enabled"`
+	CPUUsage        float64 `json:"cpu_usage"`
+	MemoryUsage     float64 `json:"memory_usage"`
+	DiskUsage       float64 `json:"disk_usage"`
+	TotalBuilds     int     `json:"total_builds"`
+	SuccessBuilds   int     `json:"success_builds"`
+	FailedBuilds    int     `json:"failed_builds"`
+	AcceptingBuilds bool    `json:"accepting_builds"`
+	NativeJobPolicy string  `json:"native_job_policy,omitempty"`
 }
 
 // fetchAllBuilderStatus queries all configured remote builders for their status.
@@ -119,16 +121,25 @@ func (s *Server) fetchAllBuilderStatus() []BuilderStatusInfo {
 
 			baseURL := normalizeBuilderURL(address)
 			url := fmt.Sprintf("%s/api/v1/status", baseURL)
-			resp, err := client.Get(url) // nolint:gosec // Internal service URL from config
+			req, err := http.NewRequest(http.MethodGet, url, nil)
+			if err == nil && s.config.BuilderToken != "" {
+				req.Header.Set("X-API-Key", s.config.BuilderToken)
+			}
+			if err != nil {
+				log.Printf("Failed to construct builder status request for %s: %v", address, err)
+				return
+			}
+			resp, err := client.Do(req) // nolint:gosec // Internal service URL from operator config.
 			if err != nil {
 				log.Printf("Failed to query builder %s: %v", address, err)
 				// Add offline entry for unreachable builder
 				mu.Lock()
 				builders = append(builders, BuilderStatusInfo{
-					ID:       address,
-					Endpoint: baseURL,
-					Status:   "offline",
-					Enabled:  false,
+					ID:              address,
+					Endpoint:        baseURL,
+					Status:          "offline",
+					Enabled:         false,
+					AcceptingBuilds: false,
 				})
 				mu.Unlock()
 				return
@@ -139,10 +150,11 @@ func (s *Server) fetchAllBuilderStatus() []BuilderStatusInfo {
 				log.Printf("Builder %s returned status %d", address, resp.StatusCode)
 				mu.Lock()
 				builders = append(builders, BuilderStatusInfo{
-					ID:       address,
-					Endpoint: baseURL,
-					Status:   "error",
-					Enabled:  false,
+					ID:              address,
+					Endpoint:        baseURL,
+					Status:          "error",
+					Enabled:         false,
+					AcceptingBuilds: false,
 				})
 				mu.Unlock()
 				return
@@ -174,6 +186,9 @@ func (s *Server) fetchAllBuilderStatus() []BuilderStatusInfo {
 				TotalBuilds:   getIntValue(status, "total_builds", 0),
 				SuccessBuilds: getIntValue(status, "success_builds", 0),
 				FailedBuilds:  getIntValue(status, "failed_builds", 0),
+				AcceptingBuilds: getBoolValue(status, "accepting_builds",
+					getStringValue(status, "status", "online") != "draining"),
+				NativeJobPolicy: getStringValue(status, "native_job_policy", ""),
 			}
 
 			mu.Lock()
@@ -191,6 +206,7 @@ func calculateBuilderStats(builders []BuilderStatusInfo) map[string]interface{} 
 	totalBuilders := len(builders)
 	onlineBuilders := 0
 	offlineBuilders := 0
+	drainingBuilders := 0
 	totalCapacity := 0
 	totalLoad := 0
 	totalBuilds := 0
@@ -198,9 +214,12 @@ func calculateBuilderStats(builders []BuilderStatusInfo) map[string]interface{} 
 	totalFailed := 0
 
 	for _, b := range builders {
-		if b.Status == "online" || b.Status == "busy" {
+		switch b.Status {
+		case "online", "busy":
 			onlineBuilders++
-		} else {
+		case "draining":
+			drainingBuilders++
+		default:
 			offlineBuilders++
 		}
 		totalCapacity += b.Capacity
@@ -216,15 +235,16 @@ func calculateBuilderStats(builders []BuilderStatusInfo) map[string]interface{} 
 	}
 
 	return map[string]interface{}{
-		"total_builders":   totalBuilders,
-		"online_builders":  onlineBuilders,
-		"offline_builders": offlineBuilders,
-		"total_capacity":   totalCapacity,
-		"total_load":       totalLoad,
-		"total_builds":     totalBuilds,
-		"success_builds":   totalSuccess,
-		"failed_builds":    totalFailed,
-		"success_rate":     successRate,
+		"total_builders":    totalBuilders,
+		"online_builders":   onlineBuilders,
+		"offline_builders":  offlineBuilders,
+		"draining_builders": drainingBuilders,
+		"total_capacity":    totalCapacity,
+		"total_load":        totalLoad,
+		"total_builds":      totalBuilds,
+		"success_builds":    totalSuccess,
+		"failed_builds":     totalFailed,
+		"success_rate":      successRate,
 	}
 }
 

@@ -1,42 +1,42 @@
-# Build stage
-FROM golang:1.25.3 AS builder
+# Build the control-plane binaries. Package builds are deliberately excluded:
+# portage-builder runs only in a disposable native Gentoo root/VM.
+FROM golang:1.26.5 AS go-build
 
 WORKDIR /app
 
 COPY go.mod go.sum ./
 RUN go mod download
 
-COPY . .
+COPY cmd ./cmd
+COPY internal ./internal
+COPY pkg ./pkg
 
-RUN go build -v -o bin/portage-server cmd/server/main.go && \
-    go build -v -o bin/portage-dashboard cmd/dashboard/main.go && \
-    go build -v -o bin/portage-builder cmd/builder/main.go
+RUN CGO_ENABLED=0 go build -trimpath -o /out/portage-server ./cmd/server && \
+    CGO_ENABLED=0 go build -trimpath -o /out/portage-dashboard ./cmd/dashboard && \
+    CGO_ENABLED=0 go build -trimpath -o /out/portage-migrate ./cmd/migrate && \
+    CGO_ENABLED=0 go build -trimpath -o /out/portage-signer ./cmd/signer
 
-# Runtime stage - Gentoo base with emerge
-FROM gentoo/stage3:latest
+FROM hashicorp/terraform:1.15.6 AS terraform
 
-WORKDIR /app
+# Control-plane runtime only. SSH and GnuPG support PVE deployment and signing;
+# Terraform is pinned and copied from HashiCorp's multi-architecture image so
+# PVE/cloud provisioning works identically on amd64 and arm64 control planes.
+FROM debian:bookworm-slim
 
-# Install Go runtime and necessary tools
-RUN emerge -q app-eselect/eselect dev-lang/go dev-vcs/git && \
-    go version
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends bash ca-certificates gnupg openssh-client && \
+    rm -rf /var/lib/apt/lists/*
 
-# Copy built binaries from builder
-COPY --from=builder /app/bin /app/bin
-COPY --from=builder /app/cmd /app/cmd
-COPY --from=builder /app/internal /app/internal
-COPY --from=builder /app/pkg /app/pkg
-COPY --from=builder /app/configs /app/configs
-COPY --from=builder /app/go.mod /app/go.sum /app/
+WORKDIR /opt/portage-engine
 
-# Copy Go cache from builder to speed up future builds
-COPY --from=builder /go/pkg /go/pkg
+COPY --from=go-build /out/portage-server /usr/local/bin/portage-server
+COPY --from=go-build /out/portage-dashboard /usr/local/bin/portage-dashboard
+COPY --from=go-build /out/portage-migrate /usr/local/bin/portage-migrate
+COPY --from=go-build /out/portage-signer /usr/local/bin/portage-signer
+COPY --from=terraform /bin/terraform /usr/local/bin/terraform
+COPY configs ./configs
+COPY scripts/rotating-log-tee.sh /usr/local/bin/rotating-log-tee
 
-RUN chmod +x /app/bin/*
+EXPOSE 8080 8081
 
-ENV PATH="/app/bin:${PATH}"
-ENV GOPATH=/go
-
-EXPOSE 8080 8081 9090
-
-CMD ["/app/bin/portage-server"]
+CMD ["/usr/local/bin/portage-server"]

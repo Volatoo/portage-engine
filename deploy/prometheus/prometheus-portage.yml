@@ -1,12 +1,15 @@
-# Prometheus scrape configuration for Portage Engine
-# Add this to your prometheus.yml under scrape_configs:
+# Standalone Prometheus scrape snippet for Portage Engine.
+#
+# docker-compose.yml uses deploy/observability/prometheus.yml instead. If
+# Prometheus runs on the host, keep localhost:18080 below. If it runs on the
+# Compose network, use portage-server:8080.
 
 scrape_configs:
   - job_name: 'portage-engine-server'
     scrape_interval: 15s
     metrics_path: '/metrics/prometheus'
     static_configs:
-      - targets: ['localhost:8080']
+      - targets: ['localhost:18080']
         labels:
           component: 'server'
 
@@ -15,5 +18,4 @@ scrape_configs:
     #   username: 'metrics'
     #   password: 'your-metrics-password'
 
-# Note: the builder process does not expose a /metrics endpoint, so there is
-# no scrape job for it.
+# Native disposable builders do not expose a stable host scrape endpoint.

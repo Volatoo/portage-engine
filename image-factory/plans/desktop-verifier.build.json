@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "target": "desktop-verifier",
+  "plan_object_id": "build-plan/desktop-verifier-g3",
+  "image_id": "pe/amd64/no-multilib/desktop-verifier-g3",
+  "generation": "desktop-g3",
+  "provider": "pve",
+  "arch": "amd64",
+  "build_mode": "native-gentoo",
+  "source_template": "pe-gentoo-amd64-no-multilib-catalyst-base-g6",
+  "source_vmid": 141,
+  "source_provenance_object_id": "image-manifest/catalyst-base-g6",
+  "template": "pe-gentoo-amd64-no-multilib-desktop-verifier-g3",
+  "template_summary": "Portage Engine amd64/no-multilib XFCE desktop verifier candidate g3",
+  "profile_id": "pe/amd64/no-multilib/systemd/desktop-verifier-v1",
+  "profile_path": "portage-engine/amd64/23.0/no-multilib/systemd/desktop-verifier",
+  "profile_repository": "pe-profiles",
+  "gentoo_repository_key_object_id": "release-key/gentoo-developer",
+  "profile_parents": [
+    {
+      "repository": "pe-profiles",
+      "profile_path": "portage-engine/amd64/23.0/no-multilib/systemd/base"
+    }
+  ],
+  "profile_repository_key_object_id": "release-key/pe-profiles-g3",
+  "mirror_bundle_id": "mirror/img4q-desktop-g3-r2-2026-07-24",
+  "source_repositories": {
+    "gentoo": "562f512d37e15e97551769962528e12ceea8714b",
+    "pe-profiles": "cdd8c3009e4a91146f170de6e7ea2934dc0031d5"
+  },
+  "source_display_model": "std",
+  "repositories": {
+    "gentoo": "562f512d37e15e97551769962528e12ceea8714b",
+    "pe-profiles": "aacfbcf0d1735821c3647e8c9ce0b0e8ed0ff92c"
+  },
+  "repository_object_ids": {
+    "gentoo": "repository/gentoo-562f512d",
+    "pe-profiles": "repository/pe-profiles-aacfbcf"
+  },
+  "repository_uris": {
+    "gentoo": "http://10.31.0.2/local/portage-engine/git/gentoo.git",
+    "pe-profiles": "http://10.31.0.2/local/portage-engine/git/pe-profiles.git"
+  },
+  "rootfs_source": "packer-base-image",
+  "channel": "candidate",
+  "gentoo_mirror": "http://10.31.0.2/gentoo",
+  "binhost": "",
+  "package_sets": [
+    "pe/desktop-verifier-v1"
+  ],
+  "packages": [],
+  "desktop": true,
+  "display_model": "qxl",
+  "cores": 4,
+  "memory": 16384
+}

@@ -2,9 +2,6 @@
 package builder
 
 import (
-	"fmt"
-	"strings"
-
 	"github.com/slchris/portage-engine/pkg/config"
 )
 
@@ -25,9 +22,6 @@ type PackageManager interface {
 	// UpdateCommand returns the command to update package database.
 	UpdateCommand() []string
 
-	// GetDockerMounts returns the Docker volume mounts for this package manager.
-	GetDockerMounts(cfg *config.BuilderConfig) []DockerMount
-
 	// GetEnvVars returns environment variables for the build process.
 	GetEnvVars(cfg *config.BuilderConfig) map[string]string
 
@@ -36,22 +30,6 @@ type PackageManager interface {
 
 	// ArtifactExtension returns the file extension for binary packages.
 	ArtifactExtension() string
-}
-
-// DockerMount represents a Docker volume mount.
-type DockerMount struct {
-	Source   string
-	Target   string
-	ReadOnly bool
-}
-
-// String returns the Docker mount string format.
-func (m DockerMount) String() string {
-	mount := fmt.Sprintf("%s:%s", m.Source, m.Target)
-	if m.ReadOnly {
-		mount += ":ro"
-	}
-	return mount
 }
 
 // GentooPackageManager implements PackageManager for Gentoo Linux.
@@ -97,36 +75,6 @@ func (g *GentooPackageManager) UpdateCommand() []string {
 	return []string{"emerge", "--sync"}
 }
 
-// GetDockerMounts returns Gentoo-specific Docker mounts.
-func (g *GentooPackageManager) GetDockerMounts(cfg *config.BuilderConfig) []DockerMount {
-	// Portage config is mounted read-only at a staging path; the build script
-	// copies it to a writable /etc/portage so getuto can build the signing
-	// trust store (a read-only /etc/portage breaks the trust helper).
-	mounts := []DockerMount{
-		{
-			Source:   cfg.PortageReposPath,
-			Target:   "/var/db/repos",
-			ReadOnly: true,
-		},
-		{
-			Source:   cfg.PortageConfPath,
-			Target:   "/tmp/pconf",
-			ReadOnly: true,
-		},
-	}
-
-	// Add make.conf mount if different from PortageConfPath
-	if cfg.MakeConfPath != "" && !strings.HasPrefix(cfg.MakeConfPath, cfg.PortageConfPath) {
-		mounts = append(mounts, DockerMount{
-			Source:   cfg.MakeConfPath,
-			Target:   "/tmp/pconf/make.conf",
-			ReadOnly: true,
-		})
-	}
-
-	return mounts
-}
-
 // GetEnvVars returns Gentoo-specific environment variables.
 func (g *GentooPackageManager) GetEnvVars(cfg *config.BuilderConfig) map[string]string {
 	envVars := make(map[string]string)
@@ -157,7 +105,7 @@ func (g *GentooPackageManager) ArtifactExtension() string {
 	return ".gpkg.tar"
 }
 
-// NewPackageManager creates a PackageManager (always Gentoo for Docker builds).
+// NewPackageManager creates the native Gentoo package manager.
 func NewPackageManager(cfg *config.BuilderConfig) PackageManager {
 	return NewGentooPackageManager(cfg)
 }

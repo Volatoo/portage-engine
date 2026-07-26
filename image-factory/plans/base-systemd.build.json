@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "target": "base-systemd",
+  "plan_object_id": "build-plan/base-systemd-catalyst-g6",
+  "image_id": "pe/amd64/no-multilib/catalyst-base-g6",
+  "generation": "catalyst-g6",
+  "provider": "pve",
+  "arch": "amd64",
+  "build_mode": "native-gentoo",
+  "source_template": "pe-gentoo-amd64-no-multilib-catalyst-base-g4",
+  "source_vmid": 137,
+  "source_provenance_object_id": "image-manifest/catalyst-base-g4",
+  "template": "pe-gentoo-amd64-no-multilib-catalyst-base-g6",
+  "template_summary": "Portage Engine amd64/no-multilib/systemd Catalyst base candidate g6",
+  "profile_id": "pe/amd64/no-multilib/systemd/base-v1",
+  "profile_path": "portage-engine/amd64/23.0/no-multilib/systemd/base",
+  "profile_repository": "pe-profiles",
+  "gentoo_repository_key_object_id": "release-key/gentoo-developer",
+  "profile_parents": [
+    {
+      "repository": "gentoo",
+      "profile_path": "default/linux/amd64/23.0/no-multilib/systemd"
+    }
+  ],
+  "profile_repository_key_object_id": "release-key/pe-profiles-g2",
+  "mirror_bundle_id": "mirror/img4p-catalyst-successor-g6-2026-07-24",
+  "source_repositories": {
+    "gentoo": "562f512d37e15e97551769962528e12ceea8714b",
+    "pe-profiles": "d2dbea7e931f38aff7c594e1c182e777445d62ab"
+  },
+  "source_display_model": "std",
+  "repositories": {
+    "gentoo": "562f512d37e15e97551769962528e12ceea8714b",
+    "pe-profiles": "cdd8c3009e4a91146f170de6e7ea2934dc0031d5"
+  },
+  "repository_object_ids": {
+    "gentoo": "repository/gentoo-562f512d",
+    "pe-profiles": "repository/pe-profiles-cdd8c30"
+  },
+  "repository_uris": {
+    "gentoo": "http://10.31.0.2/local/portage-engine/git/gentoo.git",
+    "pe-profiles": "http://10.31.0.2/local/portage-engine/git/pe-profiles.git"
+  },
+  "rootfs_source": "packer-base-image",
+  "channel": "candidate",
+  "gentoo_mirror": "http://10.31.0.2/gentoo",
+  "binhost": "",
+  "package_sets": [
+    "pe/runtime-v1",
+    "pe/build-test-v1"
+  ],
+  "packages": [],
+  "desktop": false,
+  "display_model": "std",
+  "cores": 4,
+  "memory": 8192
+}

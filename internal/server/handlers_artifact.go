@@ -187,26 +187,18 @@ func (s *Server) handleGPGPublicKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check if GPG is enabled
-	if !s.gpgSigner.IsEnabled() {
+	if !s.config.GPGEnabled {
 		http.Error(w, "GPG not enabled on server", http.StatusNotFound)
 		return
 	}
-
-	// Try to get public key from signer
-	publicKey, err := s.gpgSigner.GetPublicKey()
-	if err != nil {
-		// Fall back to file if configured
-		if s.config.GPGPublicKeyPath != "" {
-			http.ServeFile(w, r, s.config.GPGPublicKeyPath) // nolint:gosec // Config-defined path
-			return
-		}
+	_, publicKey, _ := s.gpgKeyMaterial()
+	if len(publicKey) == 0 {
 		s.metrics.IncHTTPRequestErrors()
-		http.Error(w, fmt.Sprintf("Failed to get public key: %v", err), http.StatusInternalServerError)
+		http.Error(w, "isolated signer public key is not ready", http.StatusServiceUnavailable)
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/pgp-keys")
 	w.Header().Set("Content-Disposition", "attachment; filename=portage-engine.asc")
-	_, _ = w.Write([]byte(publicKey))
+	_, _ = w.Write(publicKey)
 }

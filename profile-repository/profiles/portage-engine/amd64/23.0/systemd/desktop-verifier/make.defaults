@@ -1,0 +1,3 @@
+USE="X harfbuzz gtk gtk3 policykit udisks"
+INPUT_DEVICES="-* libinput"
+VIDEO_CARDS="-* qxl"

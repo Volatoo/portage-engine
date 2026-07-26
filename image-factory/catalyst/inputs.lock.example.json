@@ -1,0 +1,181 @@
+{
+  "version": 1,
+  "bundle_id": "mirror/catalyst-candidate-2026-07-22",
+  "strict_offline": true,
+  "allowed_hosts": [
+    "git-mirror.example.internal",
+    "distfiles.example.internal",
+    "binpkgs.example.internal"
+  ],
+  "advisory_cutoff": "2026-07-22T00:00:00Z",
+  "objects": [
+    {
+      "id": "catalyst-plan/base-systemd-g1",
+      "kind": "catalyst-plan",
+      "path": "plans/catalyst-base-systemd.plan.json",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "size": 0,
+      "required_for": ["catalyst-base-systemd"]
+    },
+    {
+      "id": "catalyst-plan/profile-systemd-g1",
+      "kind": "catalyst-plan",
+      "path": "plans/catalyst-profile-systemd.plan.json",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "size": 0,
+      "required_for": ["catalyst-profile-systemd"]
+    },
+    {
+      "id": "catalyst-runtime/4.1.1",
+      "kind": "catalyst-runtime",
+      "path": "tools/catalyst-runtime-4.1.1.tar.xz",
+      "platform": "linux-amd64",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "size": 0,
+      "required_for": ["catalyst-base-systemd", "catalyst-profile-systemd"]
+    },
+    {
+      "id": "stage3/amd64-systemd-20260720",
+      "kind": "stage3",
+      "path": "seeds/stage3-amd64-systemd-20260720T163024Z.tar.xz",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "size": 0,
+      "required_for": ["catalyst-base-systemd", "catalyst-profile-systemd"]
+    },
+    {
+      "id": "stage3-digests/amd64-systemd-20260720",
+      "kind": "stage3-digests",
+      "path": "seeds/stage3-amd64-systemd-20260720T163024Z.tar.xz.DIGESTS.asc",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "size": 0,
+      "required_for": ["catalyst-base-systemd", "catalyst-profile-systemd"]
+    },
+    {
+      "id": "release-key/gentoo-release",
+      "kind": "release-key",
+      "path": "keys/gentoo-release.asc",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "size": 0,
+      "required_for": ["catalyst-base-systemd", "catalyst-profile-systemd"]
+    },
+    {
+      "id": "release-key/gentoo-repository",
+      "kind": "release-key",
+      "path": "keys/gentoo-repository.asc",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "size": 0,
+      "required_for": ["catalyst-base-systemd", "catalyst-profile-systemd"]
+    },
+    {
+      "id": "repository/gentoo-1111111",
+      "kind": "repository-snapshot",
+      "path": "repositories/gentoo-1111111111111111111111111111111111111111.bundle",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "size": 0,
+      "required_for": ["catalyst-base-systemd", "catalyst-profile-systemd"]
+    },
+    {
+      "id": "distfiles/catalyst-base-systemd-manifest",
+      "kind": "distfile-manifest",
+      "path": "distfiles/catalyst-base-systemd.MANIFEST.json",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "size": 0,
+      "required_for": ["catalyst-base-systemd"]
+    },
+    {
+      "id": "repository/pe-profiles-2222222",
+      "kind": "repository-snapshot",
+      "path": "repositories/pe-profiles-2222222222222222222222222222222222222222.bundle",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "size": 0,
+      "required_for": ["catalyst-profile-systemd"]
+    },
+    {
+      "id": "release-key/pe-profiles",
+      "kind": "release-key",
+      "path": "keys/pe-profiles-release.asc",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "size": 0,
+      "required_for": ["catalyst-profile-systemd"]
+    },
+    {
+      "id": "distfiles/catalyst-profile-systemd-manifest",
+      "kind": "distfile-manifest",
+      "path": "distfiles/catalyst-profile-systemd.MANIFEST.json",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "size": 0,
+      "required_for": ["catalyst-profile-systemd"]
+    },
+    {
+      "id": "package-sets/image-v1",
+      "kind": "package-set-catalog",
+      "path": "package-sets/catalog.json",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "size": 0,
+      "required_for": ["catalyst-base-systemd", "catalyst-profile-systemd"]
+    },
+    {
+      "id": "tool/portage-image-factory/catalyst/linux-amd64",
+      "kind": "service-binary",
+      "path": "tools/portage-image-factory-linux-amd64",
+      "platform": "linux-amd64",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "size": 0,
+      "executable": true,
+      "required_for": ["catalyst-base-systemd", "catalyst-profile-systemd"]
+    },
+    {
+      "id": "script/catalyst/run-offline-v1",
+      "kind": "script",
+      "path": "factory/catalyst/run-offline.sh",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "size": 0,
+      "executable": true,
+      "required_for": ["catalyst-base-systemd", "catalyst-profile-systemd"]
+    },
+    {
+      "id": "script/catalyst/hydrate-distfiles-v1",
+      "kind": "script",
+      "path": "factory/packer/scripts/hydrate-distfiles.py",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "size": 0,
+      "required_for": ["catalyst-base-systemd", "catalyst-profile-systemd"]
+    },
+    {
+      "id": "script/catalyst/safe-extract-v1",
+      "kind": "script",
+      "path": "factory/catalyst/safe-extract.py",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "size": 0,
+      "executable": true,
+      "required_for": ["catalyst-base-systemd", "catalyst-profile-systemd"]
+    },
+    {
+      "id": "script/catalyst/verify-stage3-v1",
+      "kind": "script",
+      "path": "factory/catalyst/verify-stage3.py",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "size": 0,
+      "executable": true,
+      "required_for": ["catalyst-base-systemd", "catalyst-profile-systemd"]
+    },
+    {
+      "id": "script/catalyst/verify-runtime-v1",
+      "kind": "script",
+      "path": "factory/catalyst/verify-runtime.py",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "size": 0,
+      "executable": true,
+      "required_for": ["catalyst-base-systemd", "catalyst-profile-systemd"]
+    },
+    {
+      "id": "script/catalyst/verify-profile-v1",
+      "kind": "script",
+      "path": "factory/catalyst/verify-profile.py",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "size": 0,
+      "executable": true,
+      "required_for": ["catalyst-profile-systemd"]
+    }
+  ]
+}

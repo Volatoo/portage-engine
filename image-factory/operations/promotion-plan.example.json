@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "release_id": "release-2026-07-22-g1",
+  "alias": "stable",
+  "candidate_catalog_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  "bundles": [
+    {
+      "bundle_id": "mirror/base-g2",
+      "manifest": "bundles/base-g2/bundle-manifest.json",
+      "signature": "bundles/base-g2/bundle-manifest.sig.json",
+      "input_lock": "bundles/base-g2/inputs.lock.json",
+      "offline_root": "bundles/base-g2"
+    },
+    {
+      "bundle_id": "mirror/desktop-g1",
+      "manifest": "bundles/desktop-g1/bundle-manifest.json",
+      "signature": "bundles/desktop-g1/bundle-manifest.sig.json",
+      "input_lock": "bundles/desktop-g1/inputs.lock.json",
+      "offline_root": "bundles/desktop-g1"
+    }
+  ],
+  "minimum_fresh_hours": 48,
+  "evidence": [
+    {
+      "image_id": "pe/amd64/base-g1",
+      "image_manifest": "base-systemd.image-manifest.json",
+      "smoke_result": "base-systemd.smoke-evidence/result.json",
+      "output_stamp": "base-systemd.smoke-evidence/output-stamp.json"
+    },
+    {
+      "image_id": "pe/amd64/desktop-verifier-g1",
+      "image_manifest": "desktop-verifier.image-manifest.json",
+      "smoke_result": "desktop-verifier.smoke-evidence/result.json",
+      "output_stamp": "desktop-verifier.smoke-evidence/output-stamp.json",
+      "desktop_result": "desktop-verifier.desktop-evidence/image-baseline.result.json",
+      "desktop_scenario_id": "desktop/image-baseline-v1"
+    }
+  ]
+}

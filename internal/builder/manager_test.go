@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/slchris/portage-engine/internal/catalog"
 	"github.com/slchris/portage-engine/pkg/config"
 )
 
@@ -75,6 +76,95 @@ func TestSubmitBuildManager(t *testing.T) {
 
 	if status.PackageName != "dev-lang/python" {
 		t.Errorf("Expected package=dev-lang/python, got %s", status.PackageName)
+	}
+}
+
+func TestSubmitBuildResolvesServerOwnedCatalogInputs(t *testing.T) {
+	mgr := NewManager(&config.ServerConfig{MaxWorkers: 0})
+	c := &catalog.Catalog{
+		Version: 1,
+		Profiles: []catalog.ProfileDefinition{{
+			ID: "amd64/base", Arch: "amd64", ProfilePath: "default/linux/amd64/23.0",
+			BinhostPath:         "releases/amd64/binpackages/23.0/x86-64",
+			ProfileRepositoryID: "gentoo", RepositoryIDs: []string{"gentoo"}, ImageID: "pve/amd64-001",
+			MirrorBundleID: "offline/001", DefaultResourceClass: "small",
+			Default: true, Channel: "stable",
+		}},
+		Repositories: []catalog.RepositoryDefinition{{
+			ID: "gentoo", Name: "gentoo", Location: "/var/db/repos/gentoo",
+			SyncType: "git", SyncURI: "https://mirror.internal/gentoo.git",
+			Revision: "0123456789abcdef0123456789abcdef01234567", Channel: "stable",
+		}},
+		Images: []catalog.ImageManifest{{
+			ID: "pve/amd64-001", ProfileID: "amd64/base", Generation: "001", Provider: "pve", Arch: "amd64",
+			BuildMode: "native-gentoo", Template: "9001",
+			Digest:       "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			RootfsSource: "catalyst-stage3", Channel: "stable",
+		}},
+		MirrorBundles: []catalog.MirrorBundle{{
+			ID: "offline/001", Digest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			CreatedAt: time.Now().UTC().Add(-time.Hour), FreshUntil: time.Now().UTC().Add(24 * time.Hour), AdvisoryWatermark: "2026-07-22T00:00:00Z", Channel: "stable",
+		}},
+		ResourceClasses: []catalog.ResourceClass{{ID: "small", MachineSpec: map[string]string{"cores": "2", "memory": "4096"}}},
+	}
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	mgr.SetBuildCatalog(c)
+
+	bundle := validSecurityTestBundle()
+	bundle.Config.Repos[0].RegistryID = "gentoo"
+	bundle.Config.Repos[0].SyncURI = "https://client.example/untrusted-but-valid.git"
+	req := &BuildRequest{
+		PackageName: "dev-lang/python", Version: "3.11.9", ProfileID: "amd64/base",
+		RepositoryIDs: []string{"gentoo"}, ResourceClass: "small", ConfigBundle: bundle,
+	}
+	jobID, err := mgr.SubmitBuild(req)
+	if err != nil {
+		t.Fatalf("SubmitBuild failed: %v", err)
+	}
+	if got := req.ConfigBundle.Config.Repos[0].SyncURI; got != "https://mirror.internal/gentoo.git" {
+		t.Fatalf("client repository URI was not replaced: %q", got)
+	}
+	if got := req.ConfigBundle.Config.Repos[0].Revision; got != "0123456789abcdef0123456789abcdef01234567" {
+		t.Fatalf("repository revision was not pinned: %q", got)
+	}
+	status, err := mgr.GetStatus(jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.ResolvedContext == nil || status.ResolvedContext.Template != "9001" || status.ResolvedContext.ImageID != "pve/amd64-001" {
+		t.Fatalf("resolved provenance missing from job: %+v", status.ResolvedContext)
+	}
+	if req.MachineSpec["cores"] != "2" || req.CloudProvider != "pve" {
+		t.Fatalf("catalog resource/provider not applied: %+v provider=%q", req.MachineSpec, req.CloudProvider)
+	}
+
+	simpleReq := &BuildRequest{PackageName: "app-misc/hello", Version: "2.12.1", ProfileID: "amd64/base"}
+	if _, err := mgr.SubmitBuild(simpleReq); err != nil {
+		t.Fatalf("simple request failed: %v", err)
+	}
+	if simpleReq.ConfigBundle == nil || len(simpleReq.ConfigBundle.Config.Repos) != 1 || simpleReq.ConfigBundle.Config.Repos[0].Revision == "" {
+		t.Fatalf("simple request lost resolved repository provenance: %+v", simpleReq.ConfigBundle)
+	}
+
+	_, err = mgr.SubmitBuild(&BuildRequest{PackageName: "dev-lang/python", Version: "3.11", ProfileID: "missing"})
+	if err == nil || !IsRequestError(err) {
+		t.Fatalf("unknown profile should be a request error, got %v", err)
+	}
+	_, err = mgr.SubmitBuild(&BuildRequest{
+		PackageName: "dev-lang/python", Version: "3.11", ProfileID: "amd64/base",
+		MachineSpec: map[string]string{"template": "attacker-template"},
+	})
+	if err == nil || !IsRequestError(err) {
+		t.Fatalf("operator-owned machine spec should be rejected, got %v", err)
+	}
+	_, err = mgr.SubmitBuild(&BuildRequest{
+		PackageName: "dev-lang/python", Version: "3.11", ProfileID: "amd64/base",
+		MachineSpec: map[string]string{"cores": "128"},
+	})
+	if err == nil || !IsRequestError(err) {
+		t.Fatalf("catalog resource class should not be overridden, got %v", err)
 	}
 }
 
@@ -494,14 +584,9 @@ func TestBuildStatusArch(t *testing.T) {
 			expectedArch: "amd64",
 		},
 		{
-			name:         "explicit arm64",
-			arch:         "arm64",
-			expectedArch: "arm64",
-		},
-		{
 			name:         "empty arch",
 			arch:         "",
-			expectedArch: "",
+			expectedArch: "amd64",
 		},
 	}
 
@@ -527,6 +612,15 @@ func TestBuildStatusArch(t *testing.T) {
 				t.Errorf("Expected Arch=%q, got %q", tt.expectedArch, status.Arch)
 			}
 		})
+	}
+
+	_, err := mgr.SubmitBuild(&BuildRequest{
+		PackageName: "dev-lang/python",
+		Version:     "3.11",
+		Arch:        "arm64",
+	})
+	if err == nil || !IsRequestError(err) {
+		t.Fatalf("architecture outside the catalog should be a request error, got %v", err)
 	}
 }
 
@@ -702,6 +796,37 @@ func TestBuildProvisionRequest(t *testing.T) {
 	}
 	if pr.Credentials == nil || pr.Credentials.GCPKeyFile != "/gcp.json" {
 		t.Errorf("credentials not mapped: %+v", pr.Credentials)
+	}
+
+	// URL delivery runs the downloaded binary as root, so a digest is
+	// mandatory and is propagated all the way to guest bootstrap.
+	m = &Manager{config: &config.ServerConfig{
+		CloudProvider: "gcp", CloudSSHKeyPath: "/k", ServerCallbackURL: "http://srv:8080",
+		CloudBuilderBinaryURL: "http://10.31.0.2/local/portage-engine/portage-builder-linux-amd64",
+	}}
+	if _, err := m.buildProvisionRequest(&BuildRequest{Arch: "amd64"}); err == nil || !strings.Contains(err.Error(), "CLOUD_BUILDER_BINARY_SHA256") {
+		t.Fatalf("expected missing builder digest to be rejected, got %v", err)
+	}
+	m = &Manager{config: &config.ServerConfig{
+		CloudProvider: "gcp", CloudSSHKeyPath: "/k", ServerCallbackURL: "http://srv:8080",
+		CloudBuilderBinaryURL:    "http://10.31.0.2/local/portage-engine/portage-builder-linux-amd64",
+		CloudBuilderBinarySHA256: strings.Repeat("a", 64),
+	}}
+	pr, err = m.buildProvisionRequest(&BuildRequest{Arch: "amd64"})
+	if err != nil {
+		t.Fatalf("valid URL builder delivery rejected: %v", err)
+	}
+	if pr.BuilderBinaryURL != m.config.CloudBuilderBinaryURL || pr.BuilderBinarySHA256 != strings.Repeat("a", 64) {
+		t.Fatalf("builder URL integrity fields not mapped: %+v", pr)
+	}
+
+	m = &Manager{config: &config.ServerConfig{
+		CloudProvider: "gcp", CloudSSHKeyPath: "/k", ServerCallbackURL: "http://srv:8080",
+		CloudBuilderBinaryURL:    "http://user:pass@10.31.0.2/builder?token=secret",
+		CloudBuilderBinarySHA256: strings.Repeat("a", 64),
+	}}
+	if _, err := m.buildProvisionRequest(&BuildRequest{Arch: "amd64"}); err == nil {
+		t.Fatal("expected credentialed/query builder URL to be rejected")
 	}
 }
 

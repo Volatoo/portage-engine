@@ -1,0 +1,1907 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Portage Engine 后续迭代计划、调度监控、用户使用形态、安全架构与桌面 GUI E2E 测试方案">
+  <title>Portage Engine｜产品形态、调度监控、安全架构与桌面 E2E 方案</title>
+  <style>
+    :root {
+      --ink: #152018;
+      --muted: #5d685f;
+      --line: #d9dfda;
+      --paper: #fbfcfa;
+      --panel: #ffffff;
+      --green: #17663a;
+      --green-soft: #eaf4ed;
+      --amber: #8a5b00;
+      --amber-soft: #fff4d8;
+      --red: #9b2f2f;
+      --red-soft: #fbeaea;
+      --blue: #255b8d;
+      --blue-soft: #eaf2f9;
+      --code: #18221b;
+      --code-ink: #edf4ee;
+      --radius: 10px;
+      --shadow: 0 10px 26px rgba(25, 45, 31, .08);
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      background: var(--paper);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+      line-height: 1.72;
+    }
+    a { color: var(--blue); text-decoration-thickness: 1px; text-underline-offset: 3px; }
+    a:hover { color: #163f67; }
+    code, pre { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; }
+
+    .shell {
+      width: min(1180px, calc(100% - 32px));
+      margin: 0 auto;
+    }
+    .hero {
+      padding: 64px 0 40px;
+      border-bottom: 1px solid var(--line);
+      background: #f2f6f2;
+    }
+    .eyebrow {
+      margin: 0 0 10px;
+      color: var(--green);
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
+    h1 {
+      max-width: 850px;
+      margin: 0;
+      font-size: clamp(34px, 5vw, 58px);
+      line-height: 1.08;
+      letter-spacing: -.035em;
+    }
+    .hero-copy {
+      max-width: 850px;
+      margin: 22px 0 0;
+      color: var(--muted);
+      font-size: 19px;
+    }
+    .status-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px 26px;
+      margin-top: 28px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+    .status-row strong { color: var(--ink); }
+
+    .layout {
+      display: grid;
+      grid-template-columns: 240px minmax(0, 1fr);
+      gap: 46px;
+      padding: 42px 0 72px;
+    }
+    nav {
+      position: sticky;
+      top: 24px;
+      align-self: start;
+      padding: 18px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--panel);
+      box-shadow: var(--shadow);
+    }
+    nav h2 {
+      margin: 0 0 10px;
+      font-size: 13px;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
+    nav a {
+      display: block;
+      padding: 7px 0;
+      color: var(--muted);
+      font-size: 14px;
+      text-decoration: none;
+    }
+    nav a:hover { color: var(--green); }
+    main { min-width: 0; }
+    section { margin-bottom: 58px; scroll-margin-top: 24px; }
+    h2 {
+      margin: 0 0 18px;
+      font-size: clamp(25px, 3vw, 34px);
+      line-height: 1.2;
+      letter-spacing: -.02em;
+    }
+    h3 {
+      margin: 28px 0 10px;
+      font-size: 20px;
+      line-height: 1.35;
+    }
+    p { margin: 10px 0; }
+    ul, ol { padding-left: 24px; }
+    li + li { margin-top: 6px; }
+
+    .lead {
+      color: var(--muted);
+      font-size: 18px;
+    }
+    .callout {
+      margin: 22px 0;
+      padding: 18px 20px;
+      border: 1px solid #b9d4c1;
+      border-radius: var(--radius);
+      background: var(--green-soft);
+    }
+    .callout strong { color: var(--green); }
+    .warning {
+      border-color: #e2c779;
+      background: var(--amber-soft);
+    }
+    .warning strong { color: var(--amber); }
+    .danger {
+      border-color: #e0b2b2;
+      background: var(--red-soft);
+    }
+    .danger strong { color: var(--red); }
+
+    .grid-2, .grid-3 {
+      display: grid;
+      gap: 16px;
+      margin: 18px 0;
+    }
+    .grid-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .grid-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .card {
+      padding: 20px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--panel);
+    }
+    .card h3 { margin-top: 0; }
+    .card p:last-child, .card ul:last-child { margin-bottom: 0; }
+    .tag {
+      display: inline-block;
+      margin-bottom: 10px;
+      padding: 2px 8px;
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      color: var(--muted);
+      background: #f7f9f7;
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: .04em;
+    }
+
+    .roadmap {
+      margin-top: 22px;
+      border-left: 2px solid #b9c9bc;
+    }
+    .phase {
+      position: relative;
+      padding: 0 0 34px 28px;
+    }
+    .phase::before {
+      content: "";
+      position: absolute;
+      left: -8px;
+      top: 5px;
+      width: 12px;
+      height: 12px;
+      border: 2px solid var(--green);
+      border-radius: 50%;
+      background: var(--paper);
+    }
+    .phase:last-child { padding-bottom: 0; }
+    .phase h3 { margin: 0 0 6px; }
+    .phase-meta { color: var(--muted); font-size: 14px; }
+    .exit {
+      margin-top: 12px;
+      padding: 12px 14px;
+      border-left: 3px solid var(--green);
+      background: #f3f7f3;
+      font-size: 14px;
+    }
+
+    .flow {
+      display: grid;
+      grid-template-columns: repeat(7, minmax(110px, 1fr));
+      gap: 12px;
+      margin: 24px 0;
+      overflow-x: auto;
+      padding: 4px 2px 12px;
+    }
+    .flow-step {
+      position: relative;
+      min-height: 92px;
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      font-size: 13px;
+    }
+    .flow-step strong { display: block; margin-bottom: 5px; font-size: 14px; }
+    .flow-step:not(:last-child)::after {
+      content: "→";
+      position: absolute;
+      right: -12px;
+      top: 33px;
+      z-index: 2;
+      color: var(--green);
+      font-size: 18px;
+      font-weight: 700;
+    }
+
+    .stack {
+      margin: 22px 0;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      overflow: hidden;
+      background: var(--panel);
+    }
+    .layer {
+      display: grid;
+      grid-template-columns: 160px 1fr;
+      gap: 18px;
+      padding: 16px 18px;
+      border-bottom: 1px solid var(--line);
+    }
+    .layer:last-child { border-bottom: 0; }
+    .layer strong { color: var(--green); }
+    .layer p { margin: 0; }
+
+    .journey {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(150px, 1fr));
+      gap: 12px;
+      margin: 20px 0 28px;
+      padding: 4px 2px 12px;
+      overflow-x: auto;
+    }
+    .journey-step {
+      position: relative;
+      min-height: 116px;
+      padding: 15px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      font-size: 13px;
+    }
+    .journey-step strong { display: block; margin-bottom: 6px; font-size: 15px; }
+    .journey-step code { color: var(--green); }
+    .journey-step:not(:last-child)::after {
+      content: "→";
+      position: absolute;
+      right: -12px;
+      top: 42px;
+      z-index: 2;
+      color: var(--green);
+      font-size: 18px;
+      font-weight: 700;
+    }
+
+    .arch-scroll {
+      margin: 22px 0;
+      overflow-x: auto;
+      padding: 2px 2px 12px;
+    }
+    .arch-diagram {
+      display: grid;
+      grid-template-columns: 160px 34px 190px 34px 190px 34px 190px;
+      grid-template-rows: repeat(3, auto);
+      gap: 12px 6px;
+      min-width: 900px;
+      align-items: stretch;
+    }
+    .arch-node {
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      min-height: 86px;
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      font-size: 12px;
+      line-height: 1.5;
+    }
+    .arch-node strong { margin-bottom: 4px; font-size: 14px; }
+    .arch-node.public { border-color: #a9c7da; background: var(--blue-soft); }
+    .arch-node.control { border-color: #b9d4c1; background: var(--green-soft); }
+    .arch-node.untrusted { border-color: #e2c779; background: var(--amber-soft); }
+    .arch-node.trust { border-color: #d4b2b2; background: var(--red-soft); }
+    .arch-arrow {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--green);
+      font-size: 20px;
+      font-weight: 700;
+    }
+    .arch-note {
+      grid-column: 3 / 8;
+      padding: 10px 14px;
+      border: 1px dashed #c5cec7;
+      border-radius: 8px;
+      color: var(--muted);
+      background: #f6f8f6;
+      font-size: 12px;
+    }
+
+    table {
+      width: 100%;
+      margin: 18px 0 24px;
+      border-collapse: collapse;
+      border: 1px solid var(--line);
+      background: var(--panel);
+      font-size: 14px;
+    }
+    th, td {
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+      vertical-align: top;
+    }
+    th { background: #eef3ee; font-size: 13px; }
+    tr:last-child td { border-bottom: 0; }
+
+    pre {
+      overflow: auto;
+      margin: 18px 0;
+      padding: 18px;
+      border-radius: var(--radius);
+      color: var(--code-ink);
+      background: var(--code);
+      font-size: 13px;
+      line-height: 1.58;
+      box-shadow: var(--shadow);
+    }
+    .decision {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+      margin: 22px 0;
+    }
+    .yes, .no {
+      padding: 18px;
+      border-radius: var(--radius);
+    }
+    .yes { border: 1px solid #b9d4c1; background: var(--green-soft); }
+    .no { border: 1px solid #e2c779; background: var(--amber-soft); }
+    .yes h3, .no h3 { margin-top: 0; }
+
+    .sources {
+      padding-top: 22px;
+      border-top: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 14px;
+    }
+    footer {
+      padding: 26px 0 40px;
+      border-top: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    @media (max-width: 920px) {
+      .layout { grid-template-columns: 1fr; }
+      nav { position: static; }
+      nav a { display: inline-block; margin-right: 16px; }
+      .grid-3 { grid-template-columns: 1fr; }
+      .flow { grid-template-columns: repeat(7, 150px); }
+      .journey { grid-template-columns: repeat(5, 170px); }
+    }
+    @media (max-width: 680px) {
+      .shell { width: min(100% - 22px, 1180px); }
+      .hero { padding-top: 42px; }
+      .grid-2, .decision { grid-template-columns: 1fr; }
+      .layer { grid-template-columns: 1fr; gap: 4px; }
+      table { display: block; overflow-x: auto; }
+    }
+    @media print {
+      nav { display: none; }
+      .layout { display: block; }
+      .hero { padding-top: 24px; }
+      section { break-inside: avoid; }
+      .card, .stack, table, pre { box-shadow: none; }
+      a { color: inherit; }
+    }
+  </style>
+</head>
+<body>
+  <header class="hero">
+    <div class="shell">
+      <p class="eyebrow">Portage Engine · Engineering Plan</p>
+      <h1>产品形态、调度监控、安全架构与桌面 GUI E2E 方案</h1>
+      <p class="hero-copy">以已经验证的 PVE + Native Gentoo 构建链路为基线，明确普通用户、开发者和 Infra 运维者的使用边界，再建设 OBS 风格的项目矩阵与 worker monitor、可信构建、binpkg 发布以及类似 openQA 的桌面应用验证能力。</p>
+      <div class="status-row">
+        <span><strong>基线：</strong>PVE + Terraform + Native Gentoo 已完成实机验证</span>
+        <span><strong>推荐策略：</strong>确定性测试为主，视觉 AI 为辅</span>
+        <span><strong>文档日期：</strong>2026-07-26</span>
+      </div>
+    </div>
+  </header>
+
+  <div class="shell layout">
+    <nav aria-label="文档目录">
+      <h2>目录</h2>
+      <a href="#decision">结论与边界</a>
+      <a href="#roadmap">迭代路线</a>
+      <a href="#state-platform">PostgreSQL 与 Redis</a>
+      <a href="#scheduler-monitor">调度与项目 Monitor</a>
+      <a href="#distributed-build">多 Worker 与 distcc</a>
+      <a href="#user-model">用户与 emerge 流程</a>
+      <a href="#profile-images">Profile 与模板工厂</a>
+      <a href="#desktop-goal">桌面 E2E 目标</a>
+      <a href="#architecture">推荐架构</a>
+      <a href="#oracle">判定器分层</a>
+      <a href="#ai-mcp">AI 与 MCP</a>
+      <a href="#implementation">落地计划</a>
+      <a href="#acceptance">验收标准</a>
+      <a href="#sources">参考资料</a>
+    </nav>
+
+    <main>
+      <section id="decision">
+        <p class="eyebrow">01 · Decision</p>
+        <h2>结论与当前边界</h2>
+        <p class="lead">PVE 后端不再作为待验证能力处理，而是作为 Portage Engine 的 reference backend。下一阶段不应继续分散精力证明“VM 能不能拉起”，而应把已有成功路径固化成可重复回归，并优先修复社区化所需的信任与状态问题。</p>
+
+        <div class="callout">
+          <strong>已确认：</strong>Terraform 创建 PVE VM、部署 Native Gentoo builder、执行 emerge 构建这条主链路已经在真实环境完成验证。后续阶段 0 仅做测试固化和版本基线记录。
+        </div>
+
+        <div class="grid-3">
+          <article class="card">
+            <span class="tag">SUPPORTED</span>
+            <h3>PVE Native Gentoo</h3>
+            <p>作为首要生产后端，围绕它建设签名、安装验证、一次性构建根和桌面测试。</p>
+          </article>
+          <article class="card">
+            <span class="tag">TRUSTED MODE</span>
+            <h3>当前适用范围</h3>
+            <p>单管理员、可信内网、自托管。暂不直接开放不可信社区用户提交任意构建。</p>
+          </article>
+          <article class="card">
+            <span class="tag">BETA</span>
+            <h3>AWS / GCP / 其他后端</h3>
+            <p>作为次要能力维护；在控制面和制品模型稳定之前不扩大支持面。</p>
+          </article>
+        </div>
+
+        <div class="danger callout">
+          <strong>仍然存在的 P0：</strong>builder 网络层 egress allowlist、共享 API/builder 密钥、无多租户身份与配额、以及 inbound push worker 模型。ConfigBundle 全字段校验、服务端 catalog、quarantine/immutable promotion、PostgreSQL 事实源与独立 signer 已完成；签名私钥已从 builder 和 server 移除。
+        </div>
+      </section>
+
+      <section id="roadmap">
+        <p class="eyebrow">02 · Roadmap</p>
+        <h2>后续迭代路线</h2>
+        <p>以 2 名后端 / Infra 工程师估算约 18–25 周。单人推进建议按里程碑交付，不要同时展开所有云后端和 profile 组合；严格离线部署与分布式编译池都应作为独立验收模式。</p>
+
+        <div class="roadmap">
+          <article class="phase">
+            <h3>阶段 0｜固化 PVE 已验证链路</h3>
+            <div class="phase-meta">1–2 天 · 不再做可行性探索</div>
+            <ul>
+              <li>记录 PVE、Terraform Provider、Gentoo template、Portage、内核和 builder binary 版本。</li>
+              <li>把现有操作整理成 smoke/E2E：Native 冷启动、unsigned GPKG 构建、签名前后两次安装验证、独立 signer、原子发布、单次使用后立即销毁，以及失败/孤儿 VM 的 TTL 回收。</li>
+              <li>将 PVE Native Gentoo 定义为 reference deployment。</li>
+            </ul>
+            <div class="exit"><strong>退出标准：</strong>同一套测试能够在干净环境重复执行，并保存 VM、构建和制品证据。</div>
+          </article>
+
+          <article class="phase">
+            <h3>阶段 1｜修复安全与制品一致性</h3>
+            <div class="phase-meta">1–2 周 · Trusted Alpha 门槛</div>
+            <ul>
+              <li><strong>已实施：</strong>验证 ConfigBundle 中的 Repo、MakeConf、路径、profile、arch、metadata 和所有规则，并限制请求/集合大小；服务端 catalog 已解析 repository/profile/image/mirror/resource ID 与完整 commit。</li>
+              <li><strong>已实施：</strong>每个 job 使用独立 workspace、PKGDIR 和 artifact staging。</li>
+              <li><strong>已实施：</strong>Docker builder backend、container runtime、Docker socket static builders 与 <code>build_mode=docker</code> 已删除；旧配置显式拒绝，不做静默回退。</li>
+              <li><strong>已实施：</strong>一次性 cloud builder 与 native remote builder 统一经过 collect → verify → publish。</li>
+              <li><strong>已实施：</strong>Native builder 默认 single-use、持久 taint/drain；Native PVE VM 禁止 warm reuse，发布后立即销毁。</li>
+              <li><strong>P0-B 已实施：</strong>builder 只产 unsigned GPKG；独立 outbound-pull signer 通过 PostgreSQL digest-bound queue 签名，签名后再次由 Portage 强制验签安装，server/builder 均不挂载私钥。</li>
+              <li>生产模式认证缺失时拒绝启动；收紧 Compose 和 deploy.sh 默认权限。</li>
+            </ul>
+            <div class="exit"><strong>退出标准：</strong>任何成功任务都存在可下载、可校验的制品；恶意 bundle 无法逃出 job root。</div>
+          </article>
+
+          <article class="phase">
+            <h3>阶段 1A｜Profile Registry 与 Image Factory</h3>
+            <div class="phase-meta">3–4 周 · 多 profile / 离线构建门槛</div>
+            <ul>
+              <li>以 Packer 烘焙 PVE 模板；Catalyst 生产可追踪的 stage/rootfs；Terraform 只负责按已发布模板 clone、运行和销毁。</li>
+              <li>建立自有 profile repository，继承 Gentoo 官方 profile；每个 profile 与 repo commit、Gentoo snapshot、模板 generation 绑定。</li>
+              <li>新增服务端 Profile Registry；请求只提交稳定 <code>profile_id</code>，不接受任意 profile 路径直接决定运行环境。</li>
+              <li>建立内网 mirror plane：repository snapshot、distfiles、stage/QCOW2、binpkg、IaC plugins 与 Go modules；支持联网同步区和严格 air-gap 导入包。</li>
+              <li>先支持 amd64/glibc/systemd 的 base 与 desktop 两条线，再按真实需求扩展 OpenRC、musl、no-multilib 和其他架构。</li>
+            </ul>
+            <div class="exit"><strong>退出标准：</strong>任意已发布 profile 都能只依赖已批准的内网对象重新烘焙，通过启动/Portage/build smoke，并由调度器选择匹配的不可变模板；禁用外网后不会发生隐式回源。</div>
+          </article>
+
+          <article class="phase">
+            <h3>阶段 2｜持久化任务控制面</h3>
+            <div class="phase-meta">3–4 周 · PostgreSQL 事实源 + 可降级 Redis 协调层</div>
+            <ul>
+              <li><strong>DB-4 / P0-A + P0-B 已实施：</strong>PostgreSQL schema v7 是 job、attempt、lease/fence、日志、infra cleanup lease、artifact、signing task、factory evidence、审计与 runtime setting 的唯一在线事实源；数据库模式不再读写 JSON job snapshot。</li>
+              <li><strong>DB-2 已实施：</strong>统一状态机使用 <code>FOR UPDATE SKIP LOCKED</code> 原子 claim、30 秒 lease、fencing、过期回收、cancel/retry 与终态发布校验。</li>
+              <li><strong>DB-2 已验证：</strong>两个 control-plane replica 并发处理 40 个任务，每个任务只有一个 attempt；多 worker contention、lease expiry、stale completion 与 retry exhaustion 均有真实 PostgreSQL 测试。</li>
+              <li><strong>DB-3 已实施：</strong>worker slot identity、infra ownership/remote-state pointer、artifact digest/lineage、factory run/step/evidence 均与 attempt/fence 绑定。</li>
+              <li><strong>CACHE-0 已实施：</strong>Redis 只承载 control-plane presence TTL、分布式限流、scheduler wake-up 与 SSE fan-out；PostgreSQL 轮询是断线降级路径，Redis 不保存 canonical 状态。</li>
+              <li><strong>DB-4 已实施：</strong>非敏感 cloud setting 在 PostgreSQL 中版本化并写审计事件；credential 只允许通过环境/secret provider 注入，WebUI 在数据库模式拒绝持久化 secret value。</li>
+            </ul>
+            <div class="exit"><strong>退出标准：</strong>两台 control-plane replica 能并发提交和 claim，server/Redis/builder 在任意阶段重启后任务可继续跟踪或安全重试，不超卖 slot、不产生重复 attempt 或重复发布；PostgreSQL 不可用时停止接收 mutation 和新 claim，Redis 不可用时仅实时 UI/缓存降级。</div>
+          </article>
+
+          <article class="phase">
+            <h3>阶段 2A｜项目矩阵、容量调度与运营 Monitor</h3>
+            <div class="phase-meta">2–3 周 · OBS 风格可见性与公平调度</div>
+            <ul>
+              <li>引入稳定的 <code>project_id</code> 与服务端解析的 <code>target_id</code>；target 由 desktop/base、systemd/OpenRC、architecture、libc、profile/image generation 等维度组成，不信任客户端任意标签。</li>
+              <li>调度先按 arch、profile/image、build mode、能力和安全策略做硬匹配，再按空闲 slot、CPU/内存/磁盘压力、clean image/cache locality、排队时长和项目公平性评分。</li>
+              <li>增加 global/provider、project、target 与 worker 四层并发/配额；把 VM provisioning 并发与实际 build slot 分开限流，避免云 API 抖动占满构建容量。</li>
+              <li>建设项目矩阵 Monitor：项目/目标状态、24h/7d/30d 成功率、队列深度与最老任务、阶段耗时、失败分类、worker 空闲槽位/负载/heartbeat age，以及 job → attempt → worker → artifact/evidence 下钻。</li>
+              <li>事件投影生成 Monitor read model；浏览器使用 SSE 接收增量并保留轮询降级。Prometheus 只使用低基数标签，job/package/revision 明细进入 PostgreSQL、结构化日志与 evidence store。</li>
+            </ul>
+            <div class="exit"><strong>退出标准：</strong>desktop/base × systemd/OpenRC 等已发布目标能在同一页面独立展示状态和成功率；空闲/繁忙/离线 worker、容量、queue age、调度/重试原因均可解释；压测中不超卖 slot，且小项目不会被长队列永久饿死。</div>
+          </article>
+
+          <article class="phase">
+            <h3>阶段 2B｜多 Worker 与分布式编译池</h3>
+            <div class="phase-meta">2–3 周 · job 并行 + MAKEOPTS + 可选 distcc</div>
+            <ul>
+              <li>明确三层并行预算：多个 job 在不同 builder 并行、单 job 的本地 <code>MAKEOPTS</code>、以及只承担编译任务的 distcc slots；三层都由 scheduler 原子预留，不能各自按 CPU 数独立超卖。</li>
+              <li>distcc pool 由服务端按 architecture、CHOST、compiler/version digest、toolchain image generation、CPU feature、network zone 与 tenant/project trust domain 严格分组；不匹配时必须 local fallback 或 blocked，绝不跨池静默执行。</li>
+              <li>编译节点不持有 Portage repository、PVE/PBS token、builder token、binpkg/signing key 或发布权限；<code>distccd</code> 仅监听隔离构建网段，并用 firewall/allowlist 限制到已租约 builder。</li>
+              <li>尊重 ebuild 的 distcc 限制，默认不启用 pump mode；先对 reviewed C/C++ 大包 allowlist 开启，小包以及 Rust/Go/Java、configure、link、test 仍在 job builder 本地运行。</li>
+              <li>记录 local/remote compile 数、命中率、fallback、网络字节、队列时间和失败原因；以纯本地 clean build 为基线做差异与安装/GUI 回归，distcc 失败不得污染 staging 或直接发布。</li>
+            </ul>
+            <div class="exit"><strong>退出标准：</strong>同一 locked profile/toolchain 下，2 个以上 job 可并行且单个 reviewed C/C++ workload 能安全借用 distcc pool；资源不超卖、断开任一 compile worker 可控降级、产物仍经过同一 staging/verify/promotion Gate，并保存 local-vs-distcc 对照证据。</div>
+          </article>
+
+          <article class="phase">
+            <h3>阶段 3｜可信制品与独立签名（P0-B 已完成核心闭环）</h3>
+            <div class="phase-meta">核心 Gate 已通过 · provenance/repository 分区仍待后续</div>
+            <ul>
+              <li><strong>已实施：</strong>制品先进入 job-private quarantine，以路径、大小和 SHA-256 绑定不可变 generation。</li>
+              <li>生成包含输入、环境、镜像 digest、依赖和制品 hash 的 manifest/provenance。</li>
+              <li><strong>已实施：</strong>签名前后各执行一次 native Portage 安装验证；通过后不可覆盖 promotion，再原子更新 Packages index。</li>
+              <li><strong>已实施：</strong>签名私钥移出 builder/server；无 HTTP listener 的独立 signer 以最小 PostgreSQL 角色主动领取任务，lease/fence 防止 stale completion。</li>
+              <li>按 architecture/profile/build mode 分离仓库，移除 amd64 硬编码。</li>
+            </ul>
+            <div class="exit"><strong>退出标准：</strong>攻陷 builder 不能直接发布或签署任意社区制品。</div>
+          </article>
+
+          <article class="phase">
+            <h3>阶段 4｜身份、多租户与隔离</h3>
+            <div class="phase-meta">2–3 周 · Public Beta 门槛</div>
+            <ul>
+              <li>OIDC 身份、RBAC、project/tenant、审计日志和管理员二次确认。</li>
+              <li>并发、CPU、内存、磁盘、制品大小、每日构建分钟和云预算配额。</li>
+              <li>一次性 VM/microVM 优先；容器启用 non-root、cap drop、seccomp、资源限额和网络 allowlist。</li>
+              <li>builder 使用短期 mTLS 身份，不再依赖全局共享 token。</li>
+            </ul>
+            <div class="exit"><strong>退出标准：</strong>普通用户不能修改 Infra/签名/WebShell，且任何任务都不能越过资源和网络策略。</div>
+          </article>
+
+          <article class="phase">
+            <h3>阶段 5｜生产运维与社区治理</h3>
+            <div class="phase-meta">1–2 周 · GA 准备</div>
+            <ul>
+              <li>拆分非 root 镜像，固定基础镜像 digest，生成 SBOM、checksum 和 provenance。</li>
+              <li>将阶段 2A 的低基数 scheduler/worker/project metrics 接入 Prometheus、结构化日志与 trace，建立 queue age、unschedulable、lease expiry、worker capacity、publish failure、projection lag 和云成本告警。</li>
+              <li>完成 PostgreSQL、artifact store、signer 的备份恢复演练。</li>
+              <li>补齐 SECURITY、GOVERNANCE、MAINTAINERS、CHANGELOG、OpenAPI 和兼容政策。</li>
+            </ul>
+            <div class="exit"><strong>退出标准：</strong>连续运行 30 天、完成恢复与安全演练、无未处理 P0/P1。</div>
+          </article>
+        </div>
+      </section>
+
+      <section id="state-platform">
+        <p class="eyebrow">02A · State Platform</p>
+        <h2>PostgreSQL 与 Redis：职责必须分开</h2>
+        <p class="lead">DB-4 / P0-A + P0-B 已完成在线状态切换：PostgreSQL schema v7 是控制面与 signing queue 的事实源，Redis 是可整体清空的加速层，进程内 map 仅作为可重建 projection。数据库模式不再读写 JSON job snapshot；旧 JSON 代码只保留给完全禁用数据库的单机兼容运行。制品字节与隔离区、Terraform workspace 必须挂载共享存储，由 PostgreSQL 保存 attempt/fence、cleanup/signing lease、remote-state pointer 与 digest-bound lineage。</p>
+
+        <div class="decision">
+          <div class="yes">
+            <h3>PostgreSQL 是必须项</h3>
+            <ul>
+              <li>作为 job、attempt、lease、artifact、infra lifecycle、catalog version 和 audit event 的唯一事实源。</li>
+              <li>依靠唯一约束、行锁、版本号和事务保证幂等、状态机与 slot reservation。</li>
+              <li>使用 transactional outbox 产生可重放事件，Monitor/read model 可以删除后重建。</li>
+              <li>控制面多副本共享同一状态，不再依赖某个进程内的 map 或 channel。</li>
+            </ul>
+          </div>
+          <div class="no">
+            <h3>Redis 不能成为事实源</h3>
+            <ul>
+              <li>不把 build queue、canonical lease、发布状态、审计或唯一日志放在 Redis。</li>
+              <li>不使用 Redis Pub/Sub 承诺可靠交付；断线消费者会丢失消息。</li>
+              <li>不使用无 fencing token 的分布式锁保护 VM、worker slot 或 artifact promotion。</li>
+              <li>Redis 故障必须可降级为 PostgreSQL 查询、轮询和本地保守限流。</li>
+            </ul>
+          </div>
+        </div>
+
+        <h3>当前状态问题与目标落点</h3>
+        <table>
+          <thead><tr><th>当前实现</th><th>问题</th><th>目标</th></tr></thead>
+          <tbody>
+            <tr><td><code>Manager.jobs</code> + 30 秒 <code>server_jobs.json</code> 全量快照</td><td>崩溃窗口；只有 BuildStatus，没有可可靠重放的 request/attempt/event；写入成本随历史增长。</td><td>PostgreSQL <code>build_jobs</code>、<code>build_attempts</code>、<code>job_events</code>；每次状态转换即时事务提交。</td></tr>
+            <tr><td>容量 100 的进程内 <code>workQueue</code></td><td>重启即丢；多 server replica 不能原子 claim；无法公平调度或持久 cancel。</td><td>PostgreSQL queue rows + <code>FOR UPDATE SKIP LOCKED</code>；LISTEN/NOTIFY 或 Redis 只负责唤醒，不保存任务事实。</td></tr>
+            <tr><td>内存 <code>Builder Registry</code> 与 heartbeat</td><td>server 重启丢 inventory；不能区分稳定 identity、瞬时 presence、desired drain 与历史。</td><td>PostgreSQL 保存 worker identity/capability/desired state；Redis TTL 保存低延迟 presence，数据库保存最后一次 durable snapshot。</td></tr>
+            <tr><td><code>instances.json</code> + 本地 Terraform workspace</td><td><strong>数据库模式已移除：</strong>旧形态无法让第二副本安全 cleanup。</td><td>schema v7 在 <code>terraform apply</code> 前登记 workspace，PostgreSQL 为 cleanup 单独发放 owner/fence/lease；两副本挂载同一受保护的 <code>DATA_DIR/terraform-workspaces</code>。单机禁用数据库时才保留 <code>instances.json</code> 兼容路径；后续可把 workspace 换成受保护 remote backend。</td></tr>
+            <tr><td><code>cloud-settings.json</code> 含 secret</td><td>配置、凭证和运行状态混在本地文件；多副本更新会分叉。</td><td>PostgreSQL 保存版本化非敏感设置和 secret reference；真实 token/password 进入 secret manager，数据库不保存明文。</td></tr>
+            <tr><td>binpkg、日志、截图、manifest 与 evidence 文件</td><td>大对象不适合数据库，但当前缺少统一 metadata、ownership、retention 和 reconciliation。</td><td>文件/NAS/PBS/对象存储继续保存 bytes；PostgreSQL 只保存 digest、size、media type、state、location、retention 和 lineage。</td></tr>
+          </tbody>
+        </table>
+
+        <h3>推荐数据平面</h3>
+        <div class="arch-scroll" role="img" aria-label="PostgreSQL 事实源、Redis 临时协调、对象存储和 worker lease 架构图">
+          <div class="arch-diagram">
+            <div class="arch-node public"><strong>API / CLI / WebUI</strong>idempotency key、project/target、查询与取消</div>
+            <div class="arch-arrow">→</div>
+            <div class="arch-node control"><strong>Control Plane Replicas</strong>短事务；optimistic version；readiness</div>
+            <div class="arch-arrow">↔</div>
+            <div class="arch-node trust"><strong>PostgreSQL — System of Record</strong>job、attempt、lease/fence、worker、artifact、infra、audit、outbox</div>
+
+            <div class="arch-node control"><strong>Durable Scheduler / Projector</strong>SKIP LOCKED claim、lease renew、outbox consume、read model</div>
+            <div class="arch-arrow">↔</div>
+            <div class="arch-node control"><strong>Redis — Ephemeral Accelerator</strong>presence TTL、rate limit、cache、SSE fan-out、invalidation</div>
+            <div class="arch-arrow">→</div>
+            <div class="arch-node public"><strong>Monitor API + SSE</strong>Redis 快路径；PostgreSQL snapshot/轮询降级</div>
+
+            <div class="arch-node untrusted"><strong>Native Build / Verify / GUI Workers</strong>pull lease、renew、complete；每次请求携带 fence</div>
+            <div class="arch-arrow">→</div>
+            <div class="arch-node control"><strong>Worker Gateway</strong>校验 identity、lease owner、attempt 与 fencing token</div>
+            <div class="arch-arrow">→</div>
+            <div class="arch-node trust"><strong>NAS / PBS / Object Store</strong>binpkg、日志、截图、Terraform state、manifest/evidence bytes</div>
+
+            <div class="arch-note"><strong>故障边界：</strong>PostgreSQL 不可用时 API readiness 失败、拒绝新 mutation/claim，正在执行的 worker 继续有限期续租或在本地保留 completion 结果并重试上报；Redis 不可用时不影响 canonical 调度和发布，presence 改读数据库 snapshot、SSE 退化为轮询、缓存 miss 直查 PostgreSQL。任何 Redis 数据都允许整体删除后重建。</div>
+          </div>
+        </div>
+
+        <h3>最小 PostgreSQL 模型</h3>
+        <pre><code>projects / targets / catalog_versions
+build_jobs(id, idempotency_key, project_id, target_id, spec_json, state, version)
+build_attempts(id, job_id, attempt_no, worker_id, stage, state, failure_class)
+job_events(id, job_id, attempt_id, event_type, payload_json, occurred_at)
+workers(id, identity, desired_state, capabilities_json, last_snapshot_at)
+worker_leases(id, attempt_id, worker_id, fence, expires_at, state)
+infra_instances(id, attempt_id, provider, external_id, generation, cleanup_state)
+artifacts(id, job_id, digest, size, media_type, state, location, lineage_json)
+factory_runs / factory_steps / evidence_refs
+runtime_settings(version, value_json, secret_refs_json)
+audit_events / outbox_events</code></pre>
+        <p>高频筛选字段使用普通列和索引；BuildSpec、capability snapshot、resolved catalog context 等版本化对象可先用 JSONB 保存，同时保留 digest。不要把所有业务都塞进一个 JSONB，也不要一开始过度拆成几十张只含两个字段的表。</p>
+
+        <h3>事务与租约规则</h3>
+        <ol>
+          <li><strong>提交：</strong><code>(project_id, idempotency_key)</code> 唯一；同 key 同 digest 返回原 job，不同 digest 返回 conflict。</li>
+          <li><strong>Claim：</strong>在短事务中筛选 eligible job、<code>FOR UPDATE SKIP LOCKED</code>、创建 attempt/lease、预留 slot、递增 fence 并写 outbox，然后提交；VM 创建和 HTTP 调用不得放在数据库事务内。</li>
+          <li><strong>状态转换：</strong><code>UPDATE ... WHERE id=? AND version=? AND state IN (...)</code>；影响行数为 0 表示 stale actor，禁止覆盖新状态。</li>
+          <li><strong>续租/完成：</strong>同时校验 attempt、worker、lease state、expiry 和 fence；旧 worker 即使恢复网络也不能完成或发布已重新分配的 attempt。</li>
+          <li><strong>制品发布：</strong>采用 prepare → external atomic move/CAS write → finalize 的 saga；每一步有幂等 operation ID 和 reconciliation。不要假装 PostgreSQL 事务能与 NAS/PBS 文件移动形成原子两阶段提交。</li>
+          <li><strong>事件：</strong>业务行与 outbox 同事务写入；projector 幂等消费。LISTEN/NOTIFY 或 Redis Pub/Sub 只发送“有新 outbox row”的提示，消费者始终能从 PostgreSQL cursor 补读。</li>
+        </ol>
+
+        <h3>Redis 的准入清单</h3>
+        <table>
+          <thead><tr><th>允许</th><th>不允许</th></tr></thead>
+          <tbody>
+            <tr><td><code>worker:presence:&lt;id&gt;</code> TTL、短期 health/pressure snapshot</td><td>唯一 worker identity、desired drain、canonical capacity/lease</td></tr>
+            <tr><td>API/project rate limit、短时 anti-burst、幂等结果缓存</td><td>唯一 idempotency record、配额账本、计费事实</td></tr>
+            <tr><td>Monitor query cache、catalog projection cache、cache invalidation</td><td>唯一 project/job/artifact read model</td></tr>
+            <tr><td>SSE/WebSocket fan-out、非关键通知、outbox wake-up</td><td>需要 replay/审计的唯一事件通道或任务队列</td></tr>
+            <tr><td>可选短保留 Redis Stream 作为传输加速层</td><td>用 Stream 替代 PostgreSQL outbox 和状态机</td></tr>
+          </tbody>
+        </table>
+
+        <h3>内网与离线部署建议</h3>
+        <ul>
+          <li>PostgreSQL data directory 放在本地可靠块存储/SSD 上，不直接把在线数据库目录放到 NAS NFS；base backup、WAL archive、逻辑导出和恢复证据可以进入 <code>10.31.0.2</code> NAS，并由 PBS 备份承载数据库 VM 的灾难恢复副本。</li>
+          <li>第一阶段只需要一套 PostgreSQL primary + 严格备份/PITR/恢复演练，不要为了“看起来 HA”立即引入复杂集群；多 control-plane replica 不等于数据库必须同时多主。</li>
+          <li>Redis 第一阶段可以单实例、无业务持久化承诺；重启或 flush 后由 PostgreSQL/outbox 重建 presence/cache。只有实测可用性目标要求时再增加 replica/Sentinel/Cluster。</li>
+          <li>PostgreSQL/Redis server、Go driver、migration binary 和容器/系统包都进入离线 input lock 与内网镜像；版本升级先在 restored backup 上执行 migration + rollback/forward 演练。</li>
+          <li>数据库 DSN、Redis credential、PVE/PBS token 和签名密钥由 secret provider 注入；配置表只记录 secret reference 和 rotation metadata。</li>
+        </ul>
+
+        <h3>迁移顺序与 Review Gate</h3>
+        <ol>
+          <li><strong>DB-0｜Storage Contract（Gate 通过，2026-07-26）：</strong>窄 Querier/显式 Tx、独立 migration CLI、角色分离、health/readiness、逻辑备份与隔离恢复。</li>
+          <li><strong>DB-1｜Job Ledger（Gate 通过，2026-07-26）：</strong>完整 BuildRequest/status digest、attempt/event/outbox、稳定幂等键与 reconcile，为调度切换提供双写观察窗口。</li>
+          <li><strong>DB-2｜Durable Scheduler（Gate 通过，2026-07-26）：</strong>PostgreSQL claim + lease/fence、cancel/retry、crash reclaim；双 replica 40-job 与 4-worker contention 均无重复 attempt/发布。</li>
+          <li><strong>DB-3｜Infra / Worker / Artifact（Gate 通过，2026-07-26）：</strong>worker slot、infra cleanup ownership、artifact digest/lineage、factory run/step/evidence reference 已与 attempt/fence 关联；外部字节不塞入数据库。</li>
+          <li><strong>CACHE-0｜Redis（Gate 通过，2026-07-26）：</strong>presence TTL、Lua token-bucket、scheduler wake、job-event SSE 已接入，连接失败全部 fail-open 到 PostgreSQL correctness path。</li>
+          <li><strong>DB-4｜Cutover（本地 Gate 通过，2026-07-26）：</strong>停止数据库模式下 JSON job 读写，日志和 runtime setting 进入 PostgreSQL；提供审计 JSON export、pgBackRest/WAL overlay、隔离恢复脚本、artifact digest 对账与 secret-reference-only 设置。生产侧只剩把 repository mount 指向 NAS、纳入 PBS/调度并保存周期性 restore 证据。</li>
+        </ol>
+
+        <h3>本地基础设施 Compose（已落地，2026-07-26）</h3>
+        <p>仓库根目录的 <code>docker-compose.yml</code> 提供可重复启动的 PostgreSQL authority、Redis ephemeral accelerator 与观测底座。server projection 每 5 秒从数据库重建，调度器使用稳定 control-plane/slot identity；PostgreSQL、ledger 或 artifact integrity 异常会让 readiness fail closed，Redis 不可用只影响 presence、限流精度和实时推送。<code>docker-compose.pgbackrest.yml</code> 是可选生产备份 overlay，repository 路径可以绑定到内网 NAS 的宿主机 NFS mount。</p>
+        <table>
+          <thead><tr><th>服务</th><th>固定镜像</th><th>默认宿主端口</th><th>当前验证边界</th></tr></thead>
+          <tbody>
+            <tr><td>Server / Dashboard / Migrate</td><td><code>golang:1.26.5</code></td><td><code>18080 / 18081</code></td><td>Go patch 基线包含 2026-07 安全修复；migration 是无端口 one-shot，server 不具备自动迁移路径；日志写共享 volume 后由 Collector tail。</td></tr>
+            <tr><td>PostgreSQL / Redis</td><td><code>postgres:18.4-alpine</code><br><code>redis:8.8.0-alpine</code></td><td><code>25432 / 26379</code></td><td>schema v7、DDL owner / 无 CREATE runtime role / signer / 只读监控身份分离；PostgreSQL 是唯一在线 job、infra-cleanup 与 signing-task authority，Redis 8.8 只做 presence、限流、wake-up 与 SSE。</td></tr>
+            <tr><td>Loki / Tempo</td><td><code>grafana/loki:3.7.2</code><br><code>grafana/tempo:2.10.5</code></td><td><code>23100 / 23200</code></td><td>本地单 binary、有限保留；接收 Collector 的 log/trace，不承担 evidence 长期归档。</td></tr>
+            <tr><td>OTel Collector</td><td><code>otel/opentelemetry-collector-contrib:0.153.0</code></td><td><code>24317 / 24318</code> OTLP<br><code>23133</code> health</td><td>file log、OTLP、PostgreSQL/Redis receiver；metrics → Prometheus、logs → Loki、traces → Tempo。</td></tr>
+            <tr><td>Prometheus / Grafana</td><td><code>prom/prometheus:v3.11.2</code><br><code>grafana/grafana:13.1.0</code></td><td><code>29090 / 23000</code></td><td>7 天本地 metrics、provisioned Prometheus/Loki/Tempo datasource 与现有 dashboard。</td></tr>
+          </tbody>
+        </table>
+        <ol>
+          <li>复制 <code>.env.compose.example</code> 为 <code>.env.compose</code>，先运行 <code>scripts/check-compose-ports.sh .env.compose</code>；端口冲突只修改该 env file，不改共享 Compose。</li>
+          <li>首次启动或拉取新 migration 后，先执行 <code>docker compose --env-file .env.compose run --rm portage-migrate</code>，再执行 <code>docker compose --env-file .env.compose up -d</code>。server 不会代替部署流程修改 schema。所有发布端口强制绑定 <code>127.0.0.1</code>。</li>
+          <li>运行 <code>scripts/verify-compose.sh .env.compose</code>；它验证全部 HTTP health、schema v7、PostgreSQL authority/lease/runtime metadata、Redis presence/SSE、角色权限、Prometheus targets、Grafana datasource，以及 OTLP log → Loki、OTLP trace → Tempo 的真实写入/查回。</li>
+          <li>需要双 control-plane 演练时叠加 <code>docker-compose.ha.yml</code>；secondary 使用独立 <code>CONTROL_PLANE_ID</code>/<code>18082</code>，但共享 PostgreSQL、Redis、binpkg/quarantine 与 Terraform workspace volume。生产环境可在两副本前放内网 HTTP load balancer；control-plane TLS 是部署策略，不是 correctness 前提。</li>
+          <li>本地默认密码只用于开发。进入共享内网或生产前必须由部署系统注入随机 secret，并且 PostgreSQL/Redis/Loki/Tempo/OTLP 不直接发布端口；仅受控 gateway/Grafana 按需开放。</li>
+          <li>PostgreSQL、Redis、Loki、Tempo、Prometheus、Grafana 与 server compatibility state/binpkg 使用独立 named volume；<code>docker compose down</code> 保留数据，带 <code>-v</code> 会删除本地状态，只能用于明确的重置。</li>
+          <li>离线部署时将这组精确镜像及 digest 同步到内网 registry，再覆盖 image registry；不能让隔离环境在启动阶段隐式拉取 <code>latest</code>。</li>
+        </ol>
+        <div class="arch-scroll" role="img" aria-label="本地 Compose 的指标、日志和链路采集架构">
+          <div class="arch">
+            <div class="arch-node public"><strong>Server / Dashboard</strong>Prometheus endpoint、共享 log files、未来 OTLP SDK</div>
+            <div class="arch-arrow">→</div>
+            <div class="arch-node control"><strong>OTel Collector</strong>OTLP + file log + PostgreSQL/Redis metrics receivers</div>
+            <div class="arch-arrow">→</div>
+            <div class="arch-node trust"><strong>Prometheus / Loki / Tempo</strong>metrics / logs / traces 三条独立 pipeline</div>
+
+            <div class="arch-node control"><strong>PostgreSQL / Redis</strong>本地持久卷；仅 loopback host mapping</div>
+            <div class="arch-arrow">→</div>
+            <div class="arch-node public"><strong>Grafana</strong>启动时 provision 三个 datasource 与 dashboard</div>
+            <div class="arch-arrow">→</div>
+            <div class="arch-node untrusted"><strong>Developer Browser</strong>只访问 127.0.0.1:23000 / 18081</div>
+
+            <div class="arch-note"><strong>状态边界：</strong>DB-4 / P0-A 已完成 PostgreSQL authority、durable claim/lease/fence、跨副本日志、runtime metadata、infra cleanup lease、跨副本 publication advisory lock、共享 quarantine capability 与 artifact reconciliation。数据库断开时拒绝 mutation/new claim/publish；Redis restart/flush 后由 presence heartbeat 与 PostgreSQL projection 重建。NAS 上可放 backup/WAL repository、artifact/quarantine 与 Terraform workspace，不把在线 PGDATA 放到 NFS。</div>
+          </div>
+        </div>
+        <div class="callout">
+          <strong>本机验收证据（2026-07-26）：</strong>在已有多套 PostgreSQL/Redis/Grafana/Loki 的开发机上，preflight 确认默认映射无冲突；7 个基础设施服务与 server/dashboard 全部启动。健康端点、PostgreSQL <code>portage_otel</code> + <code>pg_monitor</code>、Redis password、全部 Prometheus target、Grafana 三 datasource 与 dashboard 均通过；合成 OTLP log 可从 Loki 查回、合成 trace 可按 ID 从 Tempo 查回。PostgreSQL/Redis 写入临时探针后重启仍保留，Collector/Prometheus 自动恢复，清理探针后完整验收脚本再次通过。
+        </div>
+
+        <div class="callout">
+          <strong>DB-0～DB-1 验收证据（2026-07-26）：</strong><code>pgx/v5 v5.10.0</code>、<code>goose v3.27.3</code> 与 Go <code>1.26.5</code> 已锁定；隔离 schema 集成测试真实执行 migration、事务 rollback/commit 与 future-schema fail-closed。Compose 由 DDL owner 执行 one-shot migration，server 以无 schema CREATE 权限的 <code>portage_app</code> 连接。停 PostgreSQL 后 <code>/readyz</code>/<code>/health</code>=503、<code>/livez</code>=200，新 mutation 被拒绝；数据库恢复后 pool 自动 ready。该次历史逻辑 dump 已恢复到临时数据库并核验备份时的 schema v5 / 18 张表 / 73 条保留历史，验证库随后清理；当前运行 schema 已前进到 v6。
+        </div>
+
+        <div class="callout">
+          <strong>DB-2～DB-3 验收证据（2026-07-26）：</strong>真实 Compose 双 control-plane 对 40 条队列记录并发 claim，分配为 14/26 且每条只有一个 attempt；24-job/4-worker contention、lease expiry/reclaim、stale fence、cancel/retry 和 retry exhaustion 均通过。infra、artifact、factory status/evidence 的写入要求当前 attempt/fence；终态 cleanup 只能由原 owner 记录，旧执行器不能重写已发布制品。Monitor 可见 queued/running/lease/slot、infra cleanup、artifact/factory 统计和持久日志。
+        </div>
+
+        <div class="callout">
+          <strong>CACHE-0 与 DB-4 验收证据（2026-07-26）：</strong><code>go-redis/v9 v9.20.0</code> 接入带 namespace/TTL 的 presence、Lua token bucket、scheduler wake 与 job-event SSE；SSE 保留 PostgreSQL polling fallback。Redis 停机期间任务仍落库并形成唯一 attempt；重启 + <code>FLUSHDB</code> 后 PostgreSQL job 数不变、presence 自动重建，限流实测 30 burst 后返回 429。数据库模式已停止 JSON job 读写，schema v7 持久化 redacted log chunks、infra cleanup lease 与 signing task；审计 JSON export 已实际生成并校验。非敏感 cloud setting 版本化且每次更新写 audit，secret value 只能由部署环境注入。启动和每 5 分钟执行 artifact SHA-256/size 对账，missing/corrupt 会让 health/readiness 失败，orphaned 文件只做隔离观察而不会被静默发布。
+        </div>
+
+        <div class="callout success">
+          <strong>P0-A 多控制面本地与真实 PVE Gate 全部通过（2026-07-26）：</strong>schema v6 首先把 IaC cleanup 改成独立 PostgreSQL queue，P0-B 的 schema v7 在同一事实源加入 signing task；workspace 在 Terraform 产生任何云端副作用前登记，失租/终态 attempt 才能被 cleanup worker 领取，owner、递增 fence 与 35 分钟 lease 保证同一资源只有一个 destroy actor。Terraform destroy 成功后先提交数据库结果再删除 workspace，避免“VM 已销毁但 ack 前崩溃”丢失重试依据。quarantine capability 由共享目录中的限时 marker 激活，不再依赖进程 map；另一 control-plane replica 能读取同一 capability，撤销目录后所有副本立即 404，过期/中断目录有后台 GC。发布阶段在复核 attempt fence 后持有 PostgreSQL session advisory lock，binpkg location 变为 immutable；若进程在外部原子移动后、metadata finalize 前崩溃，artifact reconciliation 会按 digest 把 <code>staged</code> 修复为 <code>published</code>。
+          本地 Compose 使用两个 control-plane：同一 idempotency key 分别提交到两副本得到同一 job，数据库为 1 job / 1 attempt；主副本停止后 secondary 独立接单并形成唯一 claim。进一步让 crash replica 在 <code>forwarding</code> 中连接一个故意不返回的 builder 后强制退出，30 秒 lease 过期后 secondary 产生 fence 2 的第二 attempt；数据库最终为 attempt 1=<code>expired</code>、attempt 2=<code>failed</code>、active lease=0。schema v6/v7 migration、真实 PostgreSQL advisory-lock contention/cleanup-fence/signing-fence/reconciliation 集成测试、全量 <code>go test ./...</code>、<code>go vet ./...</code> 与 Compose telemetry 验收均通过。
+          真实 PVE 正常链路以 <code>app-misc/screenfetch-3.9.9</code> 完成 full clone、Native Gentoo 构建、跨副本 quarantine 下载、throwaway native root 安装验证、原子发布和 VM 销毁；现场同时修复了版本 atom 缺少 <code>=</code>、导致 emerge 在解析阶段拒绝请求的问题。故障链路在 Terraform clone 期间强制终止 owner：attempt 1 过期后 attempt 2 以 fence 2 接管并成功发布 <code>app-misc/figlet-2.2.5-r2</code>，只有一个 published artifact。演练还发现 Terraform provider 在异步 clone 写入 state 前崩溃时，空 state 的 <code>destroy</code> 会误报成功；修复后每个 workspace 在 apply 前写入不可由用户覆盖的精确 PVE resource manifest，cleanup 在 clone lock 解除后以 password+CSRF 或 API token 执行 provider-native DELETE，并在 PVE 确认资源消失前保持 <code>cleanup_claimed</code>。最终两个 attempt 对应的 VM 均不存在，artifact 文件 SHA-256/size 与 PostgreSQL metadata 一致，控制面 health 恢复 200；凭证仅通过本地 <code>0600</code>、版本控制忽略的 secret env 注入。
+        </div>
+
+        <div class="callout">
+          <strong>备份恢复证据（2026-07-26）：</strong>固定 pgBackRest 2.59.0 的 PostgreSQL 18.4 镜像从官方 release tarball + SHA-256 构建；加密 repository、async WAL archive、full/diff retention、stanza/backup/restore drill 与 Compose overlay 均已执行。34.4 MiB / 1396 文件的 full backup 压缩为 4.5 MiB，隔离容器恢复后核验备份时的 schema v5 与 73 条历史任务。随后在 full backup 之后写入审计 marker、记录目标时间、删除 marker 并切换 WAL；恢复到删除前的目标时间后 marker 数为 1，证明 PITR 而非仅解压 base backup。schema v7 上线后必须生成新的 full/diff backup 与恢复证据，并确认 signing task 历史与 signer role 权限同时恢复。生产部署把 <code>PORTAGE_PGBACKREST_REPO</code> 指向宿主机挂载的 <code>10.31.0.2</code> NFS 路径，并由 PBS 备份数据库 VM；NAS mount、备份调度和周期恢复证据是部署环境验收，不写死在应用仓库。
+        </div>
+
+        <div class="callout">
+          <strong>实现建议：</strong>Go 侧使用 SQL-first 的 repository 层、显式事务和 migration 工具，不在第一版引入重 ORM。先用 PostgreSQL 自身完成 durable queue/outbox；只有实际测得 projector/SSE/heartbeat 压力后才让 Redis 承担加速职责。PostgreSQL 官方明确指出 <code>SKIP LOCKED</code> 适合 queue-like 多消费者但会产生不一致视图，因此只用于 claim，不用于普通查询；Redis 官方明确说明 Pub/Sub 是 at-most-once，断线消息不会重放。
+        </div>
+
+        <h3>中间件与 Go 组件选型</h3>
+        <table>
+          <thead><tr><th>组件</th><th>决策</th><th>用途与边界</th></tr></thead>
+          <tbody>
+            <tr><td>PostgreSQL</td><td><strong>DB-0 必选</strong></td><td>唯一事实源与 durable queue；job/attempt/lease/fence/outbox/artifact/infra/audit。开发、测试和生产使用同一 PostgreSQL 语义，不以 SQLite 模拟并发锁。</td></tr>
+            <tr><td><code>pgx/v5</code> + <code>pgxpool</code></td><td><strong>DB-0 必选</strong></td><td>Go 原生 PostgreSQL driver/pool；使用 PostgreSQL-specific transaction、LISTEN/NOTIFY、COPY 和类型能力。Repository 接口依赖项目自有窄接口，不让 handler 直接持有 pool。</td></tr>
+            <tr><td><code>sqlc</code></td><td><strong>DB-0 推荐</strong></td><td>构建期从 reviewed SQL 生成类型安全 Go 方法；生成物可提交仓库并在 CI 执行 <code>sqlc generate</code> 后检查无 diff。它不是 runtime service，也不替代事务设计。</td></tr>
+            <tr><td><code>goose</code></td><td><strong>DB-0 推荐</strong></td><td>顺序 SQL schema migration。由独立 <code>portage-migrate</code> job/CLI 执行并持有 migration lock；普通 server replica 只检查兼容 schema version，不在每个实例启动时并发自动升级。</td></tr>
+            <tr><td><code>pgBackRest</code></td><td><strong>DB-0 运维必选</strong></td><td>PostgreSQL base backup、WAL archive、PITR 与 restore。repository 可落 NAS backup path；每个 migration release 必须在隔离 restore instance 上验证，不把“备份命令成功”当作恢复成功。</td></tr>
+            <tr><td>Redis</td><td><strong>CACHE-0 已接入</strong></td><td>presence TTL、rate limit、SSE fan-out/invalidation。单实例起步；所有 key 带 environment/version namespace 与 TTL，允许 flush 后重建。</td></tr>
+            <tr><td><code>go-redis</code></td><td><strong>v9.20.0 已锁定</strong></td><td>封装为可选 ephemeral client；连接错误不阻断 PostgreSQL 调度、状态转换或发布，实时 UI 保留轮询降级。</td></tr>
+            <tr><td>Prometheus + Grafana</td><td><strong>保留现有</strong></td><td>低基数 metrics、alert 和 dashboard；补充 DB pool、query latency、queue age、lease expiry、outbox lag、Redis hit/error 与 fallback，不把 job/package ID 放 label。</td></tr>
+            <tr><td><code>log/slog</code> JSON</td><td><strong>保留现有</strong></td><td>结构化日志统一 correlation keys：request/job/attempt/worker/operation ID。长日志分段进入 evidence store，数据库只保存摘要和 pointer。</td></tr>
+            <tr><td>Loki / Tempo / OpenTelemetry Collector</td><td><strong>本地底座已落地；OBS-0 接线</strong></td><td>Compose 已提供集中日志、OTLP 与 trace backend，并采集当前文件日志和 PostgreSQL/Redis metrics；Go SDK span、稳定 correlation schema、脱敏、告警和生产部署仍属于 OBS-0，不能因容器已运行而提前签收。</td></tr>
+            <tr><td>PgBouncer</td><td><strong>按压测启用</strong></td><td>pgxpool 与少量 replica 足够时不增加；只有连接预算或短连接部署成为瓶颈才引入 transaction pooling，并验证 session feature/LISTEN 使用独立直连。</td></tr>
+          </tbody>
+        </table>
+
+        <h3>现在明确不引入</h3>
+        <table>
+          <thead><tr><th>组件</th><th>暂不引入原因</th><th>重新评估条件</th></tr></thead>
+          <tbody>
+            <tr><td>RabbitMQ / Kafka / NATS</td><td>PostgreSQL queue + outbox 已覆盖当前 durable dispatch；再加 broker 会产生双事实源、跨系统确认和离线运维成本。</td><td>outbox/projector 吞吐经压测成为明确瓶颈，或出现多个独立消费者需要长周期 replay。</td></tr>
+            <tr><td>Temporal / 其他 workflow engine</td><td>当前 job state machine、resource scheduler、worker lease 与 artifact Gate 高度领域化；引入后仍要实现这些策略，并额外运维 workflow cluster。</td><td>补偿流程/人工审批/跨天等待大量增长，且团队愿意将 workflow history 作为新的核心运行面。</td></tr>
+            <tr><td>etcd / Consul</td><td>不需要第三套 KV/lock/service-discovery 事实源；worker 通过 gateway + PostgreSQL identity/lease 注册。</td><td>形成多个独立控制面、需要跨数据库强一致 membership，且 PostgreSQL 已被证明不适合该负载。</td></tr>
+            <tr><td>Elasticsearch / OpenSearch</td><td>第一阶段 job/filter/audit 由 PostgreSQL 索引，日志由 bounded evidence + 现有 dashboard 查看；搜索集群过重。</td><td>日志量、全文检索、长期聚合需求经过容量测量超过 PostgreSQL/Loki 边界。</td></tr>
+            <tr><td>MinIO / Ceph</td><td>现有 NAS/PBS 与 HTTP artifact path 可继续作为 bytes plane；先把 metadata/reconciliation 做对。</td><td>需要多副本 S3 API、跨站复制、object lock 或 NAS 成为吞吐/可用性瓶颈。</td></tr>
+            <tr><td>Vault</td><td>单站内网初期先使用部署系统注入的 secret file/credential 与严格 rotation；Vault 会增加初始化、unseal、HA 和恢复运维面。</td><td>需要动态短期数据库/PVE/cloud credential、集中租约撤销和可审计自动 rotation。</td></tr>
+          </tbody>
+        </table>
+
+        <h3>已落地的状态平台代码边界</h3>
+        <pre><code>cmd/migrate/                      # portage-migrate；独立命令，不和 API replica 抢升级
+internal/persistence/
+  database.go                     # pgxpool config、health、窄 Querier/Tx helper
+  jobs.go / scheduler.go          # durable job、SKIP LOCKED、lease/fence
+  runtime_metadata.go             # infra/artifact/factory metadata 与 reconcile
+  settings.go                     # versioned non-secret setting + audit
+internal/migrations/
+  runner.go                       # 只被 migration CLI 链接
+  sql/00001..00007                # goose 顺序 SQL；forward-first；v7 signing task
+internal/runtimecache/
+  redis.go                        # presence、Lua rate limit、wake 与 SSE
+internal/server/
+  artifact_reconcile.go           # 外部 binpkg bytes ↔ PostgreSQL digest
+tests/integration/
+  postgres/                       # 真 PostgreSQL：锁、crash、retry、migration
+  redis/                          # flush/restart/partition 降级</code></pre>
+
+        <div class="callout warning">
+          <strong>依赖策略：</strong><code>pgx/v5</code>、<code>goose</code> 与 <code>go-redis/v9</code> 已按里程碑加入并锁定；项目继续使用 reviewed SQL + 小型 repository adapter，不为 schema v7 额外引入重 ORM。所有 CLI/module/image 版本与 SHA-256 进入离线 input lock，CI 禁止隐式下载 <code>latest</code>。
+        </div>
+      </section>
+
+      <section id="scheduler-monitor">
+        <p class="eyebrow">02B · Scheduler &amp; Monitor</p>
+        <h2>调度、并发与 OBS 风格项目 Monitor</h2>
+        <p class="lead">仓库已经有并发队列、builder heartbeat、全局统计和 Build Nodes 页面，因此不是从零开始；但它们仍是可信内网 Alpha 的运行视图，不是 OBS 那种以项目/目标为中心、可解释调度、可长期统计的控制面。需要把“任务执行”“worker 注册”“项目状态投影”从当前进程内聚合中拆开。</p>
+
+        <div class="callout warning">
+          <strong>结论：</strong>当前能回答“现在大约有多少任务、配置的 builder 是否在线、load/capacity 是多少”，不能可靠回答“desktop × systemd 最近 7 天是否健康、OpenRC 为什么一直排队、哪个 worker 能接这个 target、成功率是否排除了重试/取消/重复远端记录”。阶段 2A 是正式补齐项，不应把现有 <code>/monitor</code> 当成已经完成。
+        </div>
+
+        <h3>现有实现盘点</h3>
+        <table>
+          <thead><tr><th>能力</th><th>仓库现状</th><th>边界 / 风险</th></tr></thead>
+          <tbody>
+            <tr><td>Server 并发</td><td><code>MAX_WORKERS</code> 启动固定 goroutine，消费容量 100 的内存 channel；job 以原子 <code>queued → claimed</code> 避免并发重复领取。</td><td>只有单进程并发，没有 durable lease、优先级、公平队列、按项目配额或水平扩展 scheduler。</td></tr>
+            <tr><td>Builder 并发</td><td>每个 builder 以 <code>BUILDER_WORKERS</code> 启动本地 worker pool，另有容量 100 的队列；状态接口返回 queued/building/completed/failed 和 CPU/内存/磁盘。</td><td>server 提交前不原子预留远端 slot；builder 满载时仍可能接收并排队，形成不可见的二级队列。</td></tr>
+            <tr><td>远端选择</td><td>Static builders 从配置列表 round-robin 起点开始尝试；PVE 的 VM placement 可按节点可用内存与 CPU 选择节点。</td><td>static dispatch 不使用 arch/profile/capability/实时负载；PVE 节点 placement 只解决 VM 放在哪个宿主机，不等于 build job 调度。</td></tr>
+            <tr><td>心跳与 worker 状态</td><td>builder 每 30 秒上报 capacity 和 active jobs；Registry 可按超时标记 offline；Dashboard Build Nodes 展示 status 与 load/capacity。</td><td>Dashboard 的 builders status 主要轮询配置中的 remote builders，未形成统一的静态/临时 worker inventory；heartbeat 不含 capability、资源压力、正在运行的 lease 和 drain 状态。</td></tr>
+            <tr><td>任务恢复</td><td>BuildStatus 可持久化，但没有保留可重新入队的完整 BuildRequest；server 重启后 queued/claimed/in-flight job 会被标记 failed。</td><td>不能续租、重放或阶段恢复；失败统计会混入“控制面重启”而不是构建本身失败。</td></tr>
+            <tr><td>Monitor 与统计</td><td>Overview 提供全局 active/queued/total/success rate；Builds 可下钻日志；Build Nodes 显示静态 builder 和云实例。</td><td>没有 project/target/time window/failure class；中央 job 与远端 builder 统计缺少 canonical attempt 去重；scheduler status 中还有固定 capacity/health 占位语义。</td></tr>
+            <tr><td>Metrics</td><td>已有 expvar 与 Prometheus text endpoint，覆盖全局 build、heartbeat、storage、HTTP、goroutine 等计数。</td><td>缺少 queue age、stage duration、lease、worker slots 和 project/target 维度；高基数任务明细与低基数时序指标尚未分层。</td></tr>
+          </tbody>
+        </table>
+
+        <h3>借鉴 OBS，但不复制 OBS 的全部复杂度</h3>
+        <p><a href="https://openbuildservice.org/help/manuals/obs-user-guide/cha-obs-concepts">OBS 的 project</a> 承载 repository、architecture 与调度参数；<a href="https://openbuildservice.org/help/manuals/obs-user-guide/cha-obs-build-scheduling-and-dispatching.html">scheduling 与 dispatching</a> 是两个概念；dispatcher 会把 job 分配给符合约束的空闲 worker，并按 project repository 的历史 build time 做公平共享。Portage Engine 当前规模不需要立即拆成 OBS 的多 daemon 后端，但数据边界应该从一开始兼容这三个原则：</p>
+        <ol>
+          <li><strong>Project 是运营与策略边界：</strong>例如 <code>base</code>、<code>desktop</code>、<code>experimental</code>；后续可绑定 owner、优先级、配额、保留期与发布策略。</li>
+          <li><strong>Target 是可构建矩阵单元：</strong>由服务端 catalog 解析为不可变 tuple，而不是让用户提交自由文本标签。例如 <code>desktop/amd64/systemd/glibc</code>、<code>base/amd64/openrc/glibc</code>。</li>
+          <li><strong>Attempt 才是一次实际执行：</strong>一个 job 可因 infra/transient failure 产生多个 attempt；成功率、worker 归属、耗时和成本按 attempt 记录，项目最终状态按 job/pipeline 聚合，避免重试和远端副本重复计数。</li>
+        </ol>
+
+        <pre><code>Project
+  project_id, display_name, owner, priority_weight, quotas, retention_policy
+
+Target  # server-resolved, versioned
+  target_id, project_id, arch, init, libc, desktop
+  profile_id, image_generation, build_mode, repository_set_digest
+
+Job / Pipeline
+  job_id, project_id, target_id, build_spec_digest, desired_state
+
+Attempt / Lease
+  attempt_id, job_id, stage, status, failure_class
+  worker_id, queued_at, leased_at, started_at, finished_at, lease_expires_at
+
+Worker Snapshot
+  worker_id, labels/capabilities, total_slots, used_slots, reserved_slots
+  cpu_pressure, memory_pressure, disk_pressure, heartbeat_at, drain_state</code></pre>
+
+        <div class="callout">
+          <strong>命名边界：</strong><code>project_id</code> 在阶段 2A 先表示构建产品/发布流，不等同于阶段 4 的安全 tenant。阶段 4 再增加 <code>tenant_id</code> 与 RBAC，并让一个 tenant 拥有多个 project，避免现在为了 monitor 过早耦合完整多租户模型。
+        </div>
+
+        <h3>目标控制面与 Monitor 架构</h3>
+        <div class="arch-scroll" role="img" aria-label="Portage Engine 项目目标、持久化调度、worker lease、事件投影和 Monitor 架构图">
+          <div class="arch-diagram">
+            <div class="arch-node public"><strong>CLI / Web / Automation</strong>提交 project + target ID，查询矩阵状态</div>
+            <div class="arch-arrow">→</div>
+            <div class="arch-node control"><strong>API + Project Policy</strong>解析 catalog、quota、priority 与 BuildSpec digest</div>
+            <div class="arch-arrow">→</div>
+            <div class="arch-node control"><strong>Durable Scheduler</strong>fair queue、硬约束过滤、软评分、retry policy</div>
+            <div class="arch-arrow">↔</div>
+            <div class="arch-node control"><strong>PostgreSQL + Outbox</strong>job、attempt、lease、event 与状态历史</div>
+
+            <div class="arch-node untrusted"><strong>Static / PVE / Cloud Workers</strong>build、verify、desktop 等独立 capability</div>
+            <div class="arch-arrow">→</div>
+            <div class="arch-node control"><strong>Outbound Worker Gateway</strong>短期 mTLS；pull/renew/complete lease</div>
+            <div class="arch-arrow">→</div>
+            <div class="arch-node control"><strong>Worker Registry</strong>slots、labels、pressure、heartbeat、drain</div>
+            <div class="arch-arrow">→</div>
+            <div class="arch-node control"><strong>Dispatcher</strong>原子预留 slot；记录选择与拒绝原因</div>
+
+            <div class="arch-node control"><strong>Job / Worker Events</strong>状态变更、容量、日志与 evidence pointer</div>
+            <div class="arch-arrow">→</div>
+            <div class="arch-node control"><strong>Projector</strong>幂等消费；构建项目/目标/worker read model</div>
+            <div class="arch-arrow">→</div>
+            <div class="arch-node public"><strong>Monitor API + SSE</strong>快照 + 增量；轮询降级；RBAC 过滤</div>
+            <div class="arch-arrow">→</div>
+            <div class="arch-node public"><strong>Dashboard / Alerts</strong>矩阵、队列、worker、SLO 与下钻</div>
+
+            <div class="arch-note"><strong>一致性边界：</strong>PostgreSQL job/attempt/lease 是调度事实源；Monitor read model 可以最终一致但必须显示数据新鲜度。Prometheus 保存低基数趋势与告警，结构化日志/evidence 保存 job 级明细；Dashboard 不再跨所有 builder 临时抓取并拼接“事实”。</div>
+          </div>
+        </div>
+
+        <h3>调度规则与并发预算</h3>
+        <table>
+          <thead><tr><th>层次</th><th>规则</th><th>Monitor 必须解释</th></tr></thead>
+          <tbody>
+            <tr><td>硬约束过滤</td><td>architecture、profile/image generation、build mode、worker capability、network zone、trusted verification/signing 边界必须匹配；不匹配绝不降级运行。</td><td>显示 blocked/unschedulable 及缺失 label/capability，不把它误报为普通 queued。</td></tr>
+            <tr><td>项目公平队列</td><td>以 weighted fair queue / deficit round robin 在 project/target 间分配机会；priority 只影响权重，queue age 提供反饥饿提升。</td><td>显示 effective priority、等待时间和配额占用，能解释为什么后提交的任务先运行。</td></tr>
+            <tr><td>worker 软评分</td><td>优先 available slots 多、资源压力低、已有目标 image/未使用 clean root/cache、失败率低的 worker；分数相同再稳定散列或轮询。</td><td>记录候选集、最终分数和 rejection reason；不把 CPU usage 当作唯一负载。</td></tr>
+            <tr><td>四层并发预算</td><td><code>global/provider → project → target → worker slots</code> 逐层原子预留；provision、build、verify/desktop、publish 各自有 semaphore。</td><td>显示每层 used/limit，区分“无 worker”“配额满”“provider provisioning 限流”。</td></tr>
+            <tr><td>lease 与 retry</td><td>worker 定期续租；过期 attempt 标记 lost，并按 failure class、stage idempotency 与 retry budget 决定重试或人工介入。</td><td>显示 attempt chain、lease expiry、retry reason；成功率同时提供 pipeline 与 attempt 两种口径。</td></tr>
+          </tbody>
+        </table>
+
+        <h3>Monitor 信息架构与统计口径</h3>
+        <div class="grid-2">
+          <article class="card">
+            <h3>Projects</h3>
+            <ul>
+              <li>行：project；列：target（desktop/base、systemd/OpenRC、arch 等可筛选）。</li>
+              <li>状态：healthy、building、queued、blocked、degraded、failed、stale、disabled。</li>
+              <li>指标：24h/7d/30d pipeline success rate、P50/P95 queue/build duration、最后成功与最后失败。</li>
+              <li>下钻：project → target → pipeline/job → attempt → worker → artifact/evidence。</li>
+            </ul>
+          </article>
+          <article class="card">
+            <h3>Workers &amp; Capacity</h3>
+            <ul>
+              <li>online/busy/draining/offline；free/used/reserved slots 与 heartbeat age。</li>
+              <li>arch/capability/image labels，当前 lease，CPU/内存/磁盘 pressure 和 cache/warm image。</li>
+              <li>最近成功率只作诊断信号，不直接永久惩罚少量样本的新 worker。</li>
+              <li>云实例同时显示 provider/node、provision age、TTL、成本归属和销毁状态。</li>
+            </ul>
+          </article>
+        </div>
+
+        <p>成功率默认分母只包含进入 terminal 的 pipeline：<code>succeeded / (succeeded + failed)</code>；canceled、superseded、policy-blocked、尚未完成不进入分母。另行展示 <code>infra_failure_rate</code>、<code>verification_failure_rate</code> 与 attempt success rate，避免把构建质量、基础设施故障和重试噪声混成一个百分比。时间窗口必须同时显示样本数，样本过少标记 <code>insufficient-data</code>。</p>
+
+        <h3>建议的低基数指标</h3>
+        <pre><code>pe_scheduler_queue_depth{project,target_class,state}
+pe_scheduler_queue_wait_seconds{project,target_class}          # histogram
+pe_attempts_total{project,target_class,result,failure_class}
+pe_stage_duration_seconds{stage,target_class,result}           # histogram
+pe_worker_slots{pool,arch,state}                                # total/used/reserved/free
+pe_worker_heartbeat_age_seconds{pool}
+pe_leases_total{result}                                        # granted/expired/revoked
+pe_project_quota_usage{project,resource}
+pe_monitor_projection_lag_seconds</code></pre>
+        <p><code>job_id</code>、package atom、repository commit、worker instance UUID 不进入 Prometheus label；它们通过 trace/log correlation ID 和 Monitor 明细 API 查询。这样既能按项目/目标告警，又不会制造不可控的时序基数。</p>
+
+        <h3 id="static-builder-isolation">Static Builder 环境洁净度与复用边界</h3>
+        <p class="lead">Static 只能表示“调度 agent 长期在线”，不能表示“同一个可写 Gentoo root 长期复用”。当前 Native 路径虽然已有 job-scoped <code>PORTAGE_CONFIGROOT</code>、<code>PKGDIR</code>、workspace 和 <code>--oneshot</code>，但 emerge 仍会 merge 到宿主 <code>/</code>，修改 VDB、已安装文件、preserved-libs、服务与任意 ebuild postinst 状态；<code>--oneshot</code> 只是不把 atom 写入 world。事后执行 <code>depclean</code>、恢复 world 或删除 <code>/var/tmp/portage</code> 都无法证明恢复到原始字节状态。</p>
+
+        <table>
+          <thead><tr><th>方案</th><th>洁净度</th><th>适用范围</th><th>决定</th></tr></thead>
+          <tbody>
+            <tr><td>宿主 Native emerge + depclean</td><td>不可证明；不能回滚 postinst、配置保护、VDB/preserved-libs 与宿主文件变化</td><td>仅人工 disposable 调试</td><td>生产拒绝</td></tr>
+            <tr><td><code>emerge --buildpkgonly</code></td><td>不 merge 目标包，但要求所有 build-time dependency 预先安装</td><td>固定 toolchain + reviewed bounded package set</td><td>可做优化，不作为通用隔离</td></tr>
+            <tr><td>stage4 + systemd-nspawn + OverlayFS</td><td>immutable lower + job-private upper；agent 不进入 build root</td><td>内网物理机、无需每包创建 VM</td><td>下一阶段推荐实现</td></tr>
+            <tr><td>PVE/QEMU clone 或 LVM/Btrfs snapshot</td><td>完整 root/内核边界；销毁或外部回滚可验证</td><td>Native Gentoo、较高风险 overlay/ebuild</td><td>reference production path</td></tr>
+          </tbody>
+        </table>
+
+        <div class="callout">
+          <strong>批量包语义：</strong>single-use 的单位是一个有边界的 BuildJob，不要求每个 atom 都单独拉一台 VM。同一个 job 可以在一次性 root 中构建已审核的 package set 及其依赖闭包，完成验证、收集后整体销毁；大 set 按 CPU、内存、磁盘、最长时限和最大产物数拆成多个 batch，每个 batch 使用新 root。禁止跨 project、profile、repository revision 或 policy digest 继续使用前一批的 writable root。
+        </div>
+
+        <div class="arch-scroll" role="img" aria-label="长期 static agent 为每个任务创建一次性构建 root，共享只读内容缓存，输出进入 quarantine">
+          <div class="arch-diagram">
+            <div class="arch-node control"><strong>Static Agent</strong>长期在线；lease/capacity/health；不运行宿主 emerge</div>
+            <div class="arch-arrow">→</div>
+            <div class="arch-node trust"><strong>Immutable Root Catalog</strong>profile + image + repo + toolchain digest</div>
+            <div class="arch-arrow">→</div>
+            <div class="arch-node untrusted"><strong>Disposable Native Job Root</strong>nspawn OverlayFS / LVM-Btrfs snapshot / VM clone；私有 VDB、/etc、tmp、home、PKGDIR</div>
+
+            <div class="arch-node public"><strong>Shared Read-only CAS</strong>签名 repo snapshot；SHA-256 distfiles；按 policy digest 分区 ccache</div>
+            <div class="arch-arrow">→</div>
+            <div class="arch-node untrusted"><strong>Job-private Output</strong>完整依赖闭包；无 public write；无 release key</div>
+            <div class="arch-arrow">→</div>
+            <div class="arch-node trust"><strong>Quarantine / Verify / Sign / Publish</strong>销毁 root 后仍可复验 evidence</div>
+
+            <div class="arch-note"><strong>Reset ownership：</strong>回滚必须由 build root 外部的 agent、PVE 或存储控制器执行。运行在脏 root 内的 builder 不能通过“删除 marker”自证清洁；marker 只是 fail-closed admission 状态，不是清理机制。</div>
+          </div>
+        </div>
+
+        <div class="callout success">
+          <strong>当前安全闭环（BUILD-0，2026-07-26）：</strong>平台只支持 Native Gentoo 构建，Docker builder backend、runtime、镜像选择和 warm reuse 路径已删除；旧 <code>USE_DOCKER=true</code> / <code>build_mode=docker</code> 会显式失败。Native 默认采用 <code>NATIVE_JOB_POLICY=single-use</code>：第一个 BuildJob 在入队前以 <code>O_EXCL</code> 原子创建 <code>DATA_DIR/native-builder-tainted.json</code>（<code>0600</code>）；后续提交返回 503，health/heartbeat 报告 <code>draining</code>、<code>accepting_builds=false</code> 与 <code>capacity=0</code>。控制面和 WebUI 将 draining 单独统计为“存活、等待回收”，不会误算成 offline。marker 在进程重启后仍生效，损坏、不可读或落盘失败也按 dirty 处理；builder 没有远程 clear API。PVE 调度不获取 warm instance，完整发布成功后立即 Terraform destroy。该闭环消除了跨 Job 静默复用，但长期 Native static pool 仍需下一阶段的外部 snapshot/root executor。</div>
+
+        <ol>
+          <li><strong>BUILD-0A｜已完成：</strong>Native-only + single-use durable taint/drain；PVE 禁止 warm reuse；Docker builder 产品与执行路径删除。</li>
+          <li><strong>BUILD-0B｜Static Root Executor：</strong>定义 <code>prepare → run → collect → destroy</code> driver，先实现 systemd-nspawn + immutable stage4/OverlayFS；destroy 失败自动 quarantine worker。</li>
+          <li><strong>BUILD-0C｜Cleanliness Evidence：</strong>记录 lower/root generation、upper layer ID、repo/toolchain/config digest、pre/post mount 与销毁 receipt；没有 destroy receipt 不得发布。</li>
+          <li><strong>BUILD-0D｜安全缓存：</strong>distfiles/repository 只读 CAS；ccache 以 arch/CHOST/compiler/profile/flags digest 分区并设 quota；VDB、<code>/etc/portage</code> 和 binpkg staging 永不跨 job 共享。</li>
+          <li><strong>BUILD-0E / P0-B｜已完成：</strong>build root 只产 unsigned GPKG；签名前安装验证通过后，隔离 signer 对 digest-bound generation 签名并自校验，随后执行强制签名安装验证，再不可覆盖地原子发布。</li>
+        </ol>
+
+        <h3 id="distributed-build">多 Worker、Portage 并行与 distcc 设计</h3>
+        <p class="lead">多 worker 要分成三个独立问题：多个 package job 的并行度、单个 job 在一台 builder 内的本地并行度、以及把 C/C++ 编译动作分发到 distcc pool。distcc 不是通用构建 worker，也不能替代 Portage、job workspace、链接、测试、签名或发布。</p>
+
+        <table>
+          <thead><tr><th>并行层</th><th>资源所有者</th><th>建议控制</th><th>主要风险</th></tr></thead>
+          <tbody>
+            <tr><td>Job-level</td><td>Durable scheduler + builder lease</td><td>按 project/target/worker slots 分配多个独立 BuildSpec；每个 job 独立 config root、workspace、PKGDIR 与 staging。</td><td>当前 legacy push-mode remote builder 仍可能形成不可见二级队列；P0-C 改成 worker 出站 pull 与原子 slot reservation。</td></tr>
+            <tr><td>Local emerge</td><td>Job builder</td><td>从租约 CPU/memory 推导 <code>MAKEOPTS=-jN</code> 与 Portage load average；不能直接使用宿主机全部 CPU。</td><td>多个 job 各自认为拥有全部 core，导致内存 OOM、I/O 抖动和 PVE 节点超卖。</td></tr>
+            <tr><td>distcc</td><td>独立 compile pool</td><td>scheduler 额外预留 compile slots，生成 job-scoped <code>DISTCC_HOSTS</code>；默认本地预处理、远端编译、本地链接。</td><td>编译器/CHOST 漂移、无认证 distccd 暴露、源码跨 trust domain、网络失败和不支持 distcc 的 ebuild。</td></tr>
+          </tbody>
+        </table>
+
+        <div class="arch-scroll" role="img" aria-label="多 job builder、distcc compile pool、staging verifier 和发布边界">
+          <div class="arch-diagram">
+            <div class="arch-node public"><strong>Build Jobs</strong>project + target + locked BuildSpec</div>
+            <div class="arch-arrow">→</div>
+            <div class="arch-node control"><strong>Scheduler</strong>预留 builder slot、local CPU/memory、distcc compile slots</div>
+            <div class="arch-arrow">→</div>
+            <div class="arch-node untrusted"><strong>Job Builders</strong>独立 workspace；Portage/emerge；本地 preprocess/link/test</div>
+
+            <div class="arch-node untrusted"><strong>distcc Pool</strong>仅 reviewed toolchain；无 repo、token、signing key、artifact write</div>
+            <div class="arch-arrow">↔</div>
+            <div class="arch-node control"><strong>Compile Lease Gateway</strong>pool match、allowlist、slot/TTL、撤销与用量事件</div>
+            <div class="arch-arrow">↔</div>
+            <div class="arch-node untrusted"><strong>Job-scoped DISTCC_HOSTS</strong>只连接同 arch/CHOST/compiler generation</div>
+
+            <div class="arch-node untrusted"><strong>Unsigned Output</strong>job-private PKGDIR</div>
+            <div class="arch-arrow">→</div>
+            <div class="arch-node trust"><strong>Staging + Verifier</strong>provenance、signature policy、安装/GUI 回归</div>
+            <div class="arch-arrow">→</div>
+            <div class="arch-node trust"><strong>Signer + Atomic Publish</strong>distcc 与 local build 使用完全相同的发布 Gate</div>
+
+            <div class="arch-note"><strong>信任边界：</strong>distcc 节点执行的是不可信编译工作，不因为它位于 compile pool 就成为 trusted signer。它的输出只能回到发起 job 的私有 workspace；任何 compile worker 被攻陷都不能直接改 Packages、读取长期凭证或跨 project 接收源码。</div>
+          </div>
+        </div>
+
+        <h3>distcc Pool 合约与 rollout</h3>
+        <pre><code>DistccPool
+  pool_id, arch, chost, compiler_id, compiler_digest
+  toolchain_image_generation, cpu_features, network_zone, trust_domain
+  total_slots, used_slots, max_jobs, heartbeat_at, drain_state
+
+CompileLease
+  lease_id, job_id, pool_id, requested_slots, granted_slots
+  issued_at, expires_at, allowed_builder_identity, fallback_policy
+
+BuildEvidence
+  distcc_enabled, pool_id, compiler_digest
+  local_compiles, remote_compiles, fallback_count, transferred_bytes
+  local_baseline_job, install_verify_result, output_digests</code></pre>
+        <ol>
+          <li><strong>BUILD-1A｜先把 job 并行做正确：</strong>durable queue、builder slot reservation、per-job CPU/memory/PKGDIR、全局与项目限额；不引入 distcc。</li>
+          <li><strong>BUILD-1B｜固定本地并行预算：</strong>以 1/2/4/8 core workload 测量 OOM、耗时和 I/O，生成受 catalog 管理的 resource class → <code>MAKEOPTS</code> 策略。</li>
+          <li><strong>BUILD-1C｜distcc canary：</strong>一个同构 amd64/GCC pool，只对 reviewed C/C++ package set 开启；禁止 pump，故障时回退本地并记录。</li>
+          <li><strong>BUILD-1D｜扩池与公平调度：</strong>增加 pool autoscale、drain、project compile quota 和源码 trust domain；异构 compiler/profile 必须建立独立 pool。</li>
+          <li><strong>BUILD-1E｜发布 Gate：</strong>定期对代表性包执行 local-only 与 distcc 两套 clean build，比较 provenance、ELF/ABI 与安装/GUI 结果；异常自动停用 pool，不自动放宽差异。</li>
+        </ol>
+
+        <div class="callout warning">
+          <strong>不建议一开始启用的能力：</strong>不要把 distccd 暴露到普通 LAN/公网，不要让 compile worker 挂载 repository、PKGDIR 或 GPG home，不要跨 compiler generation 混用 host，不要默认启用 pump mode，也不要宣称 distcc 能加速 Rust、Go、Java、链接或测试。第一阶段的价值是为少数大型 C/C++ 构建提供可解释的额外 CPU，而不是把所有 Portage job 都强行分布式化。
+        </div>
+      </section>
+
+      <section id="user-model">
+        <p class="eyebrow">03 · Users &amp; Delivery</p>
+        <h2>用户形态、emerge 位置与组件分发</h2>
+        <p class="lead">Portage Engine 不应该替代 Portage。普通用户的安装体验必须保持为原生 <code>emerge</code>；CLI 只补足“请求远端构建”这一项 Portage 原生没有的能力；builder 则属于 Infra 内部组件，不进入普通用户路径。</p>
+
+        <div class="callout">
+          <strong>核心决定：</strong>消费 binpkg 不要求安装 Portage Engine CLI，也不要求启用 Portage Engine overlay。用户只需建立一次 binhost 与信任根，然后继续使用标准 <code>emerge --getbinpkg</code>。远端构建必须是显式操作，第一阶段不要把“binpkg miss 自动触发社区构建”挂进 emerge。
+        </div>
+
+        <div class="grid-3">
+          <article class="card">
+            <span class="tag">CONSUMER</span>
+            <h3>普通 Gentoo 用户</h3>
+            <p>只消费已经发布的 binpkg。无需 API token、CLI 或 overlay；公网默认使用 HTTPS binhost；受控内网也可使用 HTTP，但必须强制验证可信 Packages/GPKG 签名。</p>
+            <pre><code>emerge --getbinpkg app-editors/foo
+# 强制只用已发布二进制包
+emerge --getbinpkgonly app-editors/foo</code></pre>
+          </article>
+          <article class="card">
+            <span class="tag">DEVELOPER</span>
+            <h3>包开发者 / 高级用户</h3>
+            <p>通过 CLI 或 Web UI 查看本机 build context，显式生成 BuildSpec、提交任务并观察验证结果；成功后仍然回到原生 emerge 安装。</p>
+            <pre><code>pe build plan app-editors/foo --from-system
+pe build submit --plan build.lock --wait
+emerge --getbinpkgonly app-editors/foo</code></pre>
+          </article>
+          <article class="card">
+            <span class="tag">OPERATOR</span>
+            <h3>社区 Infra 运维者</h3>
+            <p>部署 control plane、builder image、signer、artifact store 和策略。builder 的安装、升级与密钥管理不暴露给普通用户。</p>
+            <pre><code>pe-admin worker rollout --version 0.4.2
+pe-admin signer status
+pe-admin artifact promote &lt;digest&gt;</code></pre>
+          </article>
+        </div>
+
+        <h3>普通用户：一次配置，之后只使用 emerge</h3>
+        <div class="journey" aria-label="普通用户消费 binpkg 流程">
+          <div class="journey-step"><strong>1. Trust bootstrap</strong>通过独立渠道核对 release key fingerprint，并安装到 <code>/etc/portage/gnupg</code>。</div>
+          <div class="journey-step"><strong>2. Configure</strong>写入 <code>/etc/portage/binrepos.conf/portage-engine.conf</code>；公网使用 HTTPS，内网 HTTP 必须同时开启签名强校验。</div>
+          <div class="journey-step"><strong>3. Resolve</strong>Portage 按 profile、版本、ABI、USE 和依赖判断 binpkg 是否可用。</div>
+          <div class="journey-step"><strong>4. Download</strong><code>emerge --getbinpkg</code> 从只读发布域获取 Packages index 与 GPKG。</div>
+          <div class="journey-step"><strong>5. Verify &amp; merge</strong>Portage 验证可信 GPG 签名后安装；失败时拒绝制品。</div>
+        </div>
+        <div class="callout warning">
+          <strong>当前 CLI 需要补齐：</strong><code>portage-client configure</code> 目前只写 <code>binrepos.conf</code>。目标版 <code>pe setup</code> 还应把 key 导入 Portage 专用 keyring、显示并校验固定 fingerprint、默认使用 HTTPS；只有显式选择 trusted-LAN 模式且签名强校验探测成功时才接受 HTTP，并提供 <code>pe doctor</code>。不要使用 <code>curl | sudo sh</code> 作为社区默认安装方式。
+        </div>
+
+        <h3>开发者：emerge 出现在四个不同位置</h3>
+        <table>
+          <thead><tr><th>环节</th><th>执行位置</th><th>emerge 的职责</th><th>是否接触发布密钥</th></tr></thead>
+          <tbody>
+            <tr><td>本地计划</td><td>开发者机器</td><td><code>--pretend</code> / Portage API 解析 atom、profile、USE、依赖与 repo revision，形成可审查 BuildSpec</td><td>否</td></tr>
+            <tr><td>远端构建</td><td>短生命周期 Native Gentoo builder</td><td><code>emerge --buildpkg</code> 产生 GPKG；禁止直接写 public binhost</td><td>目标态为否</td></tr>
+            <tr><td>安装验证</td><td>干净 verifier VM</td><td>从 staging binhost 执行 <code>--getbinpkgonly</code>，验证真实可安装性</td><td>只持有公钥</td></tr>
+            <tr><td>用户安装</td><td>普通用户机器</td><td>从 release binhost 执行 <code>--getbinpkg</code> 或 <code>--getbinpkgonly</code></td><td>只持有公钥</td></tr>
+          </tbody>
+        </table>
+
+        <p>不建议第一阶段实现 emerge miss hook：一次普通 <code>emerge</code> 可能涉及完整依赖图、不同 USE 组合和许可证约束，自动远端提交会产生隐式费用、排队等待、配置外泄和构建风暴。更稳妥的 UX 是 <code>pe query</code> / <code>pe build plan</code> / <code>pe build submit</code> 三步显式流程；未来再增加可选的 <code>pe ensure</code>，也不要修改或包装系统 emerge。</p>
+
+        <h3>CLI 与 builder 要不要放进 overlay？</h3>
+        <table>
+          <thead><tr><th>组件</th><th>建议渠道</th><th>overlay 定位</th><th>结论</th></tr></thead>
+          <tbody>
+            <tr><td><strong>binpkg consumer</strong></td><td>原生 Portage 配置 + 签名 binhost（公网 HTTPS；受控内网可 HTTP）</td><td>完全不需要 overlay</td><td>保持零额外客户端依赖</td></tr>
+            <tr><td><strong>pe CLI</strong></td><td>版本化静态 binary、公开 overlay；成熟后争取 GURU/官方树</td><td><code>app-portage/portage-engine-cli</code>，提供 CLI、completion 和 man page</td><td>可以放公开 overlay，但它是可选安装渠道</td></tr>
+            <tr><td><strong>release keyring</strong></td><td>独立 HTTPS + 指纹核验；overlay 可额外提供 keyring package</td><td><code>sec-keys/openpgp-keys-portage-engine</code>，只包含公钥</td><td>不能把 overlay 自身当成唯一 trust bootstrap</td></tr>
+            <tr><td><strong>portage-builder</strong></td><td>控制面下发的固定版本 binary/image；可由私有 ops overlay 管理 Gentoo 服务</td><td><code>app-admin/portage-engine-builder</code>，只装 binary、用户、OpenRC/systemd unit 和 schema</td><td>可以有 ebuild，但不要作为临时 VM 的在线编译/更新机制</td></tr>
+            <tr><td><strong>server/dashboard</strong></td><td>OCI image 或版本化 release bundle</td><td>ops overlay 仅作为自托管 Gentoo 的附加渠道</td><td>与用户 overlay 解耦</td></tr>
+          </tbody>
+        </table>
+
+        <div class="grid-2">
+          <article class="card">
+            <h3>公开 overlay</h3>
+            <ul>
+              <li>建议单独仓库 <code>portage-engine-overlay</code>，只放 CLI、completion、man page 和公钥包。</li>
+              <li>ebuild 的 <code>SRC_URI</code> 必须指向不可变版本 release，Manifest 固定摘要；生产用户不安装 <code>9999</code>。</li>
+              <li>CI 运行 <code>pkgcheck</code>、Manifest 校验、安装测试和基本 CLI smoke。</li>
+              <li>签名 tag、保护分支、双人 review；overlay 中永远不存 API token、PVE 凭据或私钥。</li>
+            </ul>
+          </article>
+          <article class="card">
+            <h3>私有 ops overlay</h3>
+            <ul>
+              <li>面向固定 builder image 和自托管控制面，不进入普通用户文档。</li>
+              <li>builder ebuild 不内置 endpoint、token、signing key 或云凭据。</li>
+              <li>secret 通过 systemd credentials、Vault 或一次性 workload identity 注入。</li>
+              <li>安装后默认不监听公网、不自动接受任务；由控制面完成 enrollment。</li>
+            </ul>
+          </article>
+        </div>
+
+        <h3>面向社区的推荐安全架构</h3>
+        <div class="arch-scroll" role="img" aria-label="Portage Engine 用户、控制面、builder、验证、签名和 binhost 的安全架构图">
+          <div class="arch-diagram">
+            <div class="arch-node public"><strong>普通用户</strong>Portage + 公钥；无 API token</div>
+            <div class="arch-arrow">←</div>
+            <div class="arch-node public"><strong>Release Binhost / CDN</strong>只读 Packages index 与已发布 GPKG</div>
+            <div class="arch-arrow">←</div>
+            <div class="arch-node trust"><strong>Isolated Signer</strong>策略授权；release key 不进入 builder</div>
+            <div class="arch-arrow">←</div>
+            <div class="arch-node control"><strong>Promotion Controller</strong>核对 digest、provenance、install/GUI gate</div>
+
+            <div class="arch-node public"><strong>开发者 CLI / Web</strong>OIDC device flow；短期用户 token</div>
+            <div class="arch-arrow">→</div>
+            <div class="arch-node control"><strong>API + Policy</strong>schema、RBAC、quota、repo allowlist、审计</div>
+            <div class="arch-arrow">→</div>
+            <div class="arch-node control"><strong>Queue / Scheduler</strong>project/target 公平队列；不可变 BuildSpec 与 job identity</div>
+            <div class="arch-arrow">→</div>
+            <div class="arch-node untrusted"><strong>Ephemeral Builder</strong>主动 pull；无入站 9090；无 release key</div>
+
+            <div class="arch-node public"><strong>Infra Operator</strong>管理 policy、版本与 emergency revoke</div>
+            <div class="arch-arrow">→</div>
+            <div class="arch-node control"><strong>Control Plane</strong>worker enrollment、lease、状态机与审计</div>
+            <div class="arch-arrow">→</div>
+            <div class="arch-node untrusted"><strong>Staging / Quarantine</strong>按 digest 写入；builder 不能 promote</div>
+            <div class="arch-arrow">→</div>
+            <div class="arch-node control"><strong>Verifier + Desktop E2E</strong>干净 VM 只读拉取 staging；输出证据</div>
+
+            <div class="arch-note"><strong>信任边界：</strong>builder、用户提交的 ConfigBundle、第三方 overlay/ebuild 和构建产物都视为不可信；只有 policy engine、promotion controller 和隔离 signer 位于高信任域。所有跨域对象以 canonical digest 绑定。</div>
+          </div>
+        </div>
+
+        <h3>当前仓库到目标架构的 P0 差距</h3>
+        <table>
+          <thead><tr><th>当前实现</th><th>风险</th><th>目标改造</th></tr></thead>
+          <tbody>
+            <tr><td>builder 对外提供 HTTP build/job/artifact API，并依赖共享 <code>BUILDER_TOKEN</code></td><td>一个 worker/token 泄露可横向影响全部 builder；需要开放入站端口</td><td>改为 builder 主动向 control plane 建立 mTLS 流并 pull lease；每个 worker 使用短期身份</td></tr>
+            <tr><td>server 通过 SSH/SCP 下发 builder binary，未绑定 release digest/provenance</td><td>部署物版本与构建来源难以审计</td><td>版本化 manifest + SHA-256/签名验证；VM 只接收调度器批准的精确 digest</td></tr>
+            <tr><td><strong>P0-B 已实施：</strong>builder/server 无签名私钥；独立 signer 无 HTTP listener，只主动领取 PostgreSQL digest-bound signing task；自动 bootstrap key 以 signer-volume 内 active-key marker 固定并在重启时复用</td><td>在线 release subkey 仍需轮换、撤销、备份恢复和双人运维流程；signer 与 artifact storage 的部署级网络/主机隔离仍需生产加固</td><td>生产显式配置 <code>GPG_KEY_ID</code> 并关闭 auto-create；外部 secret/HSM/KMS 适配、key rotation ceremony、恢复演练与 signer egress deny；保持 server 只读公钥、builder job-local 公钥 trust store</td></tr>
+            <tr><td><strong>SEC-0A + SEC-0B/A 已实施：</strong>ConfigBundle 全字段语义校验；请求只提交服务端 profile/repository/resource ID；server 覆盖客户端 repo URL；builder 在 emerge 前核对 Git commit</td><td>builder egress 尚未在网络层只开放批准源；共享 builder token 边界仍未收敛</td><td><strong>SEC-0B/B：</strong>按 resolved catalog 生成 egress policy；随后进入 outbound pull mTLS worker</td></tr>
+            <tr><td>普通 API 使用全局 API key；缺少用户、项目、配额与审批语义</td><td>无法安全开放社区多租户</td><td>OIDC、RBAC、per-project quota、并发/CPU/磁盘限制、审计和 abuse control</td></tr>
+            <tr><td>Dashboard 只有全局成功率和配置内 builder 的 Build Nodes 视图；调度状态含占位 capacity/health</td><td>不能按 desktop/base、systemd/OpenRC 等目标判断健康，也无法解释排队、重试和 worker 选择</td><td>阶段 2A：project/target/attempt 数据模型、durable lease、worker registry、事件投影和 OBS 风格 Monitor</td></tr>
+            <tr><td><code>configure</code> 不负责 Portage keyring 与 fingerprint 验证</td><td>用户容易把 key 导入错误 keyring，或通过同一受攻击通道获取配置和 key</td><td><code>pe setup</code> + 独立 trust bootstrap + key rotation/revoke 文档</td></tr>
+          </tbody>
+        </table>
+
+        <h3>建议增加的交付里程碑</h3>
+        <ol>
+          <li><strong>UX-0：</strong>保留现有 <code>portage-client</code> 兼容入口，设计面向用户的 <code>pe setup/query/build/doctor</code> 命令与稳定 BuildSpec。</li>
+          <li><strong>UX-1：</strong>发布签名的多架构 CLI release 和公开 overlay；普通用户文档只出现 setup + emerge。</li>
+          <li><strong>SEC-0A（已实施）：</strong>ConfigBundle 全字段 validation/limit/allowlist、HTTP body limit 和严格 JSON decode。</li>
+          <li><strong>SEC-0B/A（已实施）：</strong>用户 repo/profile 改为服务端 registry ID；resolved context 记录 image/mirror/repo provenance；Git commit 在 builder 执行前校验。</li>
+          <li><strong>SEC-0B/B（下一安全步）：</strong>用 resolved registry 生成 builder egress allowlist，并拒绝任何公网 fallback。</li>
+          <li><strong>SEC-1：</strong>builder 改为 outbound pull + per-worker mTLS identity；删除公网/跨网段入站 9090 依赖。</li>
+          <li><strong>SEC-2 / P0-B（核心数据流已实施）：</strong>unsigned staging、两次 verification、isolated signing、immutable promotion 和 release binhost 已按 digest/fence 分域；生产部署仍需补 signer 主机/网络隔离、key rotation 与恢复演练。</li>
+        </ol>
+      </section>
+
+      <section id="profile-images">
+        <p class="eyebrow">04 · Profile &amp; Image Factory</p>
+        <h2>不同 profile 的模板应该怎样构建</h2>
+        <p class="lead">推荐建设两条收敛到同一 image manifest 的入口：<strong>Packer 快速通道</strong>从已验证 QCOW2/PVE seed 烘焙模板；<strong>Catalyst 可追踪通道</strong>从固定 stage、repository snapshot 与 profile 生产 rootfs，再交给磁盘组装/Packer 生成 PVE 模板。Terraform 只负责运行期实例。两条通道都必须能够只访问内网镜像运行。</p>
+
+        <div class="success callout">
+          <strong>IMG-0/1/2/3/4 与真实 GUI 现场链路已落地：</strong>CLI/API 可提交 <code>profile_id</code>、repository ID 与 resource class；server 从严格 catalog 解析 profile、provider、build mode、image generation、PVE template、MirrorBundle、固定 repository revision、profile repository 与 parent chain，并把完整 <code>resolved_context</code> 记录到 job。旧 <code>-profile</code> 只作兼容映射，不能覆盖模板。Packer/template gate、Catalyst → rootfs → QCOW2 → PVE seed、外部 profile、g6 base 与 desktop-g6 的 clean-cache/egress-deny Gate 均已完成；双镜像已通过真实 PVE GUI E2E，并完成 promotion → rollback → re-promotion，当前 stable alias 为 revision 4。
+        </div>
+
+        <h3>工具边界</h3>
+        <table>
+          <thead><tr><th>工具</th><th>负责什么</th><th>不负责什么</th><th>采用时机</th></tr></thead>
+          <tbody>
+            <tr><td><strong>Packer</strong></td><td>消费已批准的 QCOW2/PVE seed 或 Catalyst rootfs 组装盘，安装运行依赖，执行清理/测试，生成 PVE template</td><td>不生产 Gentoo repository snapshot，不调度日常构建 VM，也不自动回收旧 template</td><td><strong>现在采用</strong>，作为模板烘焙与 PVE 适配层</td></tr>
+            <tr><td><strong>Terraform</strong></td><td>按 registry 已解析出的 template generation clone VM，设置资源/网络/cloud-init，并管理 job 生命周期</td><td>不在每个 job 内同步 world 或切 profile，不生产 golden image</td><td>保留现有已验证路径，但输入改为解析后的 template ID</td></tr>
+            <tr><td><strong>Catalyst</strong></td><td>从固定 seed、repository snapshot、profile/spec、distfiles 与版本化 package sets 生成 stage/rootfs</td><td>不直接管理 PVE，也不自动保证逐字节可复现</td><td><strong>IMG-2 控制链已实现</strong>；完成现场 Gate 后成为 amd64/systemd 正式输入</td></tr>
+          </tbody>
+        </table>
+
+        <div class="flow" aria-label="Profile 镜像发布流程">
+          <div class="flow-step"><strong>1. Sync</strong>联网同步区抓取、验签、生成 content manifest</div>
+          <div class="flow-step"><strong>2. Import</strong>批准对象进入内网 mirror/CAS；air-gap 使用签名传输包</div>
+          <div class="flow-step"><strong>3. Resolve</strong>固定 seed、Gentoo/profile commit、spec 与所有依赖 digest</div>
+          <div class="flow-step"><strong>4. Rootfs</strong>Catalyst 生产 stage/rootfs，或选用已批准 QCOW2 seed</div>
+          <div class="flow-step"><strong>5. Bake</strong>Packer 组装/烘焙、sanitize，并发布 candidate PVE template</div>
+          <div class="flow-step"><strong>6. Test</strong>无外网启动、profile、depgraph、构建/安装 smoke</div>
+          <div class="flow-step"><strong>7. Promote</strong>签署 manifest，stable alias 原子切换</div>
+        </div>
+
+        <h3>Catalyst 在这里具体负责什么</h3>
+        <div class="grid-2">
+          <article class="card">
+            <h3>输入与构建</h3>
+            <ul>
+              <li>同步区先解析并验签 Gentoo <code>stable</code> branch commit；runner 从锁定 bundle 创建 <code>gentoo.git</code>，让 <code>master</code> 与 plan 命名的本地 snapshot ref 都指向该 commit；禁用会触发远端更新的特殊 treeish <code>stable</code>，完整 commit 另行写入 manifest。</li>
+              <li><code>repo_openpgp_key_path</code> 固定 Gentoo Git commit 签名公钥；stage3 DIGESTS 使用独立的 Gentoo release keyring，自有 profile repository 再使用第三个独立信任根。三者均为不同 lock object，不允许相互替代。</li>
+              <li>spec 固定 <code>target</code>、<code>subarch</code>、<code>profile</code>、<code>snapshot_treeish</code>、<code>source_subpath</code>、<code>portage_confdir</code> 和 repositories。</li>
+              <li><code>distdir</code> 与 seed 由锁定的内网对象提供；首个 PoC 禁用 <code>seedcache/pkgcache</code>，Catalyst 两步均在无网络 namespace 中运行。</li>
+            </ul>
+          </article>
+          <article class="card">
+            <h3>输出与 PVE 交接</h3>
+            <ul>
+              <li>首个目标是 profile 对应的 stage4/rootfs tarball，而不是让 Catalyst 直接调用 PVE API。</li>
+              <li>磁盘组装步骤创建 GPT/UEFI、文件系统，解包 rootfs，安装 bootloader/kernel/cloud-init/qemu-agent，输出 QCOW2。</li>
+              <li>Packer/QEMU 校验 QCOW2 后导入 PVE；或由 Packer 在 PVE seed 上做最后一层 provision/sanitize/template 转换。</li>
+              <li>Catalyst spec、config、fsscript、root overlay、seed、snapshot 和输出摘要全部进入 image manifest。</li>
+            </ul>
+          </article>
+        </div>
+
+        <pre aria-label="Catalyst 离线配置示例"><code># catalyst.conf（示意；路径均来自内网 mirror volume）
+storedir = "/var/lib/catalyst"
+compression_mode = "xz"
+distdir = "/srv/mirror/gentoo/distfiles"
+repos_storedir = "/srv/mirror/git"
+repo_name = "gentoo"
+repo_openpgp_key_path = "/etc/portage/gnupg/gentoo-repository.asc"
+target_distdir = "/var/cache/distfiles"
+digests = ["sha256", "sha512"]
+options = ["bindist", "sticky-config", "versioned_cache"]
+envscript = "/etc/catalyst/offline.env"
+
+# profile spec（示意）
+target: stage4
+subarch: amd64
+profile: default/linux/amd64/23.0/systemd
+snapshot_treeish: pe-2026-07-22
+source_subpath: default/stage3-amd64-systemd-&lt;version&gt;
+portage_confdir: /etc/portage-engine/catalyst/portage
+keep_repos: gentoo
+stage4/use: grub_platforms_efi-64</code></pre>
+
+        <div class="callout success">
+          <strong>IMG-2 实现说明（2026-07-22）：</strong><code>image-factory/catalyst/</code> 已包含严格 plan/lock 示例、限制路径与特殊文件的 runtime 解包、仅从锁定 Python site-packages 加载 Catalyst 的自检、stage3 DIGESTS 与 Git commit 验签、内网 distfile closure hydration、自动生成并复验摘要的 config/spec/env/fsscript/root overlay、<code>pe/catalyst-boot-v1</code> 公共包组、失败 workdir 保留、rootfs manifest、GPT/UEFI QCOW2 组装以及拒绝覆盖既有 VMID 的 PVE seed 导入。导入脚本按 PVE 实际 <code>unusedN</code> volume 绑定磁盘，用 QCOW2-manifest 文件摘要写 provenance，固定 <code>ciupgrade=0</code>、<code>ciuser=root</code> 与 <code>ipconfig0=ip=dhcp</code>，并在尚无 shim/GRUB/kernel 签名链时明确设置 <code>pre-enrolled-keys=0</code>；source-check 会在克隆前复验这些字段，避免 PVE 只生成 DNS 而没有 NIC/DHCP 的 NoCloud 网络文档。后续通过 <code>IMAGE_FACTORY_PLAN=.../base-systemd.catalyst.build.json</code> 复用原 Packer/Terraform Gate。
+        </div>
+
+        <div class="callout">
+          <strong>现场签收起点（历史记录）：</strong>一次性 Gentoo/PVE worker 构建并锁定 Catalyst 4.1.1-r1 + Python 3.14 runtime、验签官方 stage3、生成真实 package closure，并以签名的 18-object bundle 在无网络 namespace 中启动 external-profile stage4。该阶段当时尚未产出 rootfs；后续结果与修复记录见下方 r13 和 successor seed Gate。
+        </div>
+
+        <div class="callout success">
+          <strong>IMG-3 Catalyst spike 已完成：</strong>对固定版本 Catalyst 4.1.1 的实现核对表明，<code>profile</code> 支持 <code>repository:profile</code>，<code>repos</code> 可导入额外 repository。新增 <code>catalyst-profile-systemd</code> target 会从 lock 取得自有 profile bundle 与独立公钥，验签完整 commit，核对 <code>profiles/repo_name</code>、选中目录和逐行 parent chain，再进入断网 Catalyst。Packer 通道也会独立重复 bundle、签名、repository identity、parent 与 <code>make.profile</code> 检查，然后完整 reconcile <code>@world</code>；两条通道都不会修改已验签的 Gentoo snapshot 冒充上游。</div>
+
+        <div class="callout warning">
+          <strong>关于“可复现”：</strong>第一阶段承诺的是相同 seed/spec/profile/repository/distfiles/toolchain 能够重新构建并得到功能等价、可审计的镜像，不承诺 QCOW2 或所有包逐字节一致。时间戳、压缩、编译器与非确定性构建需要单独的 reproducible-build 工作流验证。
+        </div>
+
+        <h3>内网镜像与严格 air-gap</h3>
+        <p>需要区分两种部署：<strong>mirror-backed offline</strong> 的构建区没有公网出口，但能访问内网镜像；<strong>strict air-gap</strong> 连同步网关也不可达，只能导入经过审批的签名 content bundle。两种模式使用同一 manifest。受控内网可使用 HTTP 数据面，但绝不能变成“裸传输”：host 必须在 lock allowlist，URI 不得携带凭证/查询参数，重定向关闭，对象仍按固定大小、SHA-256、上游 Manifest 或签名验证。项目自有的 server/dashboard 与 Desktop adapter 可在隔离可信 LAN 上先用 HTTP 走通，adapter 必须显式开启 <code>-allow-http-control-plane</code>，URL 仍禁止 credentials/query/fragment/path 与 redirect；此时 bearer/API token 在链路上是明文，只能作为 bring-up 模式。跨不可信网络前再升级为 HTTPS、VPN、mTLS 或 WireGuard/IPsec。PVE/PBS 继续复用产品自带的 HTTPS API，不需要为 Portage Engine 另签一套证书；现有 NAS 上传 API 的 HTTP + session password 仍是 trusted-alpha 风险例外，不能因为下载对象有摘要就认为登录凭证也安全。</p>
+        <table>
+          <thead><tr><th>内网对象</th><th>服务形式</th><th>固定与验证方式</th><th>缺失时行为</th></tr></thead>
+          <tbody>
+            <tr><td>Gentoo / profile repositories</td><td>内部 Git mirror + Catalyst SQFS snapshot</td><td>commit ID、签名、snapshot digest、parent chain</td><td>拒绝构建，不回退公网 sync</td></tr>
+            <tr><td>distfiles</td><td>只读 HTTP/NFS/object CAS</td><td>Manifest 摘要 + content digest；构建前计算 fetch closure</td><td>返回 missing-object report；<code>RESTRICT=fetch/mirror</code> 进入人工流程</td></tr>
+            <tr><td>stage / QCOW2 / Catalyst seeds</td><td>版本化对象仓库</td><td>上游签名、SHA-256、导入批次与来源</td><td>禁止自动选择“最新可用”替代品</td></tr>
+            <tr><td>bootstrap / release binpkg</td><td>独立只读 binhost</td><td>Packages/GPKG 签名、profile/ABI channel</td><td>源码构建或显式失败；不可跨 profile 借包</td></tr>
+            <tr><td>Packer / Terraform</td><td>工具仓库 + plugin/provider mirror</td><td>版本锁、SHA256SUM、Terraform lock file</td><td><code>init</code> 失败；不启用 direct fallback</td></tr>
+            <tr><td>Go modules / OCI images</td><td>GOPROXY + 内部 OCI registry</td><td><code>go.sum</code>、镜像 digest、SBOM</td><td><code>GOPROXY=https://go.internal,off</code> / registry deny，禁止直连源码站</td></tr>
+            <tr><td>信任与时效元数据</td><td>内部 CA、GPG keyring、撤销/安全公告 bundle、NTP</td><td>双人审批、导入日志、有效期和 freshness SLO</td><td>过期超过策略阈值时停止 promotion</td></tr>
+          </tbody>
+        </table>
+
+        <div class="arch-scroll" role="img" aria-label="联网同步区、严格离线内网镜像、Catalyst、Packer 与 PVE 模板目录架构图">
+          <div class="arch-diagram">
+            <div class="arch-node untrusted"><strong>Upstream Internet</strong>Gentoo Git/distfiles/stage；HashiCorp/Go/OCI</div>
+            <div class="arch-arrow">→</div>
+            <div class="arch-node control"><strong>Sync Gateway</strong>allowlist fetch、验签、SBOM、missing/license report</div>
+            <div class="arch-arrow">→</div>
+            <div class="arch-node trust"><strong>Approval + Export</strong>签名 content bundle；双人审批</div>
+            <div class="arch-arrow">⇢</div>
+            <div class="arch-node trust"><strong>Air-gap Import</strong>校验 bundle/介质/批次；不可变入库</div>
+
+            <div class="arch-node public"><strong>Internal Git/Snapshot</strong>Gentoo + profile commits；Catalyst SQFS</div>
+            <div class="arch-arrow">+</div>
+            <div class="arch-node public"><strong>Internal Object Plane</strong>distfiles、stage/QCOW2、binpkg、plugins、modules</div>
+            <div class="arch-arrow">→</div>
+            <div class="arch-node control"><strong>Catalyst Worker</strong>无公网；固定 spec/seed/snapshot → rootfs</div>
+            <div class="arch-arrow">→</div>
+            <div class="arch-node control"><strong>Packer Worker</strong>磁盘组装、provision、sanitize、boot test</div>
+
+            <div class="arch-node public"><strong>Profile Registry</strong>批准的 profile/image/mirror bundle digests</div>
+            <div class="arch-arrow">→</div>
+            <div class="arch-node trust"><strong>PVE Template Catalog</strong>candidate/stable/retired generation</div>
+            <div class="arch-arrow">→</div>
+            <div class="arch-node control"><strong>Scheduler + Terraform</strong>仅用内部 provider mirror 和精确 template</div>
+            <div class="arch-arrow">→</div>
+            <div class="arch-node untrusted"><strong>Builder / Verifier</strong>egress deny；只访问批准的 mirror/binhost</div>
+
+            <div class="arch-note"><strong>离线信任边界：</strong>同步网关不是发布 signer，也不进入构建区。mirror 对象以 digest 不可变保存；构建区网络策略拒绝所有公网 egress。strict air-gap 的虚线传输只允许签名 bundle，导入后的对象仍需上游签名/Manifest/lock file 二次验证。</div>
+          </div>
+        </div>
+
+        <h3>离线构建的预检与同步闭环</h3>
+        <ol>
+          <li><strong>Resolve：</strong>在联网同步区用精确 profile/USE/keywords 解析 image 与测试包依赖图，生成 repo、distfiles、seed、binpkg、plugin/module 的完整对象清单。</li>
+          <li><strong>Fetch &amp; verify：</strong>只从 allowlist 源抓取；校验 Git/GPG、Manifest、SHA256、Terraform lock 与 <code>go.sum</code>，记录许可证和 <code>RESTRICT</code> 例外。</li>
+          <li><strong>Bundle：</strong>对象按 digest 存储，清单签名；strict air-gap 对传输介质编号、恶意文件扫描并执行双人审批。</li>
+          <li><strong>Dry run：</strong>构建区关闭公网 egress，以 clean cache 运行 Catalyst、Packer、Terraform init 和代表性 emerge fetch/build。</li>
+          <li><strong>Freshness：</strong>记录上次成功同步与安全公告水位；超出 SLO 允许继续开发测试，但禁止 stable promotion。</li>
+        </ol>
+
+        <h3>不要把矩阵做成组合爆炸</h3>
+        <p>模板只承载不能安全地在 job 中临时切换、或者会改变 ABI/基础运行时的边界。包级 USE、keywords、CFLAGS 和普通依赖选择属于不可变 BuildSpec；它们不应该产生新的 VM template。</p>
+        <table>
+          <thead><tr><th>维度</th><th>是否拆模板</th><th>建议</th></tr></thead>
+          <tbody>
+            <tr><td>architecture</td><td>是</td><td>amd64、arm64 等必须独立；builder binary 与 verifier 也必须匹配。</td></tr>
+            <tr><td>libc / ABI</td><td>是</td><td>glibc/musl、multilib/no-multilib 作为硬边界。</td></tr>
+            <tr><td>init / 官方 parent profile</td><td>通常是</td><td>systemd/OpenRC 以及 hardened 等基础 profile family 独立烘焙并测试。</td></tr>
+            <tr><td>desktop environment</td><td>只在 verifier 拆</td><td>XFCE/GNOME/KDE 主要形成 GUI verifier image；不要默认复制成所有 binpkg builder 组合。</td></tr>
+            <tr><td>公共构建/测试工具</td><td>否</td><td>使用带版本的 Portage package set（如 <code>pe/runtime-v1</code>、<code>pe/build-test-v1</code>）；多个 profile 组合相同 set，set 变更产生新 ID 和 image generation。</td></tr>
+            <tr><td>USE / keywords / CFLAGS</td><td>否</td><td>进入 BuildSpec、cache key 与 provenance，由同一兼容模板执行。</td></tr>
+          </tbody>
+        </table>
+
+        <h3>自有 profile 与服务端 Registry</h3>
+        <div class="grid-2">
+          <article class="card">
+            <h3>Profile repository</h3>
+            <ul>
+              <li>单独维护 <code>portage-engine-profiles</code>，或至少与用户 CLI overlay 分目录、分权限；它属于构建策略，不属于客户端安装渠道。</li>
+              <li>使用 repository profile 继承 Gentoo 官方 parent，只覆盖社区明确维护的 defaults、USE mask/force 与 package sets。</li>
+              <li>package set 使用独立、锁定的 catalog 作为跨 profile 复用层；BuildPlan 只选择 set ID，Packer 展开后生成 <code>/etc/portage/sets/portage-engine-image</code>。不要把常用工具抬进 <code>@system</code>。</li>
+              <li>提交必须经过 <code>pkgcheck</code>、parent 可解析、<code>emerge --info</code>、depgraph 和升级测试；保护分支、签名 tag、双人 review。</li>
+              <li>模板绑定 profile repo 的 commit/digest 与 Gentoo repo snapshot，不能在启动时追踪 latest。</li>
+            </ul>
+          </article>
+          <article class="card">
+            <h3>Profile Registry 最小字段</h3>
+            <pre><code>profile_id: pe/amd64/glibc/systemd/desktop-v1
+arch: amd64
+libc: glibc
+init: systemd
+abi: multilib
+profile_repo_digest: sha256:...
+profile_path: pe:default/linux/amd64/desktop
+repo_snapshot: gentoo@&lt;commit-or-snapshot&gt;
+rootfs_source: catalyst | qcow2-seed
+rootfs_manifest_digest: sha256:...
+package_sets: [pe/runtime-v1, pe/build-test-v1]
+package_set_catalog_digest: sha256:...
+mirror_bundle_digest: sha256:...
+image_generation: g17
+pve_template: pe-gentoo-amd64-desktop-g17
+image_manifest_digest: sha256:...
+channel: candidate | stable | retired</code></pre>
+          </article>
+        </div>
+
+        <div class="arch-scroll" role="img" aria-label="Profile Registry、Image Factory、PVE 模板和构建调度关系图">
+          <div class="arch-diagram">
+            <div class="arch-node public"><strong>Approved Mirror Bundle</strong>seed、snapshot、distfiles、tools + 签名/摘要</div>
+            <div class="arch-arrow">→</div>
+            <div class="arch-node control"><strong>Profile Repository</strong>官方 parent + 社区 policy；固定 commit</div>
+            <div class="arch-arrow">→</div>
+            <div class="arch-node control"><strong>Catalyst / Seed Resolver</strong>固定输入 → rootfs；或批准 QCOW2 seed</div>
+            <div class="arch-arrow">→</div>
+            <div class="arch-node control"><strong>Packer Image Factory</strong>assemble、bake、sanitize、smoke、manifest</div>
+
+            <div class="arch-node public"><strong>Build Request</strong>稳定 profile_id + BuildSpec</div>
+            <div class="arch-arrow">→</div>
+            <div class="arch-node control"><strong>Profile Registry</strong>解析 arch/ABI/profile/template/digests</div>
+            <div class="arch-arrow">→</div>
+            <div class="arch-node trust"><strong>PVE Template Catalog</strong>不可变 generation；无 secret</div>
+            <div class="arch-arrow">→</div>
+            <div class="arch-node control"><strong>Terraform + Builder</strong>拒绝不匹配；clone 精确 template；无公网</div>
+
+            <div class="arch-note"><strong>关键约束：</strong>用户不能提交任意 profile path 或 template 名称。API 将 <code>profile_id</code> 解析为服务端批准的 profile digest 与 image generation；job provenance 同时记录请求 ID、有效 parent chain、模板 digest 和 Gentoo snapshot。</div>
+          </div>
+        </div>
+
+        <h3>建议的实施顺序</h3>
+        <ol>
+          <li><strong>IMG-0｜契约与镜像清单（已通过）：</strong>严格 JSON Profile Registry、Repository/Image/MirrorBundle/ResourceClass schema、resolved job provenance、immutable Git revision gate 与 missing-object report 已落地。</li>
+          <li><strong>IMG-1｜Packer 离线镜像（已通过）：</strong>BuildPlan、Packer/plugin、Terraform/provider、repository、package-set 与 closure 全部锁定。g6 base 与 qxl desktop-g6 均已通过真实 Packer、双次 cloud-init、destroy 和 output stamp；desktop-g2 缺少 Xvfb、g3/g4/g5 的 display/session/launcher 问题由 Gate 逐代拒绝，最终 g6 通过 strict smoke 与真实 GUI Gate。</li>
+          <li><strong>IMG-2｜Catalyst 离线流水线（已通过）：</strong>锁定 stage3/repository/closure 构建 stage4，完成 GPT/UEFI QCOW2、PVE seed、Packer successor 与严格 Terraform smoke。</li>
+          <li><strong>IMG-3｜Profile 与调度（已通过当前范围）：</strong>签名 <code>pe-profiles</code>、精确 parent chain、source/target repositories 与跨 profile package sets 已在 base/desktop 现场验证。OpenRC、hardened、musl 和 arm64 仍是按需求新增的独立矩阵，不属于当前完成范围。</li>
+          <li><strong>IMG-4｜运营（已通过）：</strong>bundle 签名、promotion、stable alias、rollback、rebuild 与 cleanup policy 已实现；g6 base + desktop-g6 双镜像在 strict Terraform 与真实 GUI evidence 通过后完成 promotion（revision 2）、签名回滚（revision 3）和再次 promotion（revision 4）。</li>
+        </ol>
+
+        <div class="callout">
+          <strong>IMG-1 二次评审点（2026-07-22，历史问题已闭环）：</strong>首次评审发现的 plugin checksum、1.2.3 schema 假阳性、pkrvars/spec 双事实源、构建后才校验、未 reconcile <code>@world</code>、锁定对象未实际消费、URL query secret、sanitize 不完整和 Terraform Gate 仅存在于文档等问题均已进入实现闭环。runner 不执行 <code>packer init</code>，会加载锁定 plugin 做完整 validate；guest 从锁定 Git bundle 取 commit、按 closure 下载并校验 distfiles、切换 profile 后完整更新 <code>@world</code>；smoke runner 无论成功失败都尝试 destroy，destroy 失败会保留恢复目录并阻断 promotion。smoke 成功且销毁完成后，PVE candidate 会写入实际 image-manifest 文件摘要，desktop source-check 因而绑定真实 base 产物而非仅绑定构建计划。示例 lock 仍只是文档占位，但内网 g6 已用真实对象通过；当前状态以后文 desktop successor 为准。</div>
+
+        <div class="callout">
+          <strong>IMG-2 代码评审点（2026-07-22）：</strong>IMG-2 target 仍只接受 amd64/default + Gentoo 官方 systemd parent；snapshot 名与完整 Git commit 分离；stage3、DIGESTS、release key、Catalyst runtime、repository bundle、distfile closure、package-set catalog 和 plan 均为锁定对象；distfile hydration 禁用继承代理与 redirect，只直连 allowlist 内网镜像；root overlay/Portage 目录与文件使用 0755/0644，并在 manifest 阶段拒绝 mode 漂移，避免 Catalyst 的 <code>rsync -a</code> 把 rootfs 的 <code>/etc</code> 锁成 0700；manifest 还会重新跑 input preflight，并从锁定 plan + package-set catalog 重新派生、逐字比较 config/spec/env/fsscript/root-overlay，再计算 rootfs/QCOW2 摘要，不能只信 runner 回传字段。外部 profile 已作为独立 IMG-3 target 实现，不改变 IMG-2 的历史契约；缓存加速仍需 cold-cache 等价性 Gate。</div>
+
+        <div class="callout success">
+          <strong>IMG-3 代码评审点（2026-07-22，当前范围已现场通过）：</strong>仓库内新增最小 <code>pe-profiles</code> 骨架，base 与 desktop-verifier 只表达策略差异；跨 profile 的常用工具仍来自带版本 package-set catalog，不抬入 <code>@system</code>。catalog 的 image 必须反向绑定同一 <code>profile_id</code>；resolved context 记录 profile repository 名称/commit 和 ordered parents。Native 使用 job-scoped <code>PORTAGE_CONFIGROOT</code> 并验证 repository identity、路径约束和 parent 漂移；Packer/Catalyst 还使用独立公钥验证自有 profile commit。BuildPlan、Packer custom data、rootfs/image manifest 与 catalog candidate 均保留这些字段。Desktop 的 Xvfb 能力以 profile <code>package.use</code> 精确绑定 <code>x11-base/xorg-server</code>，不通过全局 USE 污染其他包；闭包 resolver 还直接记录并核对签名 profile commit 与 Git tree。签名 profile commit、external-profile Catalyst、g6 base 和 236-object desktop closure 已实际覆盖该契约；desktop 最终发布状态以后文 qxl/GUI Gate 为准。</div>
+
+        <div class="callout success">
+          <strong>IMG-4 控制面评审点（2026-07-22，历史问题已闭环）：</strong><code>portage-image-factory</code> 已实现 bundle 签名/复验、candidate promotion、签名 stable alias、receipt rollback、rebuild planner 和 lease-aware cleanup planner。现场生成了三套相互独立的 sync/release/state Ed25519 key，私钥为 <code>0600</code>；从 NAS 内容地址下载最终 builder 后复验 <code>665dd6…a19d78</code>，并将它作为 <code>service-binary</code> 写入真实 input lock，签名 bundle 摘要为 <code>sha256:07880b…629b63</code>、fresh-until 为 <code>2026-08-05T10:54:32Z</code>。首次演练还发现 lock 不支持服务二进制，现已新增通用 <code>service-binary</code> 契约和回归测试。PVE API 确认 VMID 9200 与 114514 均为 stopped QEMU template；两者生成的是明确标注为 <code>compatibility</code> 的现场 catalog，而非伪造 image digest。签名 state 包含两代真实 generation 和已释放的构建 lease，cleanup dry-run 对两者都输出 <code>keep</code>，未执行删除。<strong>当时 Gate 正确阻断：</strong>对 VMID 9200 尝试 promotion 返回“profile is not a candidate”，没有写 stable alias 或 release；旧 template 缺少 image/rootfs manifest、双次 cloud-init smoke、Terraform destroy 和 output stamp，只能作为 compatibility 输入。后续 g6 base 与 desktop-g6 已补齐这些证据，并完成可信 promotion、rollback 与 re-promotion。</div>
+
+        <div class="callout success">
+          <strong>IMG-4 PVE 构建执行子 Gate（现场通过，2026-07-22）：</strong>最终收尾任务 <code>775004c8-9b11-4fd1-9a22-c14dbd553303</code> 使用当前内容地址 builder <code>665dd6…a19d78</code>，在 Native Gentoo template 上完成 Terraform clone、guest-agent 取 IP、SSH bootstrap、NAS 下载与 SHA-256 校验、<code>emerge --buildpkg</code>、完整任务依赖闭包收集、NAS binhost 发布和纯 binary 安装验证；产出 <code>app-misc/jq-1.8.2</code> 与 <code>dev-libs/oniguruma-6.9.10</code>。verifier 先复制 image baseline VDB，再按产物精确 CPV 删除本任务条目，因此两个包都被强制从 NAS 安装。新的 Telmate CPU block 已在真实 apply 中通过且不再出现旧 schema warning。任务释放 VMID 134 后，五分钟 idle TTL 在 <code>18:48</code> 触发 Terraform destroy；PVE API 随后确认 VMID 134 不存在，本地实例记录和持久化 workspace 同步移除。现场修复还覆盖 job-scoped Portage 配置权限、URL 模式摘要验证、unsigned verifier、依赖产物遗漏、失败节点误复用、warm pool 旧产物、基线误算任务闭包和 Terraform state 持久化。<strong>历史边界：</strong>本段只签收 build execution 与自动回收子 Gate；当时缺少的正式 candidate generation 证据已由后续 g6 全链路补齐。生产启用前仍必须收紧长期 PVE 账户 ACL、启用 API 认证和正式 SSH host-key policy。</div>
+
+        <div class="callout success">
+          <strong>IMG-4A PBS bootstrap 现场通过（2026-07-22）：</strong>PVE 已接入 <code>pbs-portage-engine</code>（PBS <code>10.31.0.3</code>、datastore <code>portage-engine</code>、证书指纹独立核对并固定），六个 PVE 节点均报告 storage active。VMID 9200 的首份快照 <code>vm/9200/2026-07-22T15:11:39Z</code> 完成备份、PBS server-side verify、恢复到临时 VMID 9300，并从恢复模板创建临时克隆启动。首次启动揭示 PVE 在未显式配置时会生成 package upgrade，Gentoo guest 因而在 <code>emerge --quiet --sync</code> 阶段挂住；这不是网络抖动，而是模板契约缺口。Terraform 构建 VM、IMG smoke VM、source preflight 与 output stamp 现均强制 <code>ciupgrade=0/false</code>，output stamp 还会 GET read-back；cloud-init Gate 只允许 PVE 生成器当前唯一已知的 <code>user → users</code> 弃用警告，任何 hard error 或其他 recoverable error 继续阻断。全新克隆 VMID 9401 随后通过 SSH、Guest Agent、首次及第二次 cloud-init、无隐式 <code>emerge --sync</code>、Gentoo 23.0/no-multilib/systemd profile、Portage、XFS rootfs 与 systemd service 检查。修正后的源模板被再次增量备份为 <code>vm/9200/2026-07-22T15:44:32Z</code>：30 GiB 100% chunk reuse、52 秒完成，PBS verify 为 <code>ok</code>/0 errors；decoded <code>index.json</code> SHA-256 为 <code>147cd248…af7560</code>，主盘 fidx checksum 为 <code>3aa43cd0…ada65</code>，decoded <code>qemu-server.conf</code> SHA-256 为 <code>39035847…85067</code> 且明确包含 <code>ciupgrade: 0</code>。临时 VMID 9300、9400、9401 已全部删除，9200 stopped template 与两份 PBS 快照保留；原 local VMA 仍保留作历史/应急副本，未冒充 candidate。<strong>后续状态：</strong>PBS snapshot identity、verify UPID、decoded manifest/fidx、source attestation 和 PVE stamp 已由 IMG-4B 固化，且最终 Catalyst→g6 路线已完成正式 Packer/smoke/promotion；本段“下一里程碑”不再是当前 blocker。</div>
+
+        <div class="callout success">
+          <strong>IMG-4B PBS source attestation 现场通过（2026-07-23）：</strong>新增严格 JSON <code>pbs-source-attestation</code> lock object、<code>pbs-attest</code> 生成器和 <code>pbs-stamp-source</code> PVE 绑定命令。生成器交叉校验 PBS URL/固定证书指纹、datastore、snapshot group/time/owner、server-side verify UPID、decoded index 与 snapshot metadata、未加密 image fidx checksum、QEMU dump mapping、<code>template=1</code>、<code>ciupgrade=0</code>、OVMF/q35、首次与第二次 cloud-init、无隐式 <code>emerge --sync</code>、Gentoo runtime 以及临时 VM 清理；Preflight、PreparePlan、manifest generation 和 evidence revalidation 都会重新做语义校验，不只比较文件 SHA-256。现场已将 <code>vm/9200/2026-07-22T15:44:32Z</code> 设为 protected，并通过 PBS API 回读确认 <code>protected=true</code> 与 verify state <code>ok</code>。使用原始 index/config/log/cleanup 生成的 attestation SHA-256 为 <code>0f22805c…a0f5ea</code>；PVE API 确认 VMID 9200 仍是 stopped template、<code>ciupgrade=0</code>，写入该摘要后再次 GET read-back 完全一致。真实 attestation 与 builder binary 已写入独立 source bundle，使用既有 sync key 重新签封；manifest 摘要为 <code>sha256:6de692…3cd347</code>、fresh-until 为 <code>2026-08-05T16:30:25Z</code>，<code>bundle-verify</code> 与 <code>base-systemd</code> source preflight 均通过（2 objects、0 missing）。凭证仅进入无回显临时会话，认证响应文件与会话已清理。<strong>历史边界（后续已解除）：</strong>这份 bundle 只签收 source attestation 与执行 binary，不冒充完整 candidate 输入；后续工作已把 Gentoo/pe-profiles commits、package-set catalog、distfile/binpkg closure、Packer/Terraform runtime 和 BuildPlan 一并锁定，并通过 g6 candidate 的双 cloud-init smoke/destroy 与 output stamp。</div>
+
+        <div class="callout success">
+          <strong>IMG-4C candidate 输入同步子 Gate 通过（2026-07-23，历史阻塞已解除）：</strong>现场为 <code>pe-profiles</code> 建立了独立 Ed25519 OpenPGP release key 和签名 commit <code>b7c0eddf…a9189e5</code>，再以仅含公共 key 的隔离 keyring 从离线 Git bundle 复验 <code>GOODSIG/VALIDSIG</code>；base 与 desktop-verifier 的 repository identity 和 ordered parent chain 均通过验证。Git bundle 在这里是离线传输载体而不是唯一信任锚：它保留 commit object、签名和完整 tree，使 factory 能执行 <code>git verify-commit</code>、精确 detached checkout 和 clean-tree Gate；lock 仍另外绑定 bundle SHA-256、完整 commit ID 与 release public key。对于 profile 这类小仓库 bundle 只有约 2 KiB；若未来改为规范化 tar/SQFS，也必须补上等价的内容 manifest、独立签名、parent-chain 证据和离线 checkout 语义。
+          同步区还验签并锁定 Packer 1.15.4、Proxmox plugin 1.2.3、Terraform 1.15.6、Telmate provider 3.0.2-rc04、package-set catalog、builder binary 与 IMG-4B PBS attestation。现场测试发现旧示例把 Terraform provider 只保存为单个解包 binary，无法匹配 dependency lock 对完整 release package 的哈希；现已改为官方 packed filesystem-mirror zip，并在 input-lock schema 中拒绝 executable/错误平台的 provider 对象。Packer plugin-backed validate 与 Terraform <code>init -lockfile=readonly</code>/validate 均通过。
+          随后从 VMID 9200 的一次性 clone 读取实际 webrsync <code>metadata/timestamp.commit</code>：<code>562f512d…ea8714b</code>。同一对象从 Gentoo 官方 anongit 拉取，使用 <code>E714D9E6…700D2F57</code> 签名子钥验证通过；其主钥 <code>EA423E93A16343F1</code> 与 Gentoo 官方 developer registry 一致。生成的 57 MB 离线 bundle 保留精确 commit/tree；由于来源是 shallow snapshot，guest 使用 <code>git bundle unbundle</code>、显式 shallow boundary、detached checkout 和 <code>git verify-commit</code>，而不是会错误遍历缺失 parent 的普通 clone。源模板原本是非 Git webrsync tree，Packer provisioner 现会在候选 clone 内从已验签 bundle 原子替换为 Git tree，不能再跳过 commit 验签。新 lock 共 14 objects、Linux amd64 preflight 14 verified/0 missing，重签 manifest 摘要为 <code>sha256:e23eed…8ea9ba</code>、fresh-until 为 <code>2026-08-05T17:35:41Z</code>；一次性 VMID 9502 已停止并删除。
+          <strong>历史边界（已解除）：</strong>Gentoo repository provenance 已闭环。复核后已纠正此前过严的“artifact endpoint 必须 HTTPS”假设：NAS <code>10.31.0.2</code> 的只读 HTTP 镜像可以直接作为数据面使用，因为 BuildPlan/lock 固定 host、URI、对象大小和 SHA-256，repository commit 还会独立验签；HTTP 不得携带凭证、查询参数或跨站重定向。PVE/PBS token 控制面仍强制 HTTPS。现有 NAS 上传 API 以 HTTP 传 session password 是 trusted-alpha 的显式内网例外，不等同于安全数据面；社区形态应为它增加 TLS 或网络层加密。当时尚缺 distfile closure 与最终 BuildPlan；该阻塞已由后续 IMG-4D 现场工作解除。</div>
+
+        <div class="callout success">
+          <strong>镜像工厂 WebUI、阶段日志与状态契约已实施（2026-07-26）：</strong>Server 提供只读 <code>/api/v1/image-factory/status</code>，Dashboard“镜像工厂”页面展示已生效 catalog 中的 profile、image、display model、跨 profile package sets、offline bundle、IMG 里程碑、阶段时间线、证据摘要、阻塞项和 Desktop E2E 策略。每个里程碑可以展开 bounded <code>steps</code>，查看阶段状态、开始/结束时间、耗时、reviewed summary 与带 SHA-256/大小/时间的日志制品引用；原始 Packer、Terraform、Catalyst、PVE/PBS 或 GUI 输出不直接嵌入状态 JSON，避免把大日志和凭证扩散到 WebUI。普通构建日志 API 同时返回按 queued/provision/deploy/build/collect/verify/sign/publish/cleanup 聚合的行数、首末时间、最后事件、大小与截断标记；服务端在写入日志前添加 UTC 时间戳、清理 ANSI 并脱敏 Authorization、token、password、URL userinfo/query secret。里程碑不是前端写死或扫描开发机 <code>.local</code> 得出，而是由 <code>portage-image-factory status-compile</code> 严格校验后，经 <code>IMAGE_FACTORY_STATUS_PATH</code> 显式提供；未知字段、重复里程碑/阶段、非法状态、逆序时间和未绑定摘要的日志引用均 fail closed。页面没有 PVE/PBS 凭证输入和 mutation endpoint，promotion/rollback 继续走独立签名 CLI Gate。当前严格快照展示 stable revision 4 的 g6 base 与 qxl desktop-g6，IMG-0 至 IMG-4 及 GUI-1 均通过且无 blocker；浏览器验收覆盖 1280px 与 390px 布局，不再把任何已拒绝 generation 描述成当前版本。</div>
+
+        <div class="callout success">
+          <strong>PLAT-0B / PUB-0 quarantine Gate 已实施（2026-07-26）：</strong>一次性 cloud/native remote builder 的成功结果现在先下载到公开 <code>BINPKG_PATH</code> 之外的 job-private quarantine；Docker static builder 已删除。任务 API 在此阶段不返回 <code>ArtifactURL</code>。Verifier 只通过随机、限时且跨副本共享的 capability URL 读取该 job 的临时 <code>Packages</code> 与包文件；URL 仅允许 GET/HEAD regular file、禁止缓存，并在验证结束后全局撤销。安装验证成为强制发布 Gate，旧 <code>skip_verify_install</code> 设置不再能绕过发布策略。验证通过后，完整 artifact set 在 PostgreSQL publication lock 与 binpkg index lock 内 promotion，公开位置不可覆盖，<code>Packages</code> 原子更新；验证失败会清除 quarantine，公开 binhost 与镜像都不可见。内网镜像上传移到中央 promotion 之后，失败只记录为 secondary mirror degraded，不会把未验证产物提前暴露。构建日志状态增加 <code>publish</code> 阶段。</div>
+        <div class="callout good">
+          <strong>PUB-1 多 profile binhost namespace 已实施（2026-07-26）：</strong>catalog 的每个 profile 现在必须声明唯一、受校验的 <code>binhost_path</code>，路径固定为 Gentoo 官方发布树风格 <code>releases/&lt;arch&gt;/binpackages/&lt;profile-generation&gt;/&lt;target&gt;</code>。resolved context 将该路径绑定到任务；签名后 promotion、公开 ArtifactURL、内部镜像上传、dependency reuse、JSON 查询和客户端配置全部复用同一值，request/builder 不能自选目录。每个 target 是独立 PKGDIR，发布新包时只原子重建它自己的 <code>Packages</code>；根 <code>/binpkgs/</code> 不再伪装成跨 ABI/profile 的聚合仓库。公开只读 <code>GET /api/v1/binhosts</code> 返回 profile 到精确 sync URI 的映射，<code>portage-client configure -profile-id</code> 据此写入 <code>binrepos.conf</code>。这允许后续并行维护 systemd、desktop、musl、hardened、x86-64-v3 或自定义 ABI 路径，而不会污染彼此索引。</div>
+
+        <div class="callout success">
+          <strong>PLAT-0B / PUB-0 PVE 现场 Gate 通过（2026-07-26）：</strong>使用进程环境注入的 PVE 密码认证、stable catalog 中的 <code>pe/amd64/no-multilib/systemd/base-v1</code> 与 <code>pe-gentoo-amd64-no-multilib-catalyst-base-g6</code>，Terraform 在 <code>infra-node4</code> 创建一次性 VMID 142；Native Gentoo builder 从内网 NAS distfiles 镜像构建 <code>app-misc/screenfetch-3.9.9</code>。现场轮询证明 <code>verifying</code> 阶段任务没有 <code>ArtifactURL</code> 且公开 <code>Packages</code> 不含目标包；pristine install root 从 job-private capability binhost 完成纯 binary 安装后才进入 <code>publish</code>，公开索引原子更新并生成 SHA-256 为 <code>317b09a4…b20b43c</code> 的 gpkg，quarantine 内不再残留文件。server/job 日志对 capability token 的原始路径匹配为 0，Authorization/password/token 模式匹配为 0。收尾使用该任务唯一 Terraform workspace 销毁 1 个资源，PVE 集群资源回读确认 VMID 142 数量为 0；canary 服务已停止，inventory 清空，构建产物与脱敏日志保留为本地证据。
+          安全复核同时发现旧实现曾把 <code>destroy_env</code> 明文写入 <code>instances.json</code>；这不是可接受的社区部署行为。实现现只持久化非敏感生命周期与 workspace metadata，重启后的 destroy 凭证从当前内存/secret-backed cloud settings 重新解析，加载旧 inventory 时会自动 scrub 并重写；对应写入不落 secret、旧状态迁移和重启后销毁三组回归测试均通过。本地含 token 的 canary 配置权限也从 <code>0644</code> 收紧为 <code>0600</code>。</div>
+
+        <div class="callout success">
+          <strong>P0-B 独立 signer 本地与真实 PVE Gate 通过（2026-07-26）：</strong>PostgreSQL schema v7 新增带 attempt fence、claim fence、lease、精确 input/output manifest 与终态审计的 <code>signing_tasks</code>；独立 <code>portage-signer</code> 没有 HTTP listener，使用单独最小数据库角色和私有 GPG volume 主动领取任务。server、secondary 和 builder 均不挂载私钥，<code>/api/v1/gpg/status</code> 只暴露公钥 identity、readiness 与队列计数并明确 <code>private_key_here=false</code>。builder 只生成 unsigned GPKG；控制面先从 job-private capability binhost 执行安装验证，再提交 digest-bound generation；signer 生成 payload detached signatures 与 clear-signed Manifest 并自校验，控制面随后把 signer 公钥放入 job-local Portage keyring，以 <code>binpkg-request-signature</code> 再次安装完整 closure，最后在 publication advisory lock 内不可覆盖地 promotion 并原子刷新 Packages。
+          <strong>证据复核更正：</strong>早期任务 <code>b2953f1d-3046-46d5-8eb6-a54d59a9697c</code> 虽证明 signer 输出和独立 GPG 复验成功，但其第二次 emerge 仍可读取 builder 宿主默认 <code>/var/cache/binpkgs</code>，且未把 signer output digest 传给 verifier；日志中还出现了 Gentoo 官方 binhost DNS 失败。因此该任务不能证明“安装的就是签名后的字节”，原签名安装结论作废，只保留为历史问题证据。
+          修复后的 verifier 为每个 generation 创建全新 <code>PKGDIR</code>，只预取 manifest 指定的精确路径/大小/SHA-256，拒绝 redirect、额外文件和摘要漂移；emerge 固定 <code>--usepkgonly=y --getbinpkg=n</code> 并清空外部 binhost，签名模式只导入一个预期 primary fingerprint、先独立复验每个 GPKG、安装后再核对字节未变。缺失公钥或 key ID 会 fail closed。签名前还增加强制负向控制：同一 unsigned generation 在 signer policy 下必须被拒绝，否则整条流水线失败。
+          新真实 Gate 任务 <code>650e159d-9a6d-46bb-8de1-50da075b8008</code> 在同一 Catalyst g6 / PVE 环境构建 <code>app-misc/cmatrix-2.0-r6</code>。unsigned generation 为 51200 bytes、SHA-256 <code>fa50f318…c61d834</code>，负向控制明确拒绝；signer output 为 50176 bytes、SHA-256 <code>23ec6a81…73b355</code>。第二次日志记录 <code>generation=signed</code>、<code>signature_required=true</code>、完整指纹 <code>31069C2591541344976994527B0D1E08E82197B0</code> 和该精确摘要，并从全新 PKGDIR 完成 Portage 安装，全程没有其他 binhost 请求。发布后重新下载的 SHA-256 完全一致，<code>image.tar.zst</code>、<code>metadata.tar.zst</code> detached signature 与 clear-signed Manifest 均用公开 key 独立复验通过。
+          现场累计暴露并修复了七个真实契约缺口：PVE SSH 私钥挂载缺少同名 <code>.pub</code>；Portage Manifest 的 hash 顺序为 BLAKE2B 后 SHA512；builder 曾丢弃 signer 公钥且 Portage verify home 不随 <code>--root</code> 重定位；单文件 bind mount 在原子重编译后仍指向旧 inode；signer 重启曾生成额外私钥；签名后安装曾被宿主 cache/外部 binhost 混淆；terminal projection 刷新曾在 cleanup defer 前清除 attempt fence。最后两项现分别由 digest-bound fresh-PKGDIR Gate 与同时供 IaC lifecycle callback/defer 使用的 cleanup fence snapshot 修复；跨副本 cleanup 还会先 <code>terraform init -reconfigure</code>，避免 retained workspace 永久卡在 backend initialization required。修复后的失败终态 canary <code>98993037-a0b2-4662-bdc1-d5521cee0b85</code> 把 VM <code>pve-1785067418546229169</code> 直接记为 <code>destroyed</code> 并写入 <code>deleted_at</code>，没有 fence warning；全局 <code>live_infra</code> 与 <code>cleanup_failed_infra</code> 均为 0。生产要求显式固定 <code>GPG_KEY_ID</code> 并关闭 auto-create。另一个同 CPV smoke 被 immutable destination 正确拒绝，证明发布路径不会静默覆盖历史制品；失败 signing task 继续保留为审计证据。
+        </div>
+
+        <div class="callout success">
+          <strong>IMG-4D base candidate g2 首次构建记录（2026-07-23，已拒绝）：</strong>该 <code>base-systemd</code> BuildPlan 固定 VMID 9201 PBS source attestation、Gentoo commit <code>562f512d…ea8714b</code>、pe-profiles 签名 commit <code>70269bf…6379e</code>、Packer 1.15.4、Proxmox plugin 1.2.3、Terraform 1.15.6、Telmate provider 3.0.2-rc04、精确执行脚本和 Linux factory binary。完整 input lock 共 24 objects，Linux runner preflight 为 24 verified/0 missing；Portage closure 共 267 objects、1,549,585,027 bytes。它曾从 VMID 9201 clone 出 VMID 103 并进入 128-package <code>@world</code> reconcile，随后被下文记录的宿主 OOM 中止并清理，不能作为 accepted candidate；当前 accepted 主线是后文的 Catalyst g6。</div>
+
+        <div class="callout warning">
+          <strong>Catalyst closure-v3 与 runner-v6 现场修复并进入 r13（2026-07-23）：</strong>r8 在严格断网 stage4 中阻断于 <code>sys-apps/hwdata-0.401</code>，证明旧 closure 错误使用了 sync worker 自身 target VDB；r9 虽改用签名 stage3 target VDB并通过 hwdata，却又在 <code>app-text/mandoc-1.14.6-r1</code> 发现 Portage build-root 仍使用宿主 VDB/cache。最终 resolver 会安全展开同一份已验签 stage3，在私有 mount namespace 中只绑定 reviewed repositories、<code>/dev</code>、<code>/proc</code>、<code>/sys</code> 和 clean DISTDIR，再 chroot 执行 Portage，因此 target/build root 都与 Catalyst 的 stage3 VDB 一致。新 depgraph 与真实 stage4 同为 103 packages；closure 为 164 objects / 968,613,942 bytes，明确包含 hwdata 与 mandoc，resolver evidence 绑定 stage3 SHA-256、profile 与规范化 config digest。r10 随后证明 hydrated 对象虽已锁定并为 <code>0644</code>，但 Catalyst bind-mount 的 DISTDIR 根因 <code>umask 077</code> 保持 <code>0700</code>，Portage 的非特权 fetch 用户无法遍历；runner 现只在摘要复验后把 bind 根规范为 <code>0755</code>。r11 在构建前因 plan 与新 bundle ID 不一致而 fail-closed，促使启动 Gate 增加 <code>catalyst-plan</code> dry-run；r12 又在下载前暴露默认 hydrator 路径只适用于源码 checkout，现改为相对 runner 的锁定 sibling 路径，因此源码树与 <code>offline/factory</code> bundle 使用同一布局。新的不可变 MirrorBundle <code>mirror/img4e-catalyst-profile-live-runner-v6-2026-07-23</code> 已通过 18/18 对象 preflight、签名复验、hydrator 存在性和 plan/bundle dry-run，一次性 sync 私钥已删除。r13 的 namespace 现场证据确认 bind source、目标路径、<code>0755/0644</code> mode、源文件摘要及 guest 内 <code>portage</code> 用户可读；随后完成全部 103 个 package。一次性 worker 根盘在线扩为 50 GiB 后，Portage 恢复 4-job 并行；该扩容不进入 rootfs。<strong>该段是问题演进记录；rootfs、QCOW2 与 seed 的最终结果以下一段 successor Gate 为准。</strong></div>
+
+        <div class="callout success">
+          <strong>Catalyst r13 rootfs、QCOW2 与 successor seed Gate 已通过（2026-07-23）：</strong>r13 完成全部 103 个 package，生成 stage4/rootfs manifest，并通过 GPT/UEFI 32 GiB QCOW2 组装与 <code>qemu-img check</code>。第一次 successor 启动连续暴露了三个真实镜像契约缺口：PVE seed 未固定 <code>ciuser=root</code>/<code>ipconfig0=ip=dhcp</code>；Catalyst 保留的空 <code>/etc/machine-id</code> 为 <code>0600</code>，使非特权 <code>systemd-networkd</code> 无法读取新 ID 生成 DHCP DUID；外部 profile repository 保留了 build-user 属主，触发 Git dubious-ownership 防护。实现已分别在 importer/source-check、Catalyst fsscript/QCOW2 assembler 和 Packer provisioner修复，并增加回归测试；Git 修复采用将锁定 repository 规范为 <code>root:root</code>，没有通过全局 <code>safe.directory</code> 弱化安全边界。旧 QCOW2 与 seed 作为 rejected evidence 隔离保留，新 QCOW2 manifest 导入 VMID 9509，配置回读确认 immutable template、q35/OVMF、<code>ciupgrade=0</code>、root 与 DHCP。签名 v4 bundle 通过 25/25 Linux preflight、plugin-backed validate 和 source-check；无人干预启动已自动取得 DHCP并通过两套 repository commit/signature/profile-chain Gate。现场 reconcile 还证明旧 spec 的 <code>stage4/use: grub_platforms_efi-64</code> 会让 stage 专用 USE 层与最终 profile 默认值产生 54-package <code>--newuse</code> 差异；下一代 spec 已删除该覆盖，EFI 选择只由构建和 runtime 共用的 <code>GRUB_PLATFORMS="efi-64"</code> 表达。<strong>该段的 v4 运行状态是历史记录：</strong>后续 v7/g4 已完成正式 Packer、Terraform smoke/destroy 与 output stamp。</div>
+
+        <div class="callout info">
+          <strong>Successor 与 Desktop 输入契约已加固（2026-07-26）：</strong>现场 reconcile 进一步发现 stage3 继承的 Python target/USE 状态会把 54 个 <code>@world</code> 更新和 13 个公共 package-set 更新推迟到 Packer。新的 Catalyst fsscript 会在封存 stage4 前，以最终 profile 对 <code>@world</code> 和精确 package-set atoms 执行同一组 <code>--update --deep --newuse --with-bdeps=y</code> 收敛；closure resolver、Packer provision 与 Terraform smoke 使用相同策略，避免不同阶段各自通过却留下隐性升级。为了把 runner/security-only 改进快速重新封装而不回退旧 seed，<code>base-systemd</code> 新增 <code>rootfs_source: packer-base-image</code>：只能消费前一代完整 image manifest，并逐项匹配 source template、provider/arch/build mode、repository revisions、profile repository/path 和 ordered parent chain，再产生新的 immutable generation。第一次 base→desktop 转换同样使用 <code>packer-base-image</code>，只有消费已验收 desktop manifest 的后续重封装才使用 <code>packer-desktop-image</code>。Desktop closure 必须在已通过 Packer + Terraform smoke 的精确 base candidate 一次性 clone 内解析，证据绑定 base image-manifest 摘要、image digest/template/generation、解析前 VDB 摘要以及 profile commit/tree，不能借用 sync worker 或 Catalyst stage3 的 VDB。正式 smoke 在首次 SSH 前通过 PVE HTTPS/QGA 读取并校验 guest ED25519 host public key，写入 job-local <code>known_hosts</code> 后强制 <code>StrictHostKeyChecking=yes</code>；不再以 TOFU/<code>accept-new</code> 作为 release Gate。Packer trusted bootstrap 也已补上此前缺失的独立信任过渡：先用带外批准 SHA-256 固定 factory verifier，再由它验证 sync-key 签名、freshness、lock digest和全量对象，不能先信任 incoming lock 中对自身 verifier 的描述。<strong>最终状态：</strong>这些修复已经进入独立签名的 g6 base 与 desktop-g6 bundles，并由 source-check、closure、strict smoke、真实 GUI 和 promotion/rollback 证据共同覆盖。</div>
+
+        <div class="callout warning">
+          <strong>并行 image build 宿主容量 Gate（现场失败后修复，2026-07-23）：</strong>PBS-base VM 103 与 Catalyst successor VM 135 同时在 32 GiB 的 <code>infra-node1</code> 编译重包，宿主 8 GiB swap 也已耗尽；PVE kernel 在 <code>2026-07-23T15:31:32Z</code> 明确以 global OOM 杀死 <code>/qemu.slice/103.scope</code> 的 KVM（约 8.18 GiB RSS）。VM 103 因此是 rejected infra evidence，不能通过重启局部磁盘续接为 release candidate。site common config 新增 <code>proxmox_host_memory_headroom_mb</code>；source-check 在 clone 前读取 PVE node 当前 free memory，要求满足 guest memory 加宿主保留量，Packer 临时 VM 还带 <code>image-factory-build</code> tag。社区 controller 必须再按 node 发放单并发 lease 或使用具备独立 reservation 的节点，因为单次 free-memory check 不能消除同时启动竞态。<strong>后续状态：</strong>Catalyst g6 已在容量合格的 node4 通过，Desktop closure 也已完成；该段不再是当前 blocker。</div>
+
+        <div class="callout warning">
+          <strong>Terraform smoke 可迁移性 Gate（现场失败后修复，2026-07-23）：</strong>v4 首次 smoke 在 <code>terraform init</code>、尚未执行 apply 前即失败；锁定的 CLI config 写死了另一台 runner 的 <code>/srv/portage-engine-offline/terraform/providers</code>，并包含与 strict-offline 文档相矛盾的 <code>direct</code> 回退。现场确认没有 state 和新 VM，恢复目录按 pre-apply 路径清理。新 bundle 只接受一个精确的 filesystem-mirror 模板，包含单一 provider 目录占位符且没有 direct；runner 将其解析到当前 offline root 后写入 job-local <code>0600</code> config。<code>PreparePlan</code> 同时做精确语义校验，拒绝写死路径、额外规则或 direct 回退。<strong>后续状态：</strong>修复已进入 v7/g4 签名 bundles，g4 strict Terraform init/apply/destroy 已通过。</div>
+
+        <div class="callout info">
+          <strong>Catalyst g2 补充 smoke 与 v7 successor Gate（2026-07-23）：</strong>在不改写 v4 plan/lock/manifest 的前提下，使用独立批准的新版 verifier 与外部 strict Terraform 模板完成桥接 smoke：job-local provider mirror、Terraform apply、QGA ED25519 host-key pinning、两次 cloud-init、代表性 <code>emerge</code>、destroy 和 g2 output provenance stamp 全部通过，临时 VM 103 已删除。随后 source-check 发现 Packer 模板并未保留 <code>ciuser=root</code>/<code>ipconfig0=ip=dhcp</code>；output stamp 现会同时写入并回读这两个字段，不能依赖后续 Terraform clone 恰好补齐。因 v6 已签名，该修复继续封入独立 v7。容量 Gate 又阻止在仅约 10.1 GiB free 的 node1 上启动 8 GiB candidate；停止状态的模板 135 经配置、HA、replication、shared Ceph 与目标 storage/bridge 检查后迁到约 25.7 GiB free 的 node4。桥接 smoke 只用于安全地建立 successor 输入，不冒充正式发布证据；<strong>后续 v7/g4 正式 Packer、smoke 与 output stamp 已在下一段完成。</strong></div>
+
+        <div class="callout info">
+          <strong>Catalyst g6 基础模板与 Desktop 全链路已通过（2026-07-26）：</strong>g4 曾在 node4 从 VMID 103 生成 VMID 137，并通过正式 Terraform 双次 cloud-init、QGA 固定 ED25519 host key、代表性 emerge、destroy 与 output stamp；随后新增 <code>source_repositories</code>，把“accepted source 实际包含的仓库 revision”和“后继 generation 要安装的签名 revision”分开校验。第一次 g5 successor 本身完成构建和 guest smoke，却在 output stamp read-back 暴露 PVE 会把 VGA 规范化为 <code>memory=64,type=std</code>，而旧 parser 只接受 model 位于第一段，因此被拒绝。修复后的 parser同时接受 <code>std,memory=64</code>、<code>memory=64,type=std</code> 与 <code>type=qxl,memory=64</code>，g6 随后生成 VMID 141，完整 strict smoke 与 stamp 通过，并发布为签名 stable revision 1。Desktop-g2 因缺少 Xvfb 被 runtime Gate 拒绝；g3 暴露 LightDM/display-manager 问题，g4 暴露用户 <code>.config</code> 所有权与 session 环境问题，g5 则由真实 GUI 测试发现 <code>gtk-launch</code> 子进程被 systemd control group 回收。desktop-g6 使用稳定 AT-SPI selector 与 <code>KillMode=process</code> 修复后，在 VMID 145 通过 strict Terraform smoke，并在真实 PVE clone 上完成 XFCE、终端可访问性树、1280×720 截图和日志验收。g6 base + desktop-g6 随后完成双镜像 promotion（revision 2）、签名 rollback（revision 3）和 re-promotion（revision 4）。</div>
+        <div class="callout warn">
+          <strong>Desktop VGA 与基线场景补强（2026-07-24）：</strong>现场读取 g1 配置确认 PVE 在未声明 VGA 时实际使用 <code>std</code>，但桌面 profile 已精确限制为 <code>VIDEO_CARDS="-* qxl"</code>。BuildPlan 现新增 <code>display_model</code>：base 固定 <code>std</code>、desktop 固定 <code>qxl</code>；Packer 明确写入 VGA、manifest custom data 绑定该值，output stamp 再从 PVE GET read-back，手工漂移会 fail closed。g1 最终完成 225-package 编译，但 sanitize Gate 使用的旧 package-set catalog 没有包含其自身要求的全部 desktop commands，因此按设计拒绝且没有保留模板；Gate 现打印失败阶段/命令，并由 package-set 回归测试逐项绑定 Xorg、LightDM、AT-SPI、截图和 xdotool 依赖。新的 g2 不再包装已拒绝 g1，而是以正确的 <code>packer-base-image</code> 契约从 accepted g6 直接完成第一次 base→desktop 转换；PVE 已读回 qxl/4 vCPU/16 GiB。另新增 <code>image-baseline.json</code>：只测试镜像内置 XFCE Terminal、AT-SPI、截图和日志时可完全省略 staging；只有包含 <code>install</code> 的应用场景才要求同时配置 staging URL 与 manifest digest。runner 的 <code>start</code> 不使用固定 sleep 猜测登录时间，而是轮询受限 <code>desktop-ready</code> capability，直至 X socket、Xauthority、用户 D-Bus 与 connected xrandr output 同时就绪。</div>
+
+        <div class="callout info">
+          <strong>HTTP/HTTPS 部署边界：</strong>本次 closure 与 Packer 使用 NAS 的无凭证只读 HTTP 数据面，安全性来自 allowlist、禁止 redirect/proxy、固定大小/SHA-256、repository commit 签名和 bundle 签名；无需为了内网 distfile/binpkg 再维护一套证书。项目自有 server/dashboard 本来即可在可信 LAN 用 HTTP；通用 Desktop adapter 也支持显式 <code>-allow-http-control-plane</code> 的 HTTP bring-up，默认仍拒绝，并且永不跟随 redirect 或接受 URL credentials/query。HTTP 模式不会加密 bearer token，因此只能留在隔离网段，跨网段时再加 HTTPS/VPN。PVE/PBS 继续使用其产品自带 HTTPS API；direct PVE Desktop runner 直接复用它，不需要额外部署或签发 HTTPS console 证书。</div>
+
+        <div class="callout warning">
+          <strong>模板 Gate：</strong>发布前必须在公网 egress deny + clean cache 下证明 Catalyst/Packer/Terraform 不回源、guest-agent 可取 IP、cloud-init 幂等、<code>make.profile</code> 与 registry 完全一致、代表性 depgraph 可解析、小包能够构建并在干净 verifier 安装；镜像中不存在 host key、machine-id、API token、builder token 或签名私钥。
+        </div>
+      </section>
+
+      <section id="desktop-goal">
+        <p class="eyebrow">05 · Desktop E2E</p>
+        <h2>桌面 GUI E2E 要解决什么</h2>
+        <p class="lead">目标不是简单“截图看看”，而是验证一个刚构建的 Gentoo binary package 在真实桌面环境中可以安装、启动、显示关键界面、完成核心交互，并在失败时保留足够证据。</p>
+
+        <div class="grid-2">
+          <article class="card">
+            <h3>适合桌面 E2E 的验证</h3>
+            <ul>
+              <li>应用能否安装、启动并创建窗口。</li>
+              <li>菜单、对话框、渲染区域和基本输入是否正常。</li>
+              <li>GTK/Qt/WebKit/Electron 依赖是否完整。</li>
+              <li>不同桌面、分辨率、locale、显卡模式下是否工作。</li>
+              <li>崩溃、黑屏、缺字体、缺图标、窗口未响应等视觉故障。</li>
+            </ul>
+          </article>
+          <article class="card">
+            <h3>不应只靠视觉判断</h3>
+            <ul>
+              <li>包是否安装成功：检查 emerge 退出码和 Portage DB。</li>
+              <li>进程是否启动：检查 PID、systemd/user session 或 D-Bus。</li>
+              <li>文件是否生成：直接检查 guest filesystem。</li>
+              <li>崩溃原因：收集 coredump、journal、stderr 和应用日志。</li>
+              <li>网络请求：通过代理、HAR 或服务端日志验证。</li>
+            </ul>
+          </article>
+        </div>
+
+        <div class="callout warning">
+          <strong>核心原则：</strong>能用结构化状态断言的，不用截图；能用可访问性树定位的，不用坐标；只有真正的视觉结果才使用 needle/像素比对；AI 作为最后一层语义判断和故障分析。
+        </div>
+      </section>
+
+      <section id="architecture">
+        <p class="eyebrow">06 · Architecture</p>
+        <h2>推荐架构：openQA 思路的混合方案</h2>
+        <p>建议把桌面测试作为独立的 <strong>Desktop Verification Plane</strong>，不要塞进现有 builder 进程。Portage Engine 负责调度和制品状态，GUI runner 负责 VM 生命周期、输入、截图和断言。</p>
+
+        <div class="flow" aria-label="桌面测试发布流程">
+          <div class="flow-step"><strong>1. Build</strong>Native Gentoo 构建并上传 staging</div>
+          <div class="flow-step"><strong>2. Schedule</strong>创建 desktop verification job</div>
+          <div class="flow-step"><strong>3. Restore</strong>从干净桌面快照启动 VM</div>
+          <div class="flow-step"><strong>4. Install</strong>配置 staging binhost 并安装包</div>
+          <div class="flow-step"><strong>5. Exercise</strong>启动应用并执行 GUI 场景</div>
+          <div class="flow-step"><strong>6. Judge</strong>结构化 + 视觉 + AI 分层判定</div>
+          <div class="flow-step"><strong>7. Promote</strong>通过后签名并原子发布</div>
+        </div>
+
+        <div class="stack">
+          <div class="layer">
+            <strong>控制面</strong>
+            <p>Portage Engine job state、policy、artifact digest、测试矩阵和 promotion gate。</p>
+          </div>
+          <div class="layer">
+            <strong>GUI Runner</strong>
+            <p>创建/恢复桌面 VM，驱动场景，收集截图、视频、串口、journal、coredump 和测试结果。</p>
+          </div>
+          <div class="layer">
+            <strong>控制通道</strong>
+            <p>QMP/libvirt/PVE API 管生命周期与截图；VNC/SPICE 注入键鼠；SSH/virtio-serial/guest agent 执行确定性命令。</p>
+          </div>
+          <div class="layer">
+            <strong>定位与断言</strong>
+            <p>Accessibility tree/AT-SPI → openQA needle/模板匹配 → OCR → 视觉 AI。</p>
+          </div>
+          <div class="layer">
+            <strong>测试环境</strong>
+            <p>固定 desktop image、字体、主题、DPI、分辨率、locale、时区和 GPU 模式；每次从已知快照恢复。</p>
+          </div>
+        </div>
+
+        <h3>openQA、Playwright 还是自研？</h3>
+        <table>
+          <thead>
+            <tr><th>方案</th><th>最适合</th><th>优点</th><th>限制</th><th>建议</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>openQA / os-autoinst</strong></td>
+              <td>完整 OS、桌面、安装器、原生 GUI</td>
+              <td>VM、VNC、串口、needle、失败证据和人工更新基线都比较成熟</td>
+              <td>系统较重；测试 DSL 和运维体系需要学习</td>
+              <td>首选参考实现；可以独立部署，由 Portage Engine 调度 job</td>
+            </tr>
+            <tr>
+              <td><strong>Playwright</strong></td>
+              <td>Web UI、WebView、Electron renderer</td>
+              <td>DOM/ARIA 定位稳定，trace、截图 diff、视频生态成熟</td>
+              <td>不能通用控制 GTK/Qt 桌面，也无法覆盖系统安装器和原生对话框</td>
+              <td>测试 Dashboard 和 Web/Electron 应用时使用，不作为通用桌面控制层</td>
+            </tr>
+            <tr>
+              <td><strong>轻量自研 runner</strong></td>
+              <td>与 PVE 深度集成的有限应用矩阵</td>
+              <td>能复用现有 PVE、job model 和 artifact pipeline</td>
+              <td>需要自己实现稳定等待、needle、视频、调试 UI 和基线管理</td>
+              <td>先做 MVP；如果测试矩阵快速增长，逐步采用 openQA 而不是重写它</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <div class="callout">
+          <strong>推荐落点：</strong>Portage Engine 保留 PVE 作为构建后端；新增专用 GUI test worker。早期可以在 PVE 上恢复预制桌面 VM 并使用自研 runner；场景数量变多后，将 openQA 作为独立验证服务接入，Portage Engine 只传入 staging binhost、artifact digest 和 scenario 参数。
+        </div>
+      </section>
+
+      <section id="oracle">
+        <p class="eyebrow">07 · Oracles</p>
+        <h2>测试判定器必须分层</h2>
+        <p>GUI 自动化最容易失败在“不稳定等待”和“把像素差当功能失败”。建议按下表从上到下选择判定方式。</p>
+
+        <table>
+          <thead>
+            <tr><th>优先级</th><th>判定方式</th><th>示例</th><th>是否阻断发布</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>1</td><td>结构化系统状态</td><td>退出码、PID、D-Bus、journal、文件、Portage DB</td><td>是</td></tr>
+            <tr><td>2</td><td>可访问性语义</td><td>窗口 title、role、accessible name、按钮 enabled</td><td>是</td></tr>
+            <tr><td>3</td><td>局部 needle / 模板匹配</td><td>主窗口、关键图标、画布区域、错误对话框</td><td>核心区域可阻断</td></tr>
+            <tr><td>4</td><td>OCR</td><td>安装器错误、无法访问 accessibility tree 的文本</td><td>视稳定性决定</td></tr>
+            <tr><td>5</td><td>视觉 AI 语义判断</td><td>黑屏、布局严重破坏、错误弹窗、渲染异常</td><td>初期只告警/转人工</td></tr>
+          </tbody>
+        </table>
+
+        <h3>测试环境必须固定</h3>
+        <ul>
+          <li>固定分辨率、缩放比例、字体包、GTK/Qt 主题、窗口管理器和 locale。</li>
+          <li>关闭动画、自动更新、通知、屏保、时间相关组件和随机壁纸。</li>
+          <li>屏蔽时钟、用户名、下载进度等动态区域，needle 只匹配关键区域。</li>
+          <li>基线按 desktop/profile/locale/GPU mode 分组，不跨环境复用同一张 golden screenshot。</li>
+          <li>失败必须保存 expected、actual、diff、完整截图、短视频、操作序列和系统日志。</li>
+        </ul>
+
+        <pre aria-label="桌面测试场景 JSON 示例"><code>{
+  "schema_version": 1,
+  "id": "gui/gvim-launch-v1",
+  "profile_id": "pe/amd64/no-multilib/systemd/desktop-verifier-v1",
+  "image_id": "pe/amd64/no-multilib/desktop-verifier-g3",
+  "resolution": "1280x720",
+  "locale": "C.UTF-8",
+  "timeout_seconds": 600,
+  "steps": [
+    {"id":"restore","action":"restore","input":{"snapshot":"clean"}},
+    {"id":"start","action":"start"},
+    {"id":"install","action":"install","input":{"atom":"app-editors/gvim","staging_digest":"sha256:&lt;64-hex&gt;"}},
+    {"id":"launch","action":"launch","input":{"application_id":"gvim.desktop"}},
+    {"id":"window","action":"wait_accessible","input":{"role":"frame","name":"GVIM","state":"showing"}},
+    {"id":"tree","action":"collect_accessibility","input":{"name":"gvim-tree"}},
+    {"id":"screen","action":"screenshot","input":{"name":"gvim-main"}},
+    {"id":"logs","action":"collect_logs","input":{"scope":"application","application_id":"gvim.desktop"}},
+    {"id":"stop","action":"stop"}
+  ]
+}</code></pre>
+      </section>
+
+      <section id="ai-mcp">
+        <p class="eyebrow">08 · AI &amp; MCP</p>
+        <h2>要不要引入视觉 AI 和 MCP？</h2>
+
+        <div class="decision">
+          <div class="yes">
+            <h3>要引入，但放在增强层</h3>
+            <ul>
+              <li>探索未知应用的首次操作流程。</li>
+              <li>识别弹窗、黑屏、布局破坏和异常渲染。</li>
+              <li>分析 expected/actual/diff 与日志，给出失败分类。</li>
+              <li>从成功运行中生成候选 needle、OCR 区域和测试步骤。</li>
+              <li>跨小版本 UI 变化时做语义相似判断。</li>
+            </ul>
+          </div>
+          <div class="no">
+            <h3>不要让 AI 成为唯一测试 oracle</h3>
+            <ul>
+              <li>模型输出存在非确定性，难以复现边界结果。</li>
+              <li>成本和延迟不适合每个截图、每个步骤调用。</li>
+              <li>视觉模型可能忽略小但关键的错误。</li>
+              <li>模型或 prompt 升级会改变历史基线。</li>
+              <li>涉及桌面控制时必须限制工具权限和网络边界。</li>
+            </ul>
+          </div>
+        </div>
+
+        <h3>MCP 的正确角色</h3>
+        <p>MCP 适合作为 <strong>AI Agent 与 Desktop Runner 之间的标准工具接口</strong>。它不负责任务持久化、基线管理、重试或发布判定；这些仍由 Portage Engine 和 GUI runner 完成。</p>
+
+        <table>
+          <thead><tr><th>MCP Tool</th><th>职责</th><th>安全约束</th></tr></thead>
+          <tbody>
+            <tr><td><code>desktop.screenshot</code></td><td>返回当前屏幕或指定区域 PNG</td><td>只访问当前测试 VM</td></tr>
+            <tr><td><code>desktop.click</code></td><td>按坐标、needle 或 accessibility node 点击</td><td>记录每次输入；禁止宿主操作</td></tr>
+            <tr><td><code>desktop.type</code></td><td>输入文本或组合键</td><td>限制长度，敏感字段不回传日志</td></tr>
+            <tr><td><code>desktop.wait_for</code></td><td>等待窗口、needle、OCR 或稳定画面</td><td>强制 timeout</td></tr>
+            <tr><td><code>desktop.accessibility_tree</code></td><td>读取当前桌面语义树</td><td>只读，限制节点数量</td></tr>
+            <tr><td><code>guest.exec</code></td><td>在 guest 中执行诊断/安装命令</td><td>命令 allowlist 或测试角色授权</td></tr>
+            <tr><td><code>vm.restore_snapshot</code></td><td>恢复到已知桌面基线</td><td>只能选择测试项目允许的快照</td></tr>
+            <tr><td><code>test.attach_evidence</code></td><td>保存截图、日志和 Agent 结论</td><td>绑定 job ID 与 artifact digest</td></tr>
+          </tbody>
+        </table>
+
+        <div class="callout warning">
+          <strong>与 Playwright MCP 的差别：</strong>Playwright 能读取 DOM/ARIA，因此 Web UI 的定位非常稳定；原生 Linux 桌面没有统一 DOM。你的 Desktop MCP 需要把 VNC/QMP 截图、键鼠输入、AT-SPI accessibility、OCR 和 guest 命令组合起来，才能达到类似体验。
+        </div>
+
+        <h3>推荐的 AI 执行模式</h3>
+        <ol>
+          <li><strong>Deterministic run：</strong>正常回归只执行固定步骤与断言。</li>
+          <li><strong>Failure triage：</strong>失败后才调用视觉模型，输入最后若干截图、diff 和裁剪后的日志。</li>
+          <li><strong>Exploratory run：</strong>对新应用由 Agent 使用 MCP 探索，产出符合严格 schema、可审查的 JSON 场景和 needle 候选。</li>
+          <li><strong>Human approval：</strong>人审查并提交测试脚本/基线；后续回归不再依赖 Agent 自由决策。</li>
+        </ol>
+      </section>
+
+      <section id="implementation">
+        <p class="eyebrow">09 · Implementation</p>
+        <h2>桌面 E2E 落地计划</h2>
+
+        <div class="roadmap">
+          <article class="phase">
+            <h3>GUI-0｜桌面 Golden Image</h3>
+            <div class="phase-meta">约 1 周</div>
+            <ul>
+              <li>制作 Gentoo + XFCE（后续再扩 GNOME/KDE）桌面模板。</li>
+              <li>固定字体、主题、分辨率、locale、测试用户和自动登录。</li>
+              <li>安装 guest agent、SSH、virtio-serial、截图/输入所需组件。</li>
+              <li>创建 clean、post-install、app-ready 三类 VM 快照。</li>
+            </ul>
+          </article>
+
+          <article class="phase">
+            <h3>GUI-1｜Deterministic Desktop Runner</h3>
+            <div class="phase-meta">约 1–2 周</div>
+            <ul>
+              <li>封装 PVE VM clone/start/stop/snapshot 和测试租约。</li>
+              <li>接入 screenshot、keyboard、mouse、serial/SSH、journal 收集。</li>
+              <li>实现 wait stable、window wait、timeout、video 和失败 evidence bundle。</li>
+              <li>先支持 3 个场景：启动应用、打开文件、保存文件。</li>
+            </ul>
+          </article>
+
+          <article class="phase">
+            <h3>GUI-2｜Needle 与 Accessibility</h3>
+            <div class="phase-meta">约 1–2 周</div>
+            <ul>
+              <li>实现局部 needle、exclude region、similarity threshold 和 diff。</li>
+              <li>接入 AT-SPI accessibility tree，优先按 role/name 定位。</li>
+              <li>建立 baseline review 流程，禁止 CI 自动覆盖 golden screenshot。</li>
+              <li>按 desktop/locale/resolution 管理测试矩阵。</li>
+            </ul>
+          </article>
+
+          <article class="phase">
+            <h3>GUI-3｜Portage Engine 集成</h3>
+            <div class="phase-meta">约 1 周</div>
+            <ul>
+              <li>新增 verification profile：install-only、CLI、desktop-smoke、desktop-full。</li>
+              <li>构建产物保持在 staging，Desktop E2E 通过后才能 promotion。</li>
+              <li>GUI result、截图、视频和日志作为 job 的一等 artifacts。</li>
+              <li>添加队列、并发、超时和 VM 回收策略。</li>
+            </ul>
+          </article>
+
+          <article class="phase">
+            <h3>GUI-4｜AI Triage 与 Desktop MCP</h3>
+            <div class="phase-meta">约 1–2 周 · 非阻塞增强</div>
+            <ul>
+              <li>先实现失败截图分类和摘要，不自动点击。</li>
+              <li>再开放受限的 MCP 输入工具，用于新应用探索。</li>
+              <li>将 Agent 产出的步骤转换成严格 JSON，必须通过 schema 校验和人工 review 后才能进入 gating suite。</li>
+              <li>记录模型、prompt、输入截图 hash 和输出，保证结果可审计。</li>
+            </ul>
+          </article>
+        </div>
+
+        <div class="callout success">
+          <strong>GUI-1 runner 与真实 PVE Gate 已通过（2026-07-26）：</strong>新增独立 <code>portage-desktop-runner</code> 与严格 JSON scenario schema；action 只允许 restore/start、staging install、application ID 启动、accessibility wait、受限键鼠、reviewed needle、screenshot/accessibility/log collection 和 stop，不接受任意 shell command 或 credential 字段。runner 既可连接独立 adapter（默认 HTTPS；隔离可信 LAN 可显式开启 HTTP bring-up），也可直接调用已有 PVE HTTPS API，并通过 QEMU Guest Agent 暴露的命名 helper 执行受限动作，因此不要求再部署一套 HTTPS console 服务。HTTP adapter 不接受 URL credential/query/fragment/path，不跟随 redirect，但 bearer token 在链路上仍是明文。PVE 现场没有通用 <code>agent/file-read</code> 路由，证据改为在受限 helper 中先返回大小与 SHA-256，再经支持的 QGA exec 以最多 192 KiB 分块读取；host 限制单件 32 MiB、拒绝截断并复验完整摘要。应用日志只读取该应用对应的确定性 user unit，AT-SPI 树限制 4096 节点并校验 parent/index。应用 staging 可以走无凭证的只读 HTTP，但必须先固定完整 <code>MANIFEST.json</code> digest，禁用代理和跨站 redirect，再逐对象验证大小与 SHA-256，最终切为本地 <code>file://</code> binrepo。PVE token 只从环境变量读取；runner 要求唯一 restore/start/stop，功能步骤首次失败后停止继续输入，但仍执行声明的 screenshot/accessibility/log evidence，并始终尝试最终 stop。固定 1280×720、LightDM 自动登录、C.UTF-8、字体/主题、AT-SPI、截图及键鼠工具已经进入 desktop image Gate。真实 VMID 145 candidate 的 disposable clone 已通过完整 scenario：XFCE 桌面与终端可见，稳定 selector 为 <code>role=terminal,name=Terminal</code>，截图、AT-SPI 和应用日志均按摘要复验。视觉 AI 只保留为未来 triage 助手，不作为 release oracle。</div>
+
+        <h3>建议的代码边界</h3>
+        <pre><code>cmd/desktop-runner/                 # 独立进程，不进入 builder
+internal/desktop/
+  scenario.go / runner.go          # 严格 JSON 契约、timeout、清理语义
+  pve.go                           # PVE 生命周期、QGA 分块证据传输
+image-factory/desktop/
+  guest-agent.py                   # guest capability helper、AT-SPI、日志
+  write-staging-manifest.py        # 不可变 staging 数据面
+tests/desktop/
+  scenarios/                       # reviewed deterministic scenarios
+  needles/                         # GUI-2；reviewed openQA needle
+  fixtures/ / baselines/           # GUI-2；按环境矩阵分组
+desktop-mcp/                       # GUI-4；可选、非 release oracle</code></pre>
+      </section>
+
+      <section id="acceptance">
+        <p class="eyebrow">10 · Gates</p>
+        <h2>验收标准与发布 Gate</h2>
+
+        <table>
+          <thead><tr><th>里程碑</th><th>必须满足</th><th>发布范围</th></tr></thead>
+          <tbody>
+            <tr><td>Trusted Alpha</td><td>PVE 回归可重复；任务成功必有制品；ConfigBundle 安全问题修复；当前 template 已登记 image manifest</td><td>可信内网</td></tr>
+            <tr><td>Multi-profile Alpha</td><td>Profile Registry 生效；请求不能绕过 registry；Packer 与 Catalyst 离线通道完成；至少两个 generation 在 egress deny 下通过 template gate</td><td>批准的 profile / mirror bundle 矩阵</td></tr>
+            <tr><td>Scheduler / Monitor Alpha</td><td>PostgreSQL 持久化 project/target/job/attempt/lease/outbox；双 control-plane claim 不重复且四层并发预算不超卖；Redis restart/flush 时 canonical 调度与发布继续、WebUI 可轮询降级；desktop/base × systemd/OpenRC 独立统计；worker slots/heartbeat/pressure 可见；调度和重试原因可解释；项目公平性压测通过</td><td>多项目可信内网</td></tr>
+            <tr><td>Distributed Build Alpha</td><td>多个 job 原子预留 builder slot；resource class 固定 MAKEOPTS；同构 distcc canary 有独立 compile lease、网络隔离和 project quota；断开 compile worker 可控降级；local-vs-distcc 安装/ABI/GUI 对照 Gate 通过</td><td>Reviewed C/C++ package sets</td></tr>
+            <tr><td>Private Community Alpha</td><td>持久化状态机；staging/promotion；独立 signer；基础 desktop smoke</td><td>邀请制用户</td></tr>
+            <tr><td>Public Beta</td><td>OIDC/RBAC/配额；隔离 builder；GUI evidence；备份恢复</td><td>受限公开</td></tr>
+            <tr><td>GA</td><td>30 天稳定运行；安全 review；RPO/RTO 演练；无 P0/P1</td><td>社区 Infra</td></tr>
+          </tbody>
+        </table>
+
+        <div class="callout">
+          <strong>第一批桌面场景建议：</strong>选择一个 GTK 应用、一个 Qt 应用和一个 Electron/WebView 应用。每个应用只做“安装 → 启动 → 打开固定 fixture → 关键窗口断言 → 正常退出”，先把环境稳定性做出来，再扩复杂业务流程。
+        </div>
+      </section>
+
+      <section id="sources" class="sources">
+        <p class="eyebrow">11 · Sources</p>
+        <h2>参考资料</h2>
+        <ul>
+          <li><a href="https://wiki.gentoo.org/wiki/Binary_package_guide">Gentoo Binary Package Guide</a>：binrepos.conf、GPKG 签名、Portage keyring 和 <code>binpkg-request-signature</code>。</li>
+          <li><a href="https://wiki.gentoo.org/wiki/Eselect/Repository">Gentoo eselect-repository</a>：第三方 ebuild repository 的启用方式及其信任风险。</li>
+          <li><a href="https://github.com/gentoo/portage/blob/master/man/make.conf.5">Portage make.conf(5)</a>：<code>buildpkg</code>、<code>binpkg-signing</code>、<code>binpkg-request-signature</code> 与 GPKG 配置。</li>
+          <li><a href="https://dev.gentoo.org/~zmedico/portage/doc/man/portage.5.html">Portage portage(5)</a>：<code>/etc/portage/sets/</code> 中每个文件定义一个同名用户 package set，并可使用嵌套 <code>@set</code>。</li>
+          <li><a href="https://developer.hashicorp.com/packer/integrations/hashicorp/proxmox/latest/components/builder/clone">Packer Proxmox Clone Builder</a>：从现有 PVE VM template clone、provision 并生成新的不可变模板；旧模板保留策略需由外部控制器负责。</li>
+          <li><a href="https://developer.hashicorp.com/packer/docs/templates">Packer HCL Templates</a>：变量、source、build、provisioner 与插件的官方模板模型。</li>
+          <li><a href="https://devmanual.gentoo.org/profiles/index.html">Gentoo Development Guide: Profiles</a>：profile 的组成与继承模型。</li>
+          <li><a href="https://wiki.gentoo.org/wiki/Profile">Gentoo Wiki: Profile</a>：repository profile、parent 继承、<code>profiles.desc</code> 与 <code>make.profile</code> 管理。</li>
+          <li><a href="https://wiki.gentoo.org/wiki/Project%3ARelEng">Gentoo Release Engineering</a>：Catalyst 在 stage 与安装介质生产中的定位。</li>
+          <li><a href="https://github.com/gentoo/catalyst">Gentoo Catalyst 源码与 README</a>：官方 release build 工具、stage/LiveCD/netboot 能力以及 seed/repository snapshot 输入要求。</li>
+          <li><a href="https://github.com/gentoo/catalyst/blob/master/doc/catalyst-config.5.txt">catalyst-config(5)</a> 与 <a href="https://github.com/gentoo/catalyst/blob/master/doc/catalyst-spec.5.txt">catalyst-spec(5)</a>：离线目录、repository key、snapshot、profile、stage4 packages/fsscript/root overlay 的正式字段语义。</li>
+          <li><a href="https://github.com/gentoo/catalyst/tags">Gentoo Catalyst tags</a>：IMG-2 示例 runtime ID 采用 4.1.1；实际信任仍由离线 lock 中的 archive digest 提供。</li>
+          <li><a href="https://github.com/gentoo/catalyst/blob/master/doc/catalyst-config.5.txt">catalyst-config(5)</a>：本地 <code>distdir</code>、<code>repos_storedir</code>、repository OpenPGP 校验、seed/pkg cache 和 envscript。</li>
+          <li><a href="https://github.com/gentoo/catalyst/blob/master/doc/catalyst-spec.5.txt">catalyst-spec(5)</a>：profile、snapshot、seed、Portage 配置、stage4 package/fsscript/root overlay 等 spec 字段。</li>
+          <li><a href="https://distfiles.gentoo.org/releases/amd64/autobuilds/">Gentoo amd64 autobuilds</a>：官方自动构建的 stage 与 QCOW2 输入，包括 <code>latest-qcow2.txt</code>。</li>
+          <li><a href="https://devmanual.gentoo.org/general-concepts/mirrors/index.html">Gentoo Development Guide: Mirrors</a>：distfile 镜像、稳定来源与 <code>RESTRICT</code> 限制。</li>
+          <li><a href="https://devmanual.gentoo.org/eclass-reference/make.conf/index.html">Gentoo make.conf reference</a>：<code>GENTOO_MIRRORS</code>、<code>PORTAGE_RO_DISTDIRS</code>、私有 rsync repository 与 <code>force-mirror</code>。</li>
+          <li><a href="https://developer.hashicorp.com/packer/docs/plugins/install">Packer Plugin Installation</a>：离线环境可通过本地 plugin binary 安装并生成所需 SHA256SUM。</li>
+          <li><a href="https://developer.hashicorp.com/terraform/cli/commands/providers/mirror">Terraform Provider Mirror</a>：为隔离网络生成 filesystem/network mirror，按目标平台镜像 provider。</li>
+          <li><a href="https://pbs.proxmox.com/docs/backup-client.html">Proxmox Backup Client Usage</a>：snapshot protection 的更新与解除；保护位用于避免 prune 删除已接受的 source generation。</li>
+          <li><a href="https://go.dev/ref/mod">Go Modules Reference</a>：内部 GOPROXY、<code>off</code> fallback、module cache 布局和 <code>go.sum</code> 验证。</li>
+          <li><a href="https://openbuildservice.org/help/manuals/obs-user-guide/cha-obs-concepts">OBS Concepts</a>：project 组织 repository、architecture、build/publish flag 与调度参数的参考模型。</li>
+          <li><a href="https://openbuildservice.org/help/manuals/obs-user-guide/cha-obs-build-scheduling-and-dispatching.html">OBS Scheduling and Dispatching</a>：区分“计算需要哪些 build job”和“把 job 分配给合格空闲 worker”。</li>
+          <li><a href="https://openbuildservice.org/help/manuals/obs-user-guide/cha-obs-architecture">OBS Architecture</a>：scheduler、dispatcher、worker、repository server、signer 与 publisher 的职责边界。</li>
+          <li><a href="https://openbuildservice.org/help/manuals/obs-admin-guide/obs-cha-administration">OBS Administration: Dispatch Priorities</a>：按 project repository 已消耗 build time 进行公平调度的实现思路。</li>
+          <li><a href="https://www.postgresql.org/docs/current/sql-select.html">PostgreSQL SELECT / Locking Clause</a>：<code>FOR UPDATE SKIP LOCKED</code> 可用于 queue-like 多消费者避开已锁行，但产生不一致视图，因此只用于 claim。</li>
+          <li><a href="https://www.postgresql.org/docs/current/sql-listen.html">PostgreSQL LISTEN</a> 与 <a href="https://www.postgresql.org/docs/current/sql-notify.html">NOTIFY</a>：通知在事务提交后可见，适合作为“数据库已有新事件”的唤醒信号，事实 payload 仍保存在表/outbox。</li>
+          <li><a href="https://github.com/jackc/pgx">pgx</a>：Go 的 PostgreSQL driver/toolkit，提供 native PostgreSQL API、连接池、LISTEN/NOTIFY、COPY 与 <code>database/sql</code> adapter。</li>
+          <li><a href="https://docs.sqlc.dev/en/stable/">sqlc</a>：从 SQL query 生成类型安全、idiomatic Go 调用代码；本项目仍由 repository/transaction 层定义领域边界。</li>
+          <li><a href="https://pressly.github.io/goose/">goose</a>：顺序 SQL/Go schema migration CLI 与 library；本项目选择独立 migration job，不让每个 API replica 自动抢跑 migration。</li>
+          <li><a href="https://pgbackrest.org/">pgBackRest</a>：PostgreSQL backup/restore 与 WAL archive/PITR；repository 支持 POSIX、SFTP 和对象存储等后端。</li>
+          <li><a href="https://redis.io/docs/latest/develop/pubsub/">Redis Pub/Sub</a>：官方定义为 at-most-once；断线消息不会重放，所以只能用于实时 fan-out/invalidation，不能作为 canonical event log。</li>
+          <li><a href="https://redis.io/docs/latest/develop/data-types/streams/">Redis Streams</a> 与 <a href="https://redis.io/docs/latest/operate/oss_and_stack/management/persistence/">Redis Persistence</a>：Stream 支持 consumer group/replay，但仍受 Redis 异步复制和持久化策略约束；本项目即使采用 Stream，也只作为 PostgreSQL outbox 的短期传输加速层。</li>
+          <li><a href="https://redis.io/docs/latest/integrate/go-redis/">go-redis</a>：Redis 官方文档推荐的 Go client，支持连接池、context、Pub/Sub、Streams、Sentinel 与 Cluster。</li>
+          <li><a href="https://open.qa/docs/">openQA 官方文档</a>：VM/VNC/串口控制、needle、OCR、exclude region 和点击点模型。</li>
+          <li><a href="https://playwright.dev/docs/test-snapshots">Playwright Visual Comparisons</a>：golden screenshot、diff 阈值以及固定渲染环境的重要性。</li>
+          <li><a href="https://playwright.dev/docs/aria-snapshots">Playwright ARIA Snapshots</a>：语义树快照优先于纯像素定位的参考。</li>
+          <li><a href="https://playwright.dev/docs/api/class-electron">Playwright Electron Automation</a>：Electron renderer 可用 Playwright，但原生系统对话框需要单独处理。</li>
+          <li><a href="https://www.qemu.org/docs/master/interop/qemu-qmp-ref.html">QEMU QMP Reference</a>：包括 screendump 等 VM 控制能力。</li>
+          <li><a href="https://www.qemu.org/docs/master/system/images">QEMU Disk Images and Snapshots</a>：桌面测试环境恢复与快照基线。</li>
+          <li><a href="https://modelcontextprotocol.io/specification/2025-11-25/server/tools">MCP Tools（2025-11-25，当前稳定版）</a>：MCP tools 是模型控制的可执行接口，适合封装桌面 runner 能力；输入校验、访问控制、限流与人工确认需要由实现负责。</li>
+        </ul>
+      </section>
+    </main>
+  </div>
+
+  <footer>
+    <div class="shell">Portage Engine Engineering Roadmap · Self-contained HTML · 可离线打开与打印</div>
+  </footer>
+</body>
+</html>

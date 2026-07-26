@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "catalog_version": 1,
+  "default_profile_id": "pe/amd64/no-multilib/systemd/base-v2",
+  "default_resource_class": "medium",
+  "resource_classes": [
+    {
+      "id": "medium",
+      "machine_spec": {
+        "cores": "4",
+        "memory": "8192",
+        "disk_size": "50"
+      }
+    }
+  ],
+  "artifacts": [
+    {
+      "image_manifest": "evidence/base-systemd.image-manifest.json",
+      "binhost_path": "releases/amd64/binpackages/23.0/x86-64_pe-systemd-base-v2",
+      "build_plan": "bundles/base-g2/plans/base-systemd.build.json",
+      "common_config": "site/common.json",
+      "bundle_manifest": "bundles/base-g2/bundle-manifest.json",
+      "bundle_signature": "bundles/base-g2/bundle-manifest.sig.json",
+      "bundle_public_key": "trust/sync-public.json",
+      "input_lock": "bundles/base-g2/inputs.lock.json",
+      "offline_root": "bundles/base-g2"
+    },
+    {
+      "image_manifest": "evidence/desktop-verifier.image-manifest.json",
+      "binhost_path": "releases/amd64/binpackages/23.0/x86-64_pe-desktop-verifier-v1",
+      "build_plan": "bundles/desktop-g1/plans/desktop-verifier.build.json",
+      "common_config": "site/common.json",
+      "bundle_manifest": "bundles/desktop-g1/bundle-manifest.json",
+      "bundle_signature": "bundles/desktop-g1/bundle-manifest.sig.json",
+      "bundle_public_key": "trust/sync-public.json",
+      "input_lock": "bundles/desktop-g1/inputs.lock.json",
+      "offline_root": "bundles/desktop-g1"
+    }
+  ]
+}

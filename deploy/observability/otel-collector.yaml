@@ -1,0 +1,114 @@
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+  file_log/server:
+    include:
+      - /var/log/portage-engine/server.log*
+    start_at: beginning
+    include_file_path: true
+    resource:
+      service.name: portage-server
+      service.namespace: portage-engine
+      deployment.environment.name: local
+
+  file_log/dashboard:
+    include:
+      - /var/log/portage-engine/dashboard.log*
+    start_at: beginning
+    include_file_path: true
+    resource:
+      service.name: portage-dashboard
+      service.namespace: portage-engine
+      deployment.environment.name: local
+
+  postgresql:
+    endpoint: postgres:5432
+    transport: tcp
+    username: ${env:POSTGRES_USER}
+    password: ${env:POSTGRES_PASSWORD}
+    databases:
+      - ${env:POSTGRES_DB}
+    collection_interval: 15s
+    tls:
+      insecure: true
+
+  redis:
+    endpoint: redis:6379
+    password: ${env:REDIS_PASSWORD}
+    collection_interval: 15s
+    tls:
+      insecure: true
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 256
+    spike_limit_mib: 64
+  batch:
+    timeout: 2s
+    send_batch_size: 1024
+
+exporters:
+  prometheus:
+    endpoint: 0.0.0.0:8889
+    namespace: portage_engine
+    enable_open_metrics: true
+
+  otlp_http/loki:
+    endpoint: http://loki:3100/otlp
+
+  otlp_grpc/tempo:
+    endpoint: tempo:4317
+    tls:
+      insecure: true
+
+service:
+  extensions:
+    - health_check
+  telemetry:
+    metrics:
+      level: normal
+      readers:
+        - pull:
+            exporter:
+              prometheus:
+                host: 0.0.0.0
+                port: 8888
+  pipelines:
+    metrics:
+      receivers:
+        - otlp
+        - postgresql
+        - redis
+      processors:
+        - memory_limiter
+        - batch
+      exporters:
+        - prometheus
+    logs:
+      receivers:
+        - otlp
+        - file_log/server
+        - file_log/dashboard
+      processors:
+        - memory_limiter
+        - batch
+      exporters:
+        - otlp_http/loki
+    traces:
+      receivers:
+        - otlp
+      processors:
+        - memory_limiter
+        - batch
+      exporters:
+        - otlp_grpc/tempo

@@ -3,8 +3,92 @@ package binpkg
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
+
+func TestPromoteStagedPublishesFilesAndIndexTogether(t *testing.T) {
+	parent := t.TempDir()
+	store := NewStore(filepath.Join(parent, "binpkgs"))
+	staging := filepath.Join(parent, "quarantine", "job-1")
+	rel := filepath.ToSlash(filepath.Join("app-misc", "jq", "jq-1.8.1-1.gpkg.tar"))
+	source := filepath.Join(staging, filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(source), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(source, []byte("verified package"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	paths, err := store.PromoteStaged(staging, []string{rel}, "amd64")
+	if err != nil {
+		t.Fatalf("PromoteStaged: %v", err)
+	}
+	if len(paths) != 1 || paths[0] != filepath.Join(store.BasePath(), filepath.FromSlash(rel)) {
+		t.Fatalf("unexpected promoted paths: %#v", paths)
+	}
+	if _, err := os.Stat(source); !os.IsNotExist(err) {
+		t.Fatalf("staged source still exists after promotion: %v", err)
+	}
+	index, err := os.ReadFile(filepath.Join(store.BasePath(), "Packages"))
+	if err != nil {
+		t.Fatalf("read Packages: %v", err)
+	}
+	if !strings.Contains(string(index), "app-misc/jq-1.8.1") {
+		t.Fatalf("promoted package missing from Packages: %s", index)
+	}
+	if _, ok := store.Query(&QueryRequest{Name: "app-misc/jq", Arch: "amd64"}); !ok {
+		t.Fatal("promoted package missing from in-memory store")
+	}
+}
+
+func TestPromoteStagedRejectsTraversalWithoutPublishing(t *testing.T) {
+	parent := t.TempDir()
+	store := NewStore(filepath.Join(parent, "binpkgs"))
+	staging := filepath.Join(parent, "quarantine", "job-1")
+	if err := os.MkdirAll(staging, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := store.PromoteStaged(staging, []string{"../escape.gpkg.tar"}, "amd64"); err == nil {
+		t.Fatal("expected traversal path to be rejected")
+	}
+	if _, err := os.Stat(filepath.Join(parent, "escape.gpkg.tar")); !os.IsNotExist(err) {
+		t.Fatalf("traversal target was created: %v", err)
+	}
+}
+
+func TestPromoteStagedDoesNotOverwritePublishedLocation(t *testing.T) {
+	parent := t.TempDir()
+	publicRoot := filepath.Join(parent, "binpkgs")
+	store := NewStore(publicRoot)
+	rel := filepath.ToSlash(filepath.Join("app-misc", "jq", "jq-1.8.1-1.gpkg.tar"))
+	published := filepath.Join(publicRoot, filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(published), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(published, []byte("first immutable build"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	staging := filepath.Join(parent, "quarantine", "job-2")
+	source := filepath.Join(staging, filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(source), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(source, []byte("different rebuild"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PromoteStaged(staging, []string{rel}, "amd64"); err == nil {
+		t.Fatal("expected immutable destination conflict")
+	}
+	got, err := os.ReadFile(published)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "first immutable build" {
+		t.Fatalf("published bytes were overwritten: %q", got)
+	}
+}
 
 // TestNewStore tests creating a new binary package store.
 func TestNewStore(t *testing.T) {

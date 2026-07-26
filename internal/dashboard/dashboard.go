@@ -50,6 +50,7 @@ func New(cfg *config.DashboardConfig) *Dashboard {
 	template.Must(tmpl.New("build-detail").Parse(buildDetailHTML))
 	template.Must(tmpl.New("logs").Parse(logsPageHTML))
 	template.Must(tmpl.New("monitor").Parse(monitorHTML))
+	template.Must(tmpl.New("image-factory").Parse(imageFactoryHTML))
 	template.Must(tmpl.New("settings").Parse(settingsHTML))
 	template.Must(tmpl.New("docs").Parse(docsHTML))
 	template.Must(tmpl.New("shell").Parse(shellHTML))
@@ -93,6 +94,7 @@ func (d *Dashboard) Router() http.Handler {
 	mux.HandleFunc("/build/", d.handleBuildDetail)
 	mux.HandleFunc("/logs/", d.handleBuildLogs)
 	mux.HandleFunc("/monitor", d.handleBuildersMonitor)
+	mux.HandleFunc("/image-factory", d.handleImageFactoryPage)
 	mux.HandleFunc("/settings", d.handleSettingsPage)
 	mux.HandleFunc("/docs", d.handleDocs)
 
@@ -103,16 +105,22 @@ func (d *Dashboard) Router() http.Handler {
 	mux.HandleFunc("/api/builds", d.handleBuilds)
 	mux.HandleFunc("/api/builds/submit", d.handleBuildSubmitProxy)
 	mux.HandleFunc("/api/builds/delete", d.handleBuildDeleteProxy)
+	mux.HandleFunc("/api/builds/cancel", d.handleBuildCancelProxy)
+	mux.HandleFunc("/api/builds/retry", d.handleBuildRetryProxy)
 	mux.HandleFunc("/api/builds/cleanup-failed", d.handleBuildsCleanupFailedProxy)
 	mux.HandleFunc("/api/builds/detail", d.handleBuildDetailAPI)
 	mux.HandleFunc("/api/builds/logs", d.handleBuildLogsAPI)
 	mux.HandleFunc("/api/instances", d.handleInstances)
 	mux.HandleFunc("/api/scheduler/status", d.handleSchedulerStatus)
 	mux.HandleFunc("/api/builders/status", d.handleBuildersStatusAPI)
+	mux.HandleFunc("/api/ledger/status", d.handleLedgerStatusAPI)
+	mux.HandleFunc("/api/runtime-metadata/status", d.handleRuntimeMetadataStatusAPI)
+	mux.HandleFunc("/api/cache/status", d.handleCacheStatusAPI)
+	mux.HandleFunc("/api/events/jobs", d.handleJobEventsProxy)
+	mux.HandleFunc("/api/image-factory/status", d.handleImageFactoryStatusProxy)
 
 	// Key management endpoints
 	mux.HandleFunc("/api/gpg/status", d.handleGPGStatusProxy)
-	mux.HandleFunc("/api/gpg/generate", d.handleGPGGenerateProxy)
 	mux.HandleFunc("/api/keys/public", d.handlePublicKeyAPI)
 	mux.HandleFunc("/api/keys/download", d.handleDownloadKeyAPI)
 	mux.HandleFunc("/api/keys/info", d.handleKeyInfoAPI)
@@ -144,7 +152,7 @@ func (d *Dashboard) Router() http.Handler {
 
 	mux.HandleFunc("/static/apple.css", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/css; charset=utf-8")
-		w.Header().Set("Cache-Control", "public, max-age=300")
+		w.Header().Set("Cache-Control", "no-cache")
 		_, _ = w.Write([]byte(appleCSS))
 	})
 	mux.HandleFunc("/static/", d.handleStatic)
@@ -266,6 +274,18 @@ func (d *Dashboard) handleSettingsPage(w http.ResponseWriter, _ *http.Request) {
 	d.renderPage(w, "settings", nil)
 }
 
+func (d *Dashboard) handleImageFactoryPage(w http.ResponseWriter, _ *http.Request) {
+	d.renderPage(w, "image-factory", nil)
+}
+
+func (d *Dashboard) handleImageFactoryStatusProxy(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	d.proxyServer(w, r, http.MethodGet, d.config.ServerURL+"/api/v1/image-factory/status")
+}
+
 // handleCloudSettingsProxy forwards GET/PUT /api/settings/cloud to the server.
 func (d *Dashboard) handleCloudSettingsProxy(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
@@ -297,6 +317,32 @@ func (d *Dashboard) handleBuildDeleteProxy(w http.ResponseWriter, r *http.Reques
 	d.proxyServer(w, r, http.MethodDelete, d.config.ServerURL+"/api/v1/builds/delete?job_id="+url.QueryEscape(r.URL.Query().Get("job_id")))
 }
 
+// handleBuildCancelProxy requests cooperative cancellation. The database
+// removes the active lease immediately, so a stale executor cannot publish.
+func (d *Dashboard) handleBuildCancelProxy(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	target := d.config.ServerURL + "/api/v1/builds/cancel?job_id=" +
+		url.QueryEscape(r.URL.Query().Get("job_id"))
+	if reason := strings.TrimSpace(r.URL.Query().Get("reason")); reason != "" {
+		target += "&reason=" + url.QueryEscape(reason)
+	}
+	d.proxyServer(w, r, http.MethodPost, target)
+}
+
+// handleBuildRetryProxy creates a new fenced attempt without changing job
+// identity or losing the original attempt audit trail.
+func (d *Dashboard) handleBuildRetryProxy(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	d.proxyServer(w, r, http.MethodPost, d.config.ServerURL+"/api/v1/builds/retry?job_id="+
+		url.QueryEscape(r.URL.Query().Get("job_id")))
+}
+
 // handleBuildsCleanupFailedProxy forwards the bulk failed-job cleanup.
 func (d *Dashboard) handleBuildsCleanupFailedProxy(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -313,15 +359,6 @@ func (d *Dashboard) handleGPGStatusProxy(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	d.proxyServer(w, r, http.MethodGet, d.config.ServerURL+"/api/v1/gpg/status")
-}
-
-// handleGPGGenerateProxy forwards runtime key generation.
-func (d *Dashboard) handleGPGGenerateProxy(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	d.proxyServer(w, r, http.MethodPost, d.config.ServerURL+"/api/v1/gpg/generate")
 }
 
 // handleShellPage renders the web-shell page for an instance.
@@ -423,7 +460,7 @@ func (d *Dashboard) handleCloudSettingsTestProxy(w http.ResponseWriter, r *http.
 // proxyServer forwards a request (with body) to the backend server, attaching
 // the server API key, and relays status + body back honestly.
 func (d *Dashboard) proxyServer(w http.ResponseWriter, r *http.Request, method, url string) {
-	req, err := http.NewRequest(method, url, r.Body)
+	req, err := http.NewRequestWithContext(r.Context(), method, url, r.Body)
 	if err != nil {
 		writeBackendError(w, err)
 		return
@@ -444,7 +481,24 @@ func (d *Dashboard) proxyServer(w http.ResponseWriter, r *http.Request, method, 
 		w.Header().Set("Content-Type", ct)
 	}
 	w.WriteHeader(resp.StatusCode)
+	if strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream") {
+		if flusher, ok := w.(http.Flusher); ok {
+			_, _ = io.Copy(flushingWriter{writer: w, flusher: flusher}, resp.Body)
+			return
+		}
+	}
 	_, _ = io.Copy(w, resp.Body)
+}
+
+type flushingWriter struct {
+	writer  io.Writer
+	flusher http.Flusher
+}
+
+func (w flushingWriter) Write(data []byte) (int, error) {
+	n, err := w.writer.Write(data)
+	w.flusher.Flush()
+	return n, err
 }
 
 // handleStatus returns the cluster status.
@@ -656,28 +710,66 @@ func (d *Dashboard) handleSchedulerStatus(w http.ResponseWriter, _ *http.Request
 	resp, err := d.serverGet(url)
 	if err != nil {
 		log.Printf("Failed to query scheduler status: %v", err)
-		sampleStatus := map[string]interface{}{
-			"builders": []map[string]interface{}{
-				{
-					"id":           "builder-1",
-					"url":          "http://localhost:9090",
-					"capacity":     4,
-					"current_load": 2,
-					"enabled":      true,
-					"healthy":      true,
-				},
-			},
-			"queued_tasks":  5,
-			"running_tasks": 2,
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(sampleStatus)
+		writeBackendError(w, err)
 		return
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = io.Copy(w, resp.Body)
+}
+
+// handleLedgerStatusAPI exposes the server's low-cardinality DB-1 ledger
+// health without leaking request payloads, job IDs, or package names.
+func (d *Dashboard) handleLedgerStatusAPI(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	resp, err := d.serverGet(d.config.ServerURL + "/api/v1/ledger/status")
+	if err != nil {
+		log.Printf("Failed to query job ledger status: %v", err)
+		writeBackendError(w, err)
+		return
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(resp.StatusCode)
+	_, _ = io.Copy(w, resp.Body)
+}
+
+func (d *Dashboard) handleRuntimeMetadataStatusAPI(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	resp, err := d.serverGet(d.config.ServerURL + "/api/v1/runtime-metadata/status")
+	if err != nil {
+		log.Printf("Failed to query runtime metadata status: %v", err)
+		writeBackendError(w, err)
+		return
+	}
+	defer func() { _ = resp.Body.Close() }()
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(resp.StatusCode)
+	_, _ = io.Copy(w, resp.Body)
+}
+
+func (d *Dashboard) handleCacheStatusAPI(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	d.proxyServer(w, r, http.MethodGet, d.config.ServerURL+"/api/v1/cache/status")
+}
+
+func (d *Dashboard) handleJobEventsProxy(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	d.proxyServer(w, r, http.MethodGet, d.config.ServerURL+"/api/v1/events/jobs")
 }
 
 // handleStatic serves static files.

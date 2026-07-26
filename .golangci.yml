@@ -5,6 +5,14 @@ run:
   modules-download-mode: readonly
 
 linters:
+  settings:
+    revive:
+      rules:
+        # Public HTTP/JSON contracts use concise domain names; requiring a
+        # doc comment on every exported DTO adds noise without improving the
+        # package-level operational documentation.
+        - name: exported
+          disabled: true
   enable:
     - errcheck
     - govet
@@ -22,3 +30,11 @@ linters:
     - exhaustive
   disable:
     - gosec
+  exclusions:
+    rules:
+      # Operator-facing errors intentionally start with proper protocol,
+      # product, environment-variable, and milestone names (PVE, GPG,
+      # BINPKG_PATH, IMG-2, and similar).
+      - linters:
+          - staticcheck
+        text: "ST1005"

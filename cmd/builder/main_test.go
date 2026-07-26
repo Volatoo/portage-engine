@@ -7,11 +7,25 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/slchris/portage-engine/internal/builder"
 	"github.com/slchris/portage-engine/pkg/config"
 )
+
+func reusableBuilderTestConfig(t *testing.T, workers int) *config.BuilderConfig {
+	t.Helper()
+	root := t.TempDir()
+	return &config.BuilderConfig{
+		Workers:            workers,
+		NativeJobPolicy:    "unsafe-reuse",
+		DataDir:            filepath.Join(root, "data"),
+		WorkDir:            filepath.Join(root, "work"),
+		ArtifactDir:        filepath.Join(root, "artifacts"),
+		PersistenceEnabled: false,
+	}
+}
 
 func TestHealthEndpoint(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
@@ -33,11 +47,49 @@ func TestHealthEndpoint(t *testing.T) {
 	}
 }
 
-func TestStatusEndpoint(t *testing.T) {
+func TestNativeSingleUseHealthAndBuildEndpointDrain(t *testing.T) {
+	root := t.TempDir()
 	cfg := &config.BuilderConfig{
-		Workers: 2,
+		Workers:            0,
+		NativeJobPolicy:    "single-use",
+		DataDir:            filepath.Join(root, "data"),
+		WorkDir:            filepath.Join(root, "work"),
+		ArtifactDir:        filepath.Join(root, "artifacts"),
+		PersistenceEnabled: false,
 	}
-	bldr := builder.NewLocalBuilder(cfg.Workers, nil, cfg)
+	bldr := builder.NewLocalBuilder(0, cfg)
+	handler := setupHTTPHandlers(bldr)
+
+	health := httptest.NewRecorder()
+	handler.ServeHTTP(health, httptest.NewRequest(http.MethodGet, "/health", nil))
+	if health.Code != http.StatusOK {
+		t.Fatalf("fresh native builder health = %d, want 200", health.Code)
+	}
+
+	first := httptest.NewRecorder()
+	handler.ServeHTTP(first, httptest.NewRequest(http.MethodPost, "/api/v1/build",
+		strings.NewReader(`{"package_name":"app-misc/hello"}`)))
+	if first.Code != http.StatusOK {
+		t.Fatalf("first native build = %d: %s", first.Code, first.Body.String())
+	}
+
+	draining := httptest.NewRecorder()
+	handler.ServeHTTP(draining, httptest.NewRequest(http.MethodGet, "/health", nil))
+	if draining.Code != http.StatusServiceUnavailable {
+		t.Fatalf("consumed native builder health = %d, want 503", draining.Code)
+	}
+
+	second := httptest.NewRecorder()
+	handler.ServeHTTP(second, httptest.NewRequest(http.MethodPost, "/api/v1/build",
+		strings.NewReader(`{"package_name":"app-misc/jq"}`)))
+	if second.Code != http.StatusServiceUnavailable {
+		t.Fatalf("second native build = %d, want 503: %s", second.Code, second.Body.String())
+	}
+}
+
+func TestStatusEndpoint(t *testing.T) {
+	cfg := reusableBuilderTestConfig(t, 2)
+	bldr := builder.NewLocalBuilder(cfg.Workers, cfg)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/status", nil)
 	w := httptest.NewRecorder()
@@ -106,6 +158,34 @@ func TestBuildEndpointInvalidJSON(t *testing.T) {
 	}
 }
 
+func TestBuildEndpointRejectsUnknownFields(t *testing.T) {
+	bldr := builder.NewLocalBuilder(1, reusableBuilderTestConfig(t, 1))
+	handler := setupHTTPHandlers(bldr)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/build", strings.NewReader(
+		`{"package_name":"app-misc/hello","unexpected":"value"}`,
+	))
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for unknown field, got %d", w.Code)
+	}
+}
+
+func TestBuildEndpointRejectsOversizedBody(t *testing.T) {
+	bldr := builder.NewLocalBuilder(1, reusableBuilderTestConfig(t, 1))
+	handler := setupHTTPHandlers(bldr)
+	body := `{"package_name":"app-misc/hello","padding":"` +
+		strings.Repeat("x", int(builder.MaxBuildRequestBodyBytes)) + `"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/build", strings.NewReader(body))
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("expected 413 for oversized body, got %d", w.Code)
+	}
+}
+
 func TestJobStatusEndpoint(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/jobs/test-job-id", nil)
 	w := httptest.NewRecorder()
@@ -170,10 +250,8 @@ work_dir=/tmp/portage-work
 }
 
 func TestBuildRequestSubmission(t *testing.T) {
-	cfg := &config.BuilderConfig{
-		Workers: 2,
-	}
-	bldr := builder.NewLocalBuilder(cfg.Workers, nil, cfg)
+	cfg := reusableBuilderTestConfig(t, 0)
+	bldr := builder.NewLocalBuilder(cfg.Workers, cfg)
 
 	buildReq := &builder.LocalBuildRequest{
 		PackageName: "app-editors/vim",
@@ -241,10 +319,8 @@ func TestBuildRequestSubmission(t *testing.T) {
 }
 
 func TestArtifactInfoEndpointMissingJobID(t *testing.T) {
-	cfg := &config.BuilderConfig{
-		Workers: 1,
-	}
-	bldr := builder.NewLocalBuilder(cfg.Workers, nil, cfg)
+	cfg := reusableBuilderTestConfig(t, 1)
+	bldr := builder.NewLocalBuilder(cfg.Workers, cfg)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/artifacts/info/", nil)
 	w := httptest.NewRecorder()
@@ -274,10 +350,8 @@ func TestArtifactInfoEndpointMissingJobID(t *testing.T) {
 }
 
 func TestArtifactInfoEndpointNotFound(t *testing.T) {
-	cfg := &config.BuilderConfig{
-		Workers: 1,
-	}
-	bldr := builder.NewLocalBuilder(cfg.Workers, nil, cfg)
+	cfg := reusableBuilderTestConfig(t, 1)
+	bldr := builder.NewLocalBuilder(cfg.Workers, cfg)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/artifacts/info/non-existent-job", nil)
 	w := httptest.NewRecorder()
@@ -307,10 +381,8 @@ func TestArtifactInfoEndpointNotFound(t *testing.T) {
 }
 
 func TestArtifactDownloadEndpointMissingJobID(t *testing.T) {
-	cfg := &config.BuilderConfig{
-		Workers: 1,
-	}
-	bldr := builder.NewLocalBuilder(cfg.Workers, nil, cfg)
+	cfg := reusableBuilderTestConfig(t, 1)
+	bldr := builder.NewLocalBuilder(cfg.Workers, cfg)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/artifacts/download/", nil)
 	w := httptest.NewRecorder()
@@ -339,10 +411,8 @@ func TestArtifactDownloadEndpointMissingJobID(t *testing.T) {
 }
 
 func TestArtifactDownloadEndpointNotFound(t *testing.T) {
-	cfg := &config.BuilderConfig{
-		Workers: 1,
-	}
-	bldr := builder.NewLocalBuilder(cfg.Workers, nil, cfg)
+	cfg := reusableBuilderTestConfig(t, 1)
+	bldr := builder.NewLocalBuilder(cfg.Workers, cfg)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/artifacts/download/non-existent-job", nil)
 	w := httptest.NewRecorder()

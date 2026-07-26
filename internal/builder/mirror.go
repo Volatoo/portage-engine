@@ -8,7 +8,6 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/cookiejar"
-	neturl "net/url"
 	"os"
 	"path"
 	"strings"
@@ -41,11 +40,20 @@ func newMirrorUploader(cs *config.CloudSettings) *mirrorUploader {
 		dir = "portage-engine"
 	}
 	return &mirrorUploader{
-		base:   strings.TrimRight(cs.UploadURL, "/"),
-		user:   cs.UploadUser,
-		pass:   cs.UploadPassword,
-		dir:    dir,
-		client: &http.Client{Timeout: 5 * time.Minute, Jar: jar},
+		base: strings.TrimRight(cs.UploadURL, "/"),
+		user: cs.UploadUser,
+		pass: cs.UploadPassword,
+		dir:  dir,
+		client: &http.Client{
+			Timeout: 5 * time.Minute,
+			Jar:     jar,
+			// The upload API is a credential-bearing control path. Refuse all
+			// redirects so a 307/308 cannot replay the login body or upload to
+			// an unreviewed origin, especially in trusted-LAN HTTP deployments.
+			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		},
 	}
 }
 
@@ -138,26 +146,4 @@ func (u *mirrorUploader) uploadStream(name string, r io.Reader, subdir string) (
 		return u.binhostURL() + "/" + strings.TrimPrefix(dir+"/"+name, u.dir+"/"), nil
 	}
 	return out.Artifact.URL, nil
-}
-
-// deletePath removes <dir>/<rel> from the mirror (used when verification
-// fails and the broken package must not be served).
-func (u *mirrorUploader) deletePath(rel string) error {
-	segments := strings.Split(u.dir+"/"+strings.Trim(rel, "/"), "/")
-	for i, s := range segments {
-		segments[i] = neturl.PathEscape(s)
-	}
-	req, err := http.NewRequest(http.MethodDelete, u.base+"/api/artifacts/"+strings.Join(segments, "/"), nil)
-	if err != nil {
-		return err
-	}
-	resp, err := u.client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if !is2xx(resp.StatusCode) {
-		return fmt.Errorf("mirror delete failed (%d)", resp.StatusCode)
-	}
-	return nil
 }

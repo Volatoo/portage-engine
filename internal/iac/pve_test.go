@@ -296,11 +296,13 @@ func TestPVEProvisioner_GenerateMainTF(t *testing.T) {
 		`proxmox_vm_qemu`,
 		`name        = "test-builder"`,
 		`target_node = "pve-node1"`,
-		`cores       = 4`,
-		`sockets     = 1`,
+		`cpu {`,
+		`cores   = 4`,
+		`sockets = 1`,
 		`memory      = 8192`,
 		`agent       = 1`,
 		`os_type = "cloud-init"`,
+		`ciupgrade = false`,
 		`clone       = "debian-12-template"`,
 		`disks {`,
 		`scsi0 {`,
@@ -320,6 +322,11 @@ func TestPVEProvisioner_GenerateMainTF(t *testing.T) {
 	for _, expected := range expectedStrings {
 		if !strings.Contains(tf, expected) {
 			t.Errorf("Generated TF missing expected string: %s", expected)
+		}
+	}
+	for _, deprecated := range []string{"\n  cores       =", "\n  sockets     ="} {
+		if strings.Contains(tf, deprecated) {
+			t.Errorf("generated deprecated Telmate 3.x CPU argument %q", deprecated)
 		}
 	}
 
@@ -427,6 +434,9 @@ func TestPVEProvisioner_GenerateMainTF_WithStaticIP(t *testing.T) {
 	}
 	if !strings.Contains(tf, `ciuser = "admin"`) {
 		t.Error("Generated TF missing ciuser")
+	}
+	if !strings.Contains(tf, `ciupgrade = false`) {
+		t.Error("Generated TF must disable implicit cloud-init package upgrades")
 	}
 }
 

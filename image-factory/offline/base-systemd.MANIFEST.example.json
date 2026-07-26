@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "target": "base-systemd",
+  "repository_commit": "1111111111111111111111111111111111111111",
+  "objects": [
+    {
+      "filename": "example-distfile.tar.xz",
+      "uri": "https://distfiles.example.internal/example-distfile.tar.xz",
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "size": 1
+    }
+  ]
+}

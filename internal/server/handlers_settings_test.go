@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/slchris/portage-engine/internal/persistence"
 	"github.com/slchris/portage-engine/pkg/config"
 )
 
@@ -80,6 +81,9 @@ func TestCloudSettingsPutAppliesAndPersists(t *testing.T) {
 	if cs.PVEEndpoint != "https://pve.lan:8006" {
 		t.Errorf("endpoint not applied: %q", cs.PVEEndpoint)
 	}
+	if cs.BuildMode != "native-gentoo" {
+		t.Errorf("settings were not normalized to native-gentoo: %q", cs.BuildMode)
+	}
 
 	// Persisted file exists, contains the secret (mode 0600), and loads back.
 	path := filepath.Join(s.config.DataDir, "cloud-settings.json")
@@ -115,5 +119,63 @@ func TestCloudSettingsRejectsBadProvider(t *testing.T) {
 	s.handleCloudSettings(w, httptest.NewRequest(http.MethodPut, "/api/v1/settings/cloud", bytes.NewReader(body)))
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("expected 400 for unsupported provider, got %d", w.Code)
+	}
+}
+
+func TestCloudSettingsDatabaseModeRejectsCredentialPersistence(t *testing.T) {
+	s := settingsTestServer(t)
+	// The rejection happens before any repository operation, so a zero-value
+	// repository is sufficient to model PostgreSQL authority mode.
+	s.jobLedger = &persistence.JobRepository{}
+	body, _ := json.Marshal(map[string]any{
+		"provider":         "pve",
+		"pve_token_secret": "must-not-be-persisted",
+	})
+	w := httptest.NewRecorder()
+	s.handleCloudSettings(w, httptest.NewRequest(http.MethodPut, "/api/v1/settings/cloud", bytes.NewReader(body)))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for a shared secret value, got %d: %s", w.Code, w.Body.String())
+	}
+	if got := s.builder.CloudSettings().PVETokenSecret; got != "initial-secret" {
+		t.Fatalf("rejected update changed the injected credential: %q", got)
+	}
+
+	w = httptest.NewRecorder()
+	s.handleCloudSettings(w, httptest.NewRequest(http.MethodGet, "/api/v1/settings/cloud", nil))
+	var response map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if managed, _ := response["secret_values_managed_externally"].(bool); !managed {
+		t.Fatal("database mode did not advertise externally managed credentials")
+	}
+}
+
+func TestCloudSettingsRejectsVerificationBypass(t *testing.T) {
+	s := settingsTestServer(t)
+	body, _ := json.Marshal(map[string]any{
+		"provider":            "pve",
+		"skip_verify_install": true,
+	})
+	w := httptest.NewRecorder()
+	s.handleCloudSettings(w, httptest.NewRequest(http.MethodPut, "/api/v1/settings/cloud", bytes.NewReader(body)))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for verification bypass, got %d: %s", w.Code, w.Body.String())
+	}
+	if s.builder.CloudSettings().SkipVerifyInstall {
+		t.Fatal("verification bypass was applied despite rejection")
+	}
+}
+
+func TestCloudSettingsRejectsRemovedDockerMode(t *testing.T) {
+	s := settingsTestServer(t)
+	body, _ := json.Marshal(map[string]any{
+		"provider":   "pve",
+		"build_mode": "docker",
+	})
+	w := httptest.NewRecorder()
+	s.handleCloudSettings(w, httptest.NewRequest(http.MethodPut, "/api/v1/settings/cloud", bytes.NewReader(body)))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for removed Docker mode, got %d: %s", w.Code, w.Body.String())
 	}
 }

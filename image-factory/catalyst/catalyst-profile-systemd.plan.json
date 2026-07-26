@@ -1,0 +1,43 @@
+{
+  "schema_version": 2,
+  "target": "catalyst-profile-systemd",
+  "plan_object_id": "catalyst-plan/profile-nomultilib-systemd-g2",
+  "rootfs_id": "rootfs/catalyst-profile-nomultilib-systemd-g2",
+  "generation": "profile-nomultilib-g2",
+  "arch": "amd64",
+  "subarch": "amd64",
+  "rel_type": "default",
+  "version_stamp": "pe-profile-nomultilib-g2",
+  "snapshot_id": "pe-profile-nomultilib-g2-562f512d37e1",
+  "profile_id": "pe/amd64/no-multilib/systemd/base-v1",
+  "profile_path": "portage-engine/amd64/23.0/no-multilib/systemd/base",
+  "profile_repository": "pe-profiles",
+  "profile_parents": [
+    {"repository": "gentoo", "profile_path": "default/linux/amd64/23.0/no-multilib/systemd"}
+  ],
+  "profile_repository_object_id": "repository/pe-profiles-70269bf",
+  "profile_repository_key_object_id": "release-key/pe-profiles-g2",
+  "mirror_bundle_id": "mirror/img4e-catalyst-profile-live-runner-v6-2026-07-23",
+  "repositories": {
+    "gentoo": "562f512d37e15e97551769962528e12ceea8714b",
+    "pe-profiles": "70269bf86c3edc1fb901390c4cbcd3d9a6f6379e"
+  },
+  "repository_object_id": "repository/gentoo-562f512d",
+  "gentoo_repository_key_object_id": "release-key/gentoo-repository",
+  "stage3_object_id": "stage3/amd64-nomultilib-systemd-20260719T170103Z",
+  "stage3_digests_object_id": "stage3-digests/amd64-nomultilib-systemd-20260719T170103Z",
+  "release_key_object_id": "release-key/gentoo-release",
+  "catalyst_runtime_object_id": "catalyst-runtime/4.1.1-r1-python3.14",
+  "distfile_manifest_object_id": "distfiles/catalyst-profile-nomultilib-systemd-manifest",
+  "package_set_catalog_object_id": "package-sets/image-v1",
+  "package_sets": ["pe/catalyst-boot-v1"],
+  "packages": [],
+  "runtime_gentoo_repository_uri": "http://10.31.0.2/local/portage-engine/git/gentoo.git",
+  "runtime_profile_repository_uri": "http://10.31.0.2/local/portage-engine/git/pe-profiles.git",
+  "runtime_gentoo_mirror": "http://10.31.0.2/gentoo",
+  "seed_filename": "stage3-amd64-nomultilib-systemd-20260719T170103Z.tar.xz",
+  "output_filename": "stage4-amd64-pe-profile-nomultilib-g2.tar.xz",
+  "qcow2_filename": "pe-gentoo-amd64-no-multilib-systemd-catalyst-g2.qcow2",
+  "disk_size_gib": 32,
+  "jobs": 4
+}

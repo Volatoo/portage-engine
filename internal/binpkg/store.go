@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -24,16 +25,19 @@ type Package struct {
 
 // QueryRequest represents a package query request.
 type QueryRequest struct {
-	Name     string   `json:"name"`
-	Version  string   `json:"version"`
-	Arch     string   `json:"arch"`
-	UseFlags []string `json:"use_flags"`
+	Name      string   `json:"name"`
+	Version   string   `json:"version"`
+	Arch      string   `json:"arch"`
+	UseFlags  []string `json:"use_flags"`
+	ProfileID string   `json:"profile_id,omitempty"`
 }
 
 // QueryResponse represents a package query response.
 type QueryResponse struct {
-	Found   bool     `json:"found"`
-	Package *Package `json:"package,omitempty"`
+	Found       bool     `json:"found"`
+	Package     *Package `json:"package,omitempty"`
+	ProfileID   string   `json:"profile_id,omitempty"`
+	BinhostPath string   `json:"binhost_path,omitempty"`
 }
 
 // Store manages an in-memory queryable view of the binary packages on disk
@@ -174,6 +178,10 @@ func (s *Store) RegenerateIndex(arch string) (int, error) {
 	s.indexMu.Lock()
 	defer s.indexMu.Unlock()
 
+	return s.regenerateIndexLocked(arch)
+}
+
+func (s *Store) regenerateIndexLocked(arch string) (int, error) {
 	entries, err := generateIndex(s.basePath, arch)
 	if err != nil {
 		return 0, err
@@ -194,6 +202,101 @@ func (s *Store) RegenerateIndex(arch string) (int, error) {
 	s.mu.Unlock()
 
 	return len(entries), nil
+}
+
+// PromoteStaged atomically publishes a verified set of package files from a
+// staging directory on the same filesystem. The public Packages index is
+// regenerated while indexMu is held, so the periodic refresher cannot observe
+// a partially promoted set. Existing files are backed up and restored if any
+// rename or index generation fails.
+func (s *Store) PromoteStaged(stagingRoot string, rels []string, arch string) ([]string, error) {
+	if stagingRoot == "" || len(rels) == 0 {
+		return nil, fmt.Errorf("staging root and artifacts are required")
+	}
+
+	cleanRels := make([]string, 0, len(rels))
+	for _, rel := range rels {
+		clean := filepath.ToSlash(filepath.Clean(filepath.FromSlash(rel)))
+		if clean == "." || filepath.IsAbs(clean) || clean == ".." || strings.HasPrefix(clean, "../") {
+			return nil, fmt.Errorf("invalid staged artifact path %q", rel)
+		}
+		if slices.Contains(cleanRels, clean) {
+			return nil, fmt.Errorf("duplicate staged artifact path %q", rel)
+		}
+		info, err := os.Lstat(filepath.Join(stagingRoot, filepath.FromSlash(clean)))
+		if err != nil {
+			return nil, fmt.Errorf("stat staged artifact %q: %w", rel, err)
+		}
+		if !info.Mode().IsRegular() {
+			return nil, fmt.Errorf("staged artifact %q is not a regular file", rel)
+		}
+		cleanRels = append(cleanRels, clean)
+	}
+
+	s.indexMu.Lock()
+	defer s.indexMu.Unlock()
+
+	rollbackRoot, err := os.MkdirTemp(stagingRoot, ".promotion-rollback-")
+	if err != nil {
+		return nil, fmt.Errorf("create promotion rollback directory: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(rollbackRoot) }()
+
+	type movedArtifact struct {
+		rel       string
+		dest      string
+		backup    string
+		hadBackup bool
+	}
+	moved := make([]movedArtifact, 0, len(cleanRels))
+	rollback := func() {
+		for i := len(moved) - 1; i >= 0; i-- {
+			item := moved[i]
+			_ = os.Remove(item.dest)
+			if item.hadBackup {
+				_ = os.MkdirAll(filepath.Dir(item.dest), 0o750)
+				_ = os.Rename(item.backup, item.dest)
+			}
+		}
+	}
+
+	for _, rel := range cleanRels {
+		src := filepath.Join(stagingRoot, filepath.FromSlash(rel))
+		dest := filepath.Join(s.basePath, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(dest), 0o750); err != nil {
+			rollback()
+			return nil, fmt.Errorf("create publish directory for %q: %w", rel, err)
+		}
+
+		item := movedArtifact{rel: rel, dest: dest}
+		if _, err := os.Lstat(dest); err == nil {
+			rollback()
+			return nil, fmt.Errorf("published artifact %q already exists; binpkg locations are immutable", rel)
+		} else if !os.IsNotExist(err) {
+			rollback()
+			return nil, fmt.Errorf("inspect publish destination %q: %w", rel, err)
+		}
+
+		if err := os.Rename(src, dest); err != nil {
+			if item.hadBackup {
+				_ = os.Rename(item.backup, dest)
+			}
+			rollback()
+			return nil, fmt.Errorf("promote artifact %q: %w", rel, err)
+		}
+		moved = append(moved, item)
+	}
+
+	if _, err := s.regenerateIndexLocked(arch); err != nil {
+		rollback()
+		return nil, fmt.Errorf("regenerate Packages after promotion: %w", err)
+	}
+
+	paths := make([]string, 0, len(moved))
+	for _, item := range moved {
+		paths = append(paths, item.dest)
+	}
+	return paths, nil
 }
 
 // packageFromEntry converts a scanned index entry into a queryable Package.

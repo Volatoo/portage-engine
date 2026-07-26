@@ -25,6 +25,17 @@ func TestNewManager(t *testing.T) {
 	}
 }
 
+func TestWithWorkspaceDirUsesDurableStateLocation(t *testing.T) {
+	want := filepath.Join(t.TempDir(), "terraform-workspaces")
+	manager := NewManager(WithWorkspaceDir(want))
+	if manager.workspaceDir != want {
+		t.Fatalf("workspaceDir = %q, want %q", manager.workspaceDir, want)
+	}
+	if info, err := os.Stat(want); err != nil || !info.IsDir() {
+		t.Fatalf("durable workspace was not created: info=%v err=%v", info, err)
+	}
+}
+
 func TestGetOrDefault(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -648,7 +659,8 @@ func TestInstanceTTLFields(t *testing.T) {
 // NOT drop the instance from tracking (so the cleanup routine can retry it,
 // instead of leaking a billed VM with its terraform state deleted).
 func TestTerminateKeepsInstanceOnDestroyFailure(t *testing.T) {
-	m := NewManager()
+	stateFile := filepath.Join(t.TempDir(), "instances.json")
+	m := NewManager(WithStateFile(stateFile))
 	id := "leak-test"
 	// A non-existent TerraformDir makes `terraform destroy` fail to start
 	// (chdir error), deterministically, whether or not terraform is installed.
@@ -671,6 +683,235 @@ func TestTerminateKeepsInstanceOnDestroyFailure(t *testing.T) {
 	}
 	if inst.Status != "destroy_failed" {
 		t.Errorf("expected status destroy_failed, got %q", inst.Status)
+	}
+	data, readErr := os.ReadFile(stateFile)
+	if readErr != nil || !strings.Contains(string(data), `"status": "destroy_failed"`) {
+		t.Fatalf("destroy failure was not persisted for restart retry: data=%s err=%v", data, readErr)
+	}
+}
+
+func TestTerminatePersistsSuccessfulRemoval(t *testing.T) {
+	root := t.TempDir()
+	binDir := filepath.Join(root, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fakeTerraform := filepath.Join(binDir, "terraform")
+	if err := os.WriteFile(fakeTerraform, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	stateFile := filepath.Join(root, "instances.json")
+	workspace := filepath.Join(root, "workspace")
+	if err := os.MkdirAll(workspace, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	m := NewManager(WithStateFile(stateFile))
+	m.instances["done"] = &Instance{ID: "done", Status: "running", TerraformDir: workspace}
+	m.persistInstances()
+	if err := m.Terminate("done"); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(stateFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(data)) != "[]" {
+		t.Fatalf("terminated instance remained in persisted state: %s", data)
+	}
+}
+
+func TestTerminateRetainsWorkspaceUntilDurableCleanupAcknowledgement(t *testing.T) {
+	root := t.TempDir()
+	binDir := filepath.Join(root, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(binDir, "terraform"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	stateFile := filepath.Join(root, "instances.json")
+	workspace := filepath.Join(root, "workspace")
+	if err := os.MkdirAll(workspace, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	m := NewManager(WithStateFile(stateFile))
+	m.instances["needs-ack"] = &Instance{
+		ID: "needs-ack", Provider: "pve", Status: "running", TerraformDir: workspace,
+		lifecycle: func(_ *Instance, state, _ string, _ *time.Time) error {
+			if state == "destroyed" {
+				return os.ErrPermission
+			}
+			return nil
+		},
+	}
+	if err := m.Terminate("needs-ack"); err == nil {
+		t.Fatal("expected durable acknowledgement failure")
+	}
+	if _, err := os.Stat(workspace); err != nil {
+		t.Fatalf("workspace removed before acknowledgement: %v", err)
+	}
+	if inst, ok := m.instances["needs-ack"]; !ok || inst.Status != "destroy_failed" {
+		t.Fatalf("instance not retained for reconciliation: %+v", inst)
+	}
+}
+
+func TestDestroyRecordedAllowsReplicaCleanupInsideSharedWorkspace(t *testing.T) {
+	root := t.TempDir()
+	binDir := filepath.Join(root, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	commandLog := filepath.Join(root, "terraform-commands.log")
+	t.Setenv("TF_TEST_LOG", commandLog)
+	fakeTerraform := filepath.Join(binDir, "terraform")
+	if err := os.WriteFile(fakeTerraform, []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TF_TEST_LOG\"\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	workspaceRoot := filepath.Join(root, "shared-workspaces")
+	workspace := filepath.Join(workspaceRoot, "pve-old-attempt")
+	if err := os.MkdirAll(workspace, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	replica := NewManager(WithWorkspaceDir(workspaceRoot))
+	if err := replica.DestroyRecorded("pve", "pve-old-attempt", workspace); err != nil {
+		t.Fatalf("DestroyRecorded: %v", err)
+	}
+	commands, err := os.ReadFile(commandLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(commands)), "\n")
+	if len(lines) != 2 ||
+		!strings.HasPrefix(lines[0], "init -reconfigure -input=false") ||
+		!strings.HasPrefix(lines[1], "destroy -auto-approve") {
+		t.Fatalf("terraform commands = %q", lines)
+	}
+	if _, err := os.Stat(workspace); err != nil {
+		t.Fatalf("workspace was removed before durable acknowledgement: %v", err)
+	}
+	if err := replica.RemoveRecordedWorkspace(workspace); err != nil {
+		t.Fatalf("RemoveRecordedWorkspace: %v", err)
+	}
+	if _, err := os.Stat(workspace); !os.IsNotExist(err) {
+		t.Fatalf("destroyed workspace still exists: %v", err)
+	}
+
+	outside := filepath.Join(root, "outside")
+	if err := os.MkdirAll(outside, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := replica.DestroyRecorded("pve", "escape", outside); err == nil {
+		t.Fatal("expected workspace containment rejection")
+	}
+}
+
+func TestPersistInstancesDoesNotWriteDestroyCredentials(t *testing.T) {
+	stateFile := filepath.Join(t.TempDir(), "instances.json")
+	m := NewManager(WithStateFile(stateFile))
+	m.instances["safe-state"] = &Instance{
+		ID:           "safe-state",
+		Provider:     "pve",
+		Status:       "running",
+		TerraformDir: "/var/lib/portage-engine/terraform/safe-state",
+		destroyEnv: []string{
+			"PM_USER=terraform@example",
+			"PM_PASS=must-not-reach-disk",
+			"TF_VAR_pve_password=must-not-reach-disk",
+		},
+	}
+	m.persistInstances()
+
+	data, err := os.ReadFile(stateFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "must-not-reach-disk") ||
+		strings.Contains(string(data), `"destroy_env"`) {
+		t.Fatalf("instance state persisted destroy credentials: %s", data)
+	}
+	if info, err := os.Stat(stateFile); err != nil {
+		t.Fatal(err)
+	} else if info.Mode().Perm() != 0o600 {
+		t.Fatalf("state mode = %o, want 600", info.Mode().Perm())
+	}
+}
+
+func TestLoadInstancesScrubsLegacyDestroyCredentials(t *testing.T) {
+	root := t.TempDir()
+	stateFile := filepath.Join(root, "instances.json")
+	legacy := `[
+	  {
+	    "id": "legacy",
+	    "provider": "pve",
+	    "status": "running",
+	    "terraform_dir": "/var/lib/portage-engine/terraform/legacy",
+	    "destroy_env": ["PM_PASS=legacy-secret"]
+	  }
+	]`
+	if err := os.WriteFile(stateFile, []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	m := NewManager(WithStateFile(stateFile))
+	if _, ok := m.instances["legacy"]; !ok {
+		t.Fatal("legacy instance was not restored")
+	}
+	data, err := os.ReadFile(stateFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "legacy-secret") ||
+		strings.Contains(string(data), `"destroy_env"`) {
+		t.Fatalf("legacy credential material was not scrubbed: %s", data)
+	}
+}
+
+func TestTerminateRestoredInstanceUsesCredentialResolver(t *testing.T) {
+	root := t.TempDir()
+	binDir := filepath.Join(root, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fakeTerraform := filepath.Join(binDir, "terraform")
+	script := "#!/bin/sh\n" +
+		"test \"$PM_USER\" = \"terraform@example\"\n" +
+		"test \"$PM_PASS\" = \"resolved-at-runtime\"\n" +
+		"test \"$TF_VAR_pve_password\" = \"resolved-at-runtime\"\n"
+	if err := os.WriteFile(fakeTerraform, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	stateFile := filepath.Join(root, "instances.json")
+	workspace := filepath.Join(root, "workspace")
+	if err := os.MkdirAll(workspace, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	first := NewManager(WithStateFile(stateFile))
+	first.instances["restored"] = &Instance{
+		ID: "restored", Provider: "pve", Status: "running",
+		TerraformDir: workspace,
+	}
+	first.persistInstances()
+
+	restored := NewManager(WithStateFile(stateFile))
+	restored.SetCredentialResolver(func(provider string) *CloudCredentials {
+		if provider != "pve" {
+			t.Fatalf("resolver provider = %q, want pve", provider)
+		}
+		return &CloudCredentials{
+			PVEUsername: "terraform@example",
+			PVEPassword: "resolved-at-runtime",
+		}
+	})
+	if err := restored.Terminate("restored"); err != nil {
+		t.Fatalf("Terminate restored instance: %v", err)
 	}
 }
 
@@ -699,6 +940,41 @@ func TestCleanupRetriesDestroyFailedInstances(t *testing.T) {
 	}
 	if inst.Status != "destroy_failed" {
 		t.Errorf("expected it to remain destroy_failed after a failed retry, got %q", inst.Status)
+	}
+}
+
+func TestReconcileLoadedInstancesReclaimsSingleUseVMs(t *testing.T) {
+	root := t.TempDir()
+	binDir := filepath.Join(root, "bin")
+	if err := os.MkdirAll(binDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	fakeTerraform := filepath.Join(binDir, "terraform")
+	if err := os.WriteFile(fakeTerraform, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	terraformDir := filepath.Join(root, "restored-instance")
+	if err := os.MkdirAll(terraformDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	m := NewManager(WithWorkspaceDir(filepath.Join(root, "workspaces")))
+	m.instances["restored-running"] = &Instance{
+		ID:              "restored-running",
+		Provider:        "pve",
+		Status:          "running",
+		BuilderEndpoint: "http://127.0.0.1:9090",
+		TerraformDir:    terraformDir,
+	}
+
+	m.reconcileLoadedInstances()
+
+	if _, exists := m.instances["restored-running"]; exists {
+		t.Fatal("healthy restored native VM was retained for reuse")
+	}
+	if _, err := os.Stat(terraformDir); !os.IsNotExist(err) {
+		t.Fatalf("restored VM workspace was not removed after destroy: %v", err)
 	}
 }
 

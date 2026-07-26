@@ -81,52 +81,6 @@ func TestGentooPackageManager_Commands(t *testing.T) {
 	})
 }
 
-func TestGentooPackageManager_DockerMounts(t *testing.T) {
-	cfg := &config.BuilderConfig{
-		PortageReposPath: "/var/db/repos",
-		PortageConfPath:  "/etc/portage",
-		MakeConfPath:     "/etc/portage/make.conf",
-	}
-	pm := NewGentooPackageManager(cfg)
-
-	mounts := pm.GetDockerMounts(cfg)
-
-	if len(mounts) < 2 {
-		t.Errorf("expected at least 2 mounts, got %d", len(mounts))
-	}
-
-	// Check repos mount
-	foundRepos := false
-	for _, m := range mounts {
-		if m.Target == "/var/db/repos" {
-			foundRepos = true
-			if !m.ReadOnly {
-				t.Error("repos mount should be read-only")
-			}
-			break
-		}
-	}
-	if !foundRepos {
-		t.Error("expected /var/db/repos mount")
-	}
-
-	// Check portage config mount: staged read-only at /tmp/pconf, copied to a
-	// writable /etc/portage by the build script (getuto needs it writable).
-	foundPortage := false
-	for _, m := range mounts {
-		if m.Target == "/tmp/pconf" {
-			foundPortage = true
-			if !m.ReadOnly {
-				t.Error("portage config mount should be read-only")
-			}
-			break
-		}
-	}
-	if !foundPortage {
-		t.Error("expected /tmp/pconf portage config mount")
-	}
-}
-
 func TestGentooPackageManager_EnvVars(t *testing.T) {
 	t.Run("with mirrors configured", func(t *testing.T) {
 		cfg := &config.BuilderConfig{
@@ -155,42 +109,6 @@ func TestGentooPackageManager_EnvVars(t *testing.T) {
 			t.Error("GENTOO_MIRRORS should not be set when not configured")
 		}
 	})
-}
-
-func TestDockerMount_String(t *testing.T) {
-	tests := []struct {
-		name   string
-		mount  DockerMount
-		expect string
-	}{
-		{
-			name: "read-write mount",
-			mount: DockerMount{
-				Source:   "/host/path",
-				Target:   "/container/path",
-				ReadOnly: false,
-			},
-			expect: "/host/path:/container/path",
-		},
-		{
-			name: "read-only mount",
-			mount: DockerMount{
-				Source:   "/host/path",
-				Target:   "/container/path",
-				ReadOnly: true,
-			},
-			expect: "/host/path:/container/path:ro",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := tt.mount.String()
-			if result != tt.expect {
-				t.Errorf("DockerMount.String() = %v, want %v", result, tt.expect)
-			}
-		})
-	}
 }
 
 func TestGentooPackageManager_BuildCommandWithOptions(t *testing.T) {

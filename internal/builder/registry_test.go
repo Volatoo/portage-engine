@@ -404,6 +404,15 @@ func TestGetStats(t *testing.T) {
 			SuccessBuilds: 25,
 			FailedBuilds:  5,
 		},
+		{
+			ID:            "builder-4",
+			Status:        "draining",
+			Enabled:       true,
+			Capacity:      0,
+			CurrentLoad:   0,
+			TotalBuilds:   1,
+			SuccessBuilds: 1,
+		},
 	}
 
 	for _, b := range builders {
@@ -412,8 +421,8 @@ func TestGetStats(t *testing.T) {
 
 	stats := r.GetStats()
 
-	if stats["total_builders"] != 3 {
-		t.Errorf("total_builders = %v, want 3", stats["total_builders"])
+	if stats["total_builders"] != 4 {
+		t.Errorf("total_builders = %v, want 4", stats["total_builders"])
 	}
 	if stats["online_builders"] != 2 {
 		t.Errorf("online_builders = %v, want 2", stats["online_builders"])
@@ -421,26 +430,30 @@ func TestGetStats(t *testing.T) {
 	if stats["offline_builders"] != 1 {
 		t.Errorf("offline_builders = %v, want 1", stats["offline_builders"])
 	}
+	if stats["draining_builders"] != 1 {
+		t.Errorf("draining_builders = %v, want 1", stats["draining_builders"])
+	}
 	if stats["total_capacity"] != 10 {
 		t.Errorf("total_capacity = %v, want 10", stats["total_capacity"])
 	}
 	if stats["total_load"] != 4 {
 		t.Errorf("total_load = %v, want 4", stats["total_load"])
 	}
-	if stats["total_builds"] != 180 {
-		t.Errorf("total_builds = %v, want 180", stats["total_builds"])
+	if stats["total_builds"] != 181 {
+		t.Errorf("total_builds = %v, want 181", stats["total_builds"])
 	}
-	if stats["success_builds"] != 160 {
-		t.Errorf("success_builds = %v, want 160", stats["success_builds"])
+	if stats["success_builds"] != 161 {
+		t.Errorf("success_builds = %v, want 161", stats["success_builds"])
 	}
 	if stats["failed_builds"] != 20 {
 		t.Errorf("failed_builds = %v, want 20", stats["failed_builds"])
 	}
 
-	// Success rate should be 160/180 * 100 = 88.888...
+	// Success rate should include the completed draining builder.
 	successRate := stats["success_rate"].(float64)
-	if successRate < 88.8 || successRate > 88.9 {
-		t.Errorf("success_rate = %f, want ~88.89", successRate)
+	expectedSuccessRate := float64(161) / float64(181) * 100
+	if successRate != expectedSuccessRate {
+		t.Errorf("success_rate = %f, want %f", successRate, expectedSuccessRate)
 	}
 }
 

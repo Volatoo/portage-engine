@@ -12,7 +12,7 @@ type BuilderInfo struct {
 	ID            string    `json:"id"`
 	Endpoint      string    `json:"endpoint"`
 	Architecture  string    `json:"architecture"`
-	Status        string    `json:"status"`       // online, offline, busy
+	Status        string    `json:"status"`       // online, offline, busy, draining
 	Capacity      int       `json:"capacity"`     // max concurrent builds
 	CurrentLoad   int       `json:"current_load"` // current active builds
 	LastHeartbeat time.Time `json:"last_heartbeat"`
@@ -202,6 +202,7 @@ func (r *Registry) GetStats() map[string]interface{} {
 	totalBuilders := len(r.builders)
 	onlineBuilders := 0
 	offlineBuilders := 0
+	drainingBuilders := 0
 	totalCapacity := 0
 	totalLoad := 0
 	totalBuilds := 0
@@ -210,9 +211,12 @@ func (r *Registry) GetStats() map[string]interface{} {
 
 	for _, builder := range r.builders {
 		if builder.Enabled {
-			if builder.Status == "online" || builder.Status == "busy" {
+			switch builder.Status {
+			case "online", "busy":
 				onlineBuilders++
-			} else {
+			case "draining":
+				drainingBuilders++
+			default:
 				offlineBuilders++
 			}
 		}
@@ -229,15 +233,16 @@ func (r *Registry) GetStats() map[string]interface{} {
 	}
 
 	return map[string]interface{}{
-		"total_builders":   totalBuilders,
-		"online_builders":  onlineBuilders,
-		"offline_builders": offlineBuilders,
-		"total_capacity":   totalCapacity,
-		"total_load":       totalLoad,
-		"total_builds":     totalBuilds,
-		"success_builds":   totalSuccess,
-		"failed_builds":    totalFailed,
-		"success_rate":     successRate,
+		"total_builders":    totalBuilders,
+		"online_builders":   onlineBuilders,
+		"offline_builders":  offlineBuilders,
+		"draining_builders": drainingBuilders,
+		"total_capacity":    totalCapacity,
+		"total_load":        totalLoad,
+		"total_builds":      totalBuilds,
+		"success_builds":    totalSuccess,
+		"failed_builds":     totalFailed,
+		"success_rate":      successRate,
 	}
 }
 

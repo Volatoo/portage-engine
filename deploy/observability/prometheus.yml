@@ -1,0 +1,45 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: portage-engine-server
+    metrics_path: /metrics/prometheus
+    static_configs:
+      - targets:
+          - portage-server:8080
+        labels:
+          component: server
+          environment: local
+
+  - job_name: portage-engine-otel-exporter
+    static_configs:
+      - targets:
+          - otel-collector:8889
+        labels:
+          component: otel-collector
+          environment: local
+
+  - job_name: portage-engine-otel-collector
+    static_configs:
+      - targets:
+          - otel-collector:8888
+        labels:
+          component: otel-collector-internal
+          environment: local
+
+  - job_name: portage-engine-loki
+    static_configs:
+      - targets:
+          - loki:3100
+        labels:
+          component: loki
+          environment: local
+
+  - job_name: portage-engine-tempo
+    static_configs:
+      - targets:
+          - tempo:3200
+        labels:
+          component: tempo
+          environment: local

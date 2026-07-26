@@ -3,7 +3,11 @@ package builder
 
 import (
 	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -14,6 +18,8 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -21,7 +27,10 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/slchris/portage-engine/internal/binpkg"
+	"github.com/slchris/portage-engine/internal/catalog"
 	"github.com/slchris/portage-engine/internal/iac"
+	"github.com/slchris/portage-engine/internal/signing"
 	"github.com/slchris/portage-engine/pkg/config"
 )
 
@@ -32,17 +41,77 @@ type BuildRequest struct {
 	Arch          string            `json:"arch"`
 	UseFlags      []string          `json:"use_flags"`
 	CloudProvider string            `json:"cloud_provider"`
+	ProfileID     string            `json:"profile_id,omitempty"`
+	RepositoryIDs []string          `json:"repository_ids,omitempty"`
+	ResourceClass string            `json:"resource_class,omitempty"`
 	MachineSpec   map[string]string `json:"machine_spec"`
+	// ResolvedContext is produced by the server catalog. It is never decoded
+	// from a public request and is the authoritative infrastructure selection.
+	ResolvedContext *catalog.ResolvedBuildContext `json:"-"`
 	// ConfigBundle, when set, carries the full Portage configuration to build
 	// with. It is forwarded verbatim to the remote builder so the build applies
 	// the exact USE flags / make.conf / repos the client specified.
 	ConfigBundle *ConfigBundle `json:"config_bundle,omitempty"`
+	// IdempotencyKey is supplied by the control-plane HTTP boundary. It is not
+	// forwarded to builders; PostgreSQL uses it to deduplicate submissions.
+	IdempotencyKey string `json:"-"`
 }
 
 // BuildResponse represents a build request response.
 type BuildResponse struct {
 	JobID  string `json:"job_id"`
 	Status string `json:"status"`
+}
+
+// RequestError identifies a request rejected before any job or infrastructure
+// is allocated. HTTP handlers map it to 400 instead of reporting an operator
+// or builder availability failure.
+type RequestError struct {
+	err error
+}
+
+func (e *RequestError) Error() string { return e.err.Error() }
+func (e *RequestError) Unwrap() error { return e.err }
+
+// IsRequestError reports whether err is a client-side build contract error.
+func IsRequestError(err error) bool {
+	var requestErr *RequestError
+	return errors.As(err, &requestErr)
+}
+
+// IdempotencyConflictError means an idempotency key was reused with a
+// different request. HTTP adapters expose it as a conflict.
+type IdempotencyConflictError struct {
+	err error
+}
+
+func (e *IdempotencyConflictError) Error() string { return e.err.Error() }
+func (e *IdempotencyConflictError) Unwrap() error { return e.err }
+
+// NewIdempotencyConflictError wraps a conflicting idempotency-key reuse.
+func NewIdempotencyConflictError(err error) error {
+	return &IdempotencyConflictError{err: err}
+}
+
+// IsIdempotencyConflict reports whether err is an idempotency-key conflict.
+func IsIdempotencyConflict(err error) bool {
+	var conflict *IdempotencyConflictError
+	return errors.As(err, &conflict)
+}
+
+// LedgerError means the durable job ledger rejected or could not persist a
+// mutation. The in-memory queue must not accept that mutation.
+type LedgerError struct {
+	err error
+}
+
+func (e *LedgerError) Error() string { return e.err.Error() }
+func (e *LedgerError) Unwrap() error { return e.err }
+
+// IsLedgerError reports whether err originated from the durable ledger gate.
+func IsLedgerError(err error) bool {
+	var ledgerErr *LedgerError
+	return errors.As(err, &ledgerErr)
 }
 
 // BuildStatus represents the status of a build job.
@@ -65,12 +134,151 @@ type BuildStatus struct {
 	Artifacts []string `json:"artifacts,omitempty"`
 	// ArtifactPaths mirrors Artifacts with local filesystem paths (cleanup).
 	ArtifactPaths []string `json:"-"`
+	// Staging fields are server-internal quarantine state. They are never
+	// exposed as downloadable artifacts before verification and promotion.
+	StagingRoot       string   `json:"-"`
+	VerificationToken string   `json:"-"`
+	StagedArtifacts   []string `json:"-"`
+	StagedPrimary     string   `json:"-"`
 	// Signed reports whether the builder signed the produced packages.
 	Signed bool `json:"signed,omitempty"`
+	// ResolvedContext records the exact server-owned profile, repositories,
+	// mirror bundle, and image generation selected for this job.
+	ResolvedContext *catalog.ResolvedBuildContext `json:"resolved_context,omitempty"`
 	// FailedStage names the pipeline stage a failed job died in
 	// (provision/deploy/build/collect/verify), for accurate UI attribution.
 	FailedStage string `json:"failed_stage,omitempty"`
 	Log         string `json:"log,omitempty"`
+	// Request is the immutable, resolved request used by the DB-1 shadow
+	// ledger. It is hidden from APIs and the legacy JSON snapshot.
+	Request *BuildRequest `json:"-"`
+	// DB-2 claim identity is hidden from public APIs. Every transition and the
+	// final publish gate must present this attempt/fence tuple.
+	AttemptID  string `json:"-"`
+	FenceToken int64  `json:"-"`
+	LeaseOwner string `json:"-"`
+}
+
+// LedgerCreateResult describes either a newly inserted shadow-ledger row or
+// the existing row returned for an idempotent retry.
+type LedgerCreateResult struct {
+	JobID   string
+	Status  *BuildStatus
+	Created bool
+}
+
+// JobLedger is the DB-1 shadow persistence contract. The in-memory queue
+// remains authoritative until DB-2, but a new job may not start unless its
+// initial row and claim transition are durable.
+type JobLedger interface {
+	CreateJob(context.Context, *BuildRequest, *BuildStatus) (LedgerCreateResult, error)
+	RecordTransition(context.Context, *BuildStatus, *BuildStatus) error
+	HideJob(context.Context, *BuildStatus, string) error
+}
+
+// SchedulerClaim is an atomically claimed PostgreSQL queue item.
+type SchedulerClaim struct {
+	Request *BuildRequest
+	Status  *BuildStatus
+}
+
+// SchedulerRuntimeStatus is a low-cardinality database view of queue and
+// executor health. It deliberately contains no package names, job IDs, or
+// request payloads so it is safe to expose on the operator monitor.
+type SchedulerRuntimeStatus struct {
+	Authority          string     `json:"authority"`
+	QueuedTasks        int        `json:"queued_tasks"`
+	RunningTasks       int        `json:"running_tasks"`
+	ActiveLeases       int        `json:"active_leases"`
+	ExpiredLeases      int        `json:"expired_leases"`
+	RegisteredWorkers  int        `json:"registered_workers"`
+	ActiveWorkers      int        `json:"active_workers"`
+	StaleWorkers       int        `json:"stale_workers"`
+	AttemptsLastHour   int        `json:"attempts_last_hour"`
+	OldestQueuedAt     *time.Time `json:"oldest_queued_at,omitempty"`
+	OldestLeaseExpires *time.Time `json:"oldest_lease_expires_at,omitempty"`
+}
+
+// InfraRecord and ArtifactRecord are attempt-owned DB-3 metadata. They carry
+// no provider credentials or file contents.
+type InfraRecord struct {
+	Provider           string            `json:"provider"`
+	ProviderInstanceID string            `json:"provider_instance_id"`
+	State              string            `json:"state"`
+	RemoteStateRef     string            `json:"remote_state_ref,omitempty"`
+	Attributes         map[string]string `json:"attributes,omitempty"`
+	FailureDetail      string            `json:"failure_detail,omitempty"`
+	CleanupAfter       *time.Time        `json:"cleanup_after,omitempty"`
+	DeletedAt          *time.Time        `json:"deleted_at,omitempty"`
+}
+
+// ArtifactRecord is the durable metadata projection for one build artifact.
+type ArtifactRecord struct {
+	Kind        string         `json:"kind"`
+	State       string         `json:"state"`
+	Digest      string         `json:"digest"`
+	SizeBytes   int64          `json:"size_bytes"`
+	MediaType   string         `json:"media_type"`
+	Location    string         `json:"location"`
+	Lineage     map[string]any `json:"lineage,omitempty"`
+	Published   *time.Time     `json:"published_at,omitempty"`
+	RetainUntil *time.Time     `json:"retention_until,omitempty"`
+}
+
+// LogRecord is one timestamped durable build-log entry.
+type LogRecord struct {
+	OccurredAt time.Time `json:"occurred_at"`
+	Message    string    `json:"message"`
+}
+
+// RuntimeMetadataLedger persists side effects owned by a fenced attempt.
+type RuntimeMetadataLedger interface {
+	RecordInfra(context.Context, *BuildStatus, InfraRecord) error
+	RecordArtifacts(context.Context, *BuildStatus, []ArtifactRecord) error
+}
+
+// InfraCleanupClaim is a PostgreSQL-leased Terraform workspace whose original
+// build attempt is no longer allowed to own external side effects.
+type InfraCleanupClaim struct {
+	ID                 string
+	Provider           string
+	ProviderInstanceID string
+	RemoteStateRef     string
+	CleanupFence       int64
+}
+
+// InfraCleanupLedger turns leaked-instance reclamation into a cross-replica
+// queue. PostgreSQL elects one owner/fence; Terraform state stays on the shared
+// DATA_DIR volume.
+type InfraCleanupLedger interface {
+	ClaimInfraCleanup(context.Context, string, time.Duration) (*InfraCleanupClaim, error)
+	CompleteInfraCleanup(context.Context, string, string, int64) error
+	FailInfraCleanup(context.Context, string, string, int64, string) error
+}
+
+// ArtifactPromotionLedger serializes the short external publication saga
+// across control-plane replicas while re-validating the attempt fence.
+type ArtifactPromotionLedger interface {
+	AcquireArtifactPromotion(context.Context, *BuildStatus) (func() error, error)
+}
+
+// DurableLogLedger persists and queries build logs across control-plane replicas.
+type DurableLogLedger interface {
+	AppendLogs(context.Context, *BuildStatus, []LogRecord) error
+	LoadLogs(context.Context, string) (string, error)
+}
+
+// DurableScheduler is the DB-2 queue authority. Redis/notifications may wake
+// workers later, but correctness depends only on these PostgreSQL operations.
+type DurableScheduler interface {
+	JobLedger
+	ClaimNext(context.Context, string, time.Duration) (*SchedulerClaim, error)
+	RenewClaim(context.Context, *BuildStatus, time.Duration) error
+	CheckClaim(context.Context, *BuildStatus) error
+	LoadVisible(context.Context) (map[string]*BuildStatus, error)
+	CancelJob(context.Context, string, string) (*BuildStatus, error)
+	RetryJob(context.Context, string) (*BuildStatus, error)
+	RuntimeStatus(context.Context) (SchedulerRuntimeStatus, error)
 }
 
 // queuedJob pairs a build request with the job ID assigned at submission, so a
@@ -91,19 +299,39 @@ type Manager struct {
 	workQueue    chan *queuedJob
 	remoteBuilds map[string]string // jobID -> builderURL
 	rrNext       atomic.Uint32     // round-robin cursor over RemoteBuilders
+	submitMu     sync.Mutex
+	jobLedger    JobLedger
+	scheduler    DurableScheduler
+	metadata     RuntimeMetadataLedger
+	infraCleanup InfraCleanupLedger
+	promotionDB  ArtifactPromotionLedger
+	signing      signing.Coordinator
+	logLedger    DurableLogLedger
+	stopCh       chan struct{}
+	shutdownOnce sync.Once
+	workersOnce  sync.Once
+	cleanupOnce  sync.Once
+	stopped      bool // guarded by submitMu
+	schedulerID  string
+	wakeHook     func()
+	eventHook    func(BuildStatus)
 
 	// onArtifactStored, when set, is called after an artifact lands in the
 	// binhost PKGDIR (the server uses it to refresh the Packages index).
 	onArtifactStored func()
+	// promoteArtifacts is the only path from quarantine into the public
+	// PKGDIR. The server wires it to binpkg.Store.PromoteStaged.
+	promoteArtifacts func(string, []string, string, string) ([]string, error)
 
-	// gpgKeyProvider, when set, supplies the binhost signing key material:
-	// key ID, armored public key, armored secret key (nil when disabled).
+	// gpgKeyProvider supplies only the isolated signer's public identity. The
+	// third return is retained for API compatibility and must always be nil.
 	gpgKeyProvider func() (string, []byte, []byte)
 
 	// cloudSettings is the runtime-adjustable cloud provisioning config,
 	// swapped atomically by the settings API. Workers take a snapshot per
 	// build, so an update never races an in-flight provision.
 	cloudSettings atomic.Pointer[config.CloudSettings]
+	buildCatalog  atomic.Pointer[catalog.Catalog]
 }
 
 // SetArtifactStoredHook registers a callback invoked after an artifact has
@@ -112,8 +340,13 @@ func (m *Manager) SetArtifactStoredHook(f func()) {
 	m.onArtifactStored = f
 }
 
-// SetGPGKeyProvider registers the source of binhost signing key material
-// (used for builder deployment, verify-side pubkey import, and mirror upload).
+// SetArtifactPromotionHook installs the verified artifact promotion callback.
+func (m *Manager) SetArtifactPromotionHook(f func(string, []string, string, string) ([]string, error)) {
+	m.promoteArtifacts = f
+}
+
+// SetGPGKeyProvider registers the isolated signer's public identity for
+// verification and mirror publication. It is never used during deployment.
 func (m *Manager) SetGPGKeyProvider(f func() (string, []byte, []byte)) {
 	m.gpgKeyProvider = f
 }
@@ -125,31 +358,143 @@ func NewManager(cfg *config.ServerConfig) *Manager {
 		iacOpts = append(iacOpts, iac.WithDefaultTTL(time.Duration(cfg.CloudInstanceTTL)*time.Minute))
 	}
 	if cfg.DataDir != "" {
-		// Persist instances so live VMs survive server restarts instead of
-		// becoming orphans.
-		iacOpts = append(iacOpts, iac.WithStateFile(filepath.Join(cfg.DataDir, "instances.json")))
+		iacOpts = append(iacOpts, iac.WithWorkspaceDir(filepath.Join(cfg.DataDir, "terraform-workspaces")))
+		if !cfg.Database.Enabled {
+			// Standalone compatibility mode has no PostgreSQL cleanup queue.
+			// Persist the local instance map for restart recovery.
+			iacOpts = append(iacOpts, iac.WithStateFile(filepath.Join(cfg.DataDir, "instances.json")))
+		}
 	}
 
+	controlPlaneID := strings.TrimSpace(cfg.ControlPlaneID)
+	if controlPlaneID == "" {
+		controlPlaneID, _ = os.Hostname()
+	}
+	if controlPlaneID == "" {
+		controlPlaneID = uuid.NewString()
+	}
 	mgr := &Manager{
 		config:       cfg,
 		iacMgr:       iac.NewManager(iacOpts...),
 		jobs:         make(map[string]*BuildStatus),
 		workQueue:    make(chan *queuedJob, 100),
 		remoteBuilds: make(map[string]string),
+		stopCh:       make(chan struct{}),
+		schedulerID:  "control-plane/" + controlPlaneID,
 	}
-	mgr.cloudSettings.Store(config.CloudSettingsFromServerConfig(cfg))
-
-	// Start the IaC cleanup routine so expired / orphaned cloud instances are
-	// reclaimed (without this, TTL auto-termination never runs and leaked VMs
-	// bill forever).
-	mgr.iacMgr.StartCleanupRoutine()
-
-	// Start worker goroutines
-	for i := 0; i < cfg.MaxWorkers; i++ {
-		go mgr.worker()
-	}
+	initialCloudSettings := config.CloudSettingsFromServerConfig(cfg)
+	initialCloudSettings.SkipVerifyInstall = false
+	mgr.cloudSettings.Store(initialCloudSettings)
+	// Restored IaC instances retain only non-secret Terraform state on disk.
+	// Resolve destroy credentials from the current in-memory cloud settings so
+	// a restart can reclaim them without ever persisting passwords or tokens in
+	// instances.json.
+	mgr.iacMgr.SetCredentialResolver(func(_ string) *iac.CloudCredentials {
+		return mgr.cloudCredentials(mgr.CloudSettings())
+	})
+	mgr.buildCatalog.Store(catalog.NewCompatibility(catalog.CompatibilityOptions{
+		Provider: cfg.CloudProvider, BuildMode: cfg.BuildMode,
+		Template: cfg.CloudPVETemplate,
+	}))
 
 	return mgr
+}
+
+// SetJobLedger installs the PostgreSQL job authority before durable jobs are
+// projected into the manager. A nil ledger preserves standalone memory+JSON
+// compatibility.
+func (m *Manager) SetJobLedger(ledger JobLedger) {
+	m.jobLedger = ledger
+	if scheduler, ok := ledger.(DurableScheduler); ok {
+		m.scheduler = scheduler
+	}
+	if metadata, ok := ledger.(RuntimeMetadataLedger); ok {
+		m.metadata = metadata
+	}
+	if cleanup, ok := ledger.(InfraCleanupLedger); ok {
+		m.infraCleanup = cleanup
+	}
+	if promotion, ok := ledger.(ArtifactPromotionLedger); ok {
+		m.promotionDB = promotion
+	}
+	if coordinator, ok := ledger.(signing.Coordinator); ok {
+		m.signing = coordinator
+	}
+	if logs, ok := ledger.(DurableLogLedger); ok {
+		m.logLedger = logs
+	}
+}
+
+// StartInfrastructureCleanup starts exactly one cleanup authority after cloud
+// credentials/settings are loaded. PostgreSQL mode must never also run the
+// process-local instances.json scanner.
+func (m *Manager) StartInfrastructureCleanup() {
+	m.cleanupOnce.Do(func() {
+		go m.artifactQuarantineCleanupLoop()
+		if m.infraCleanup != nil {
+			go m.infraCleanupLoop(m.infraCleanup)
+			return
+		}
+		m.iacMgr.StartCleanupRoutine()
+	})
+}
+
+func (m *Manager) artifactQuarantineCleanupLoop() {
+	m.cleanupExpiredArtifactQuarantines()
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-m.stopCh:
+			return
+		case <-ticker.C:
+			m.cleanupExpiredArtifactQuarantines()
+		}
+	}
+}
+
+func (m *Manager) cleanupExpiredArtifactQuarantines() {
+	base := m.artifactQuarantineBase()
+	entries, err := os.ReadDir(base)
+	if err != nil {
+		return
+	}
+	now := time.Now()
+	for _, entry := range entries {
+		if !entry.IsDir() || !capabilityTokenRegex.MatchString(entry.Name()) {
+			continue
+		}
+		root := filepath.Join(base, entry.Name())
+		marker, markerErr := os.ReadFile(filepath.Join(root, verificationCapabilityFile))
+		if markerErr == nil {
+			expiry, parseErr := strconv.ParseInt(strings.TrimSpace(string(marker)), 10, 64)
+			if parseErr != nil || now.Unix() >= expiry {
+				_ = os.RemoveAll(root)
+			}
+			continue
+		}
+		info, statErr := entry.Info()
+		if statErr == nil && now.Sub(info.ModTime()) > 24*time.Hour {
+			_ = os.RemoveAll(root)
+		}
+	}
+}
+
+// SetEphemeralHooks connects optional Redis acceleration. These callbacks must
+// never be used to decide build correctness; PostgreSQL polling remains active.
+func (m *Manager) SetEphemeralHooks(wake func(), event func(BuildStatus)) {
+	m.wakeHook = wake
+	m.eventHook = event
+}
+
+// StartWorkers starts the configured executor pool after the server has loaded
+// its catalog, signing state, and persisted projection.
+func (m *Manager) StartWorkers() {
+	m.workersOnce.Do(func() {
+		for i := 0; i < m.config.MaxWorkers; i++ {
+			go m.worker(i)
+		}
+	})
 }
 
 // GetJobsSnapshot returns a copy of all jobs for persistence.
@@ -172,12 +517,19 @@ func (m *Manager) LoadJobs(jobs map[string]*BuildStatus) {
 	defer m.jobsMu.Unlock()
 
 	for id, job := range jobs {
+		if m.scheduler != nil {
+			// PostgreSQL owns recovery in DB-2. Do not invent a terminal state
+			// from a stale compatibility snapshot.
+			m.jobs[id] = job
+			continue
+		}
 		// Mark in-progress AND still-queued jobs as failed-on-restart: we cannot
 		// resume in-progress work, and a persisted "queued" job cannot be
 		// re-enqueued (BuildStatus does not retain the original request), so
 		// leaving it "queued" would strand it forever and inflate QueuedBuilds.
 		switch job.Status {
-		case "queued", "claimed", "building", "provisioning", "deploying", "verifying", "forwarding":
+		case "queued", "claimed", "building", "provisioning", "deploying",
+			"forwarding", "collecting", "verifying", "signing", "publishing":
 			job.Status = "failed"
 			job.Error = "server restarted before the job completed; please resubmit"
 			job.UpdatedAt = time.Now()
@@ -186,46 +538,131 @@ func (m *Manager) LoadJobs(jobs map[string]*BuildStatus) {
 	}
 }
 
+// SyncLedgerJobs refreshes the in-memory read projection from PostgreSQL while
+// preserving process-local logs and quarantine paths for the owning executor.
+func (m *Manager) SyncLedgerJobs(durable map[string]*BuildStatus) {
+	m.jobsMu.Lock()
+	defer m.jobsMu.Unlock()
+	next := make(map[string]*BuildStatus, len(durable))
+	for id, incoming := range durable {
+		copyStatus := *incoming
+		if local, ok := m.jobs[id]; ok {
+			copyStatus.Log = local.Log
+			copyStatus.ArtifactPaths = append([]string(nil), local.ArtifactPaths...)
+			copyStatus.StagingRoot = local.StagingRoot
+			copyStatus.VerificationToken = local.VerificationToken
+			copyStatus.StagedArtifacts = append([]string(nil), local.StagedArtifacts...)
+			copyStatus.StagedPrimary = local.StagedPrimary
+		}
+		next[id] = &copyStatus
+	}
+	m.jobs = next
+}
+
 // Shutdown gracefully shuts down the manager.
 // It closes the work queue and waits for IaC cleanup.
 func (m *Manager) Shutdown() {
-	close(m.workQueue)
-	// Give the IaC manager a chance to clean up
-	m.iacMgr.StopCleanupRoutine()
+	m.shutdownOnce.Do(func() {
+		m.submitMu.Lock()
+		m.stopped = true
+		close(m.stopCh)
+		if m.scheduler == nil {
+			close(m.workQueue)
+		}
+		m.submitMu.Unlock()
+		// Give the IaC manager a chance to clean up
+		m.iacMgr.StopCleanupRoutine()
+	})
 }
 
 // SubmitBuild submits a new build request.
 func (m *Manager) SubmitBuild(req *BuildRequest) (string, error) {
-	// Validate the untrusted package fields early (defense-in-depth: the builder
-	// validates again, but rejecting here avoids provisioning/forwarding for a
-	// bad request and rejects atom/option injection at the server boundary).
-	if !atomPattern.MatchString(req.PackageName) {
-		return "", fmt.Errorf("invalid package name %q", req.PackageName)
+	m.StartWorkers()
+	// Reject the complete request before it can allocate a job ID, provision a
+	// VM, or be forwarded. Remote builders validate it again as defense in depth.
+	if err := validateBuildRequest(req); err != nil {
+		return "", &RequestError{err: fmt.Errorf("invalid build request: %w", err)}
 	}
-	if req.Version != "" && !versionPattern.MatchString(req.Version) {
-		return "", fmt.Errorf("invalid package version %q", req.Version)
+	if err := m.resolveBuildRequest(req); err != nil {
+		return "", &RequestError{err: fmt.Errorf("resolve build environment: %w", err)}
 	}
-	for _, flag := range req.UseFlags {
-		if !useFlagPattern.MatchString(flag) {
-			return "", fmt.Errorf("invalid USE flag %q", flag)
-		}
+
+	m.submitMu.Lock()
+	defer m.submitMu.Unlock()
+	if m.stopped {
+		return "", fmt.Errorf("builder manager is shutting down")
+	}
+	if m.scheduler == nil && len(m.workQueue) >= cap(m.workQueue) {
+		return "", fmt.Errorf("work queue is full")
 	}
 
 	jobID := uuid.New().String()
 
 	status := &BuildStatus{
-		JobID:       jobID,
-		Status:      "queued",
-		PackageName: req.PackageName,
-		Version:     req.Version,
-		Arch:        req.Arch,
-		CreatedAt:   time.Now(),
-		UpdatedAt:   time.Now(),
+		JobID:           jobID,
+		Status:          "queued",
+		PackageName:     req.PackageName,
+		Version:         req.Version,
+		Arch:            req.Arch,
+		CreatedAt:       time.Now(),
+		UpdatedAt:       time.Now(),
+		ResolvedContext: req.ResolvedContext,
+		Request:         req,
+	}
+
+	if m.jobLedger != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		result, err := m.jobLedger.CreateJob(ctx, req, status)
+		cancel()
+		if err != nil {
+			return "", &LedgerError{err: fmt.Errorf("persist build request: %w", err)}
+		}
+		if !result.Created {
+			m.jobsMu.RLock()
+			_, inMemory := m.jobs[result.JobID]
+			m.jobsMu.RUnlock()
+			if inMemory {
+				m.signalWorkers()
+				m.emitStatus(result.Status)
+				return result.JobID, nil
+			}
+			recovered := result.Status
+			if recovered == nil {
+				return "", fmt.Errorf("idempotent job %s has no ledger status", result.JobID)
+			}
+			// DB-1 cannot resume a ledger-only queued job because its channel
+			// remains authoritative. DB-2 can reclaim it from PostgreSQL.
+			if m.scheduler == nil && !terminalStatus(recovered.Status) {
+				previous := *recovered
+				recovered.Status = "failed"
+				recovered.Error = "server restarted before the legacy queue snapshot was durable; please resubmit with a new idempotency key"
+				recovered.UpdatedAt = time.Now()
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				err := m.jobLedger.RecordTransition(ctx, &previous, recovered)
+				cancel()
+				if err != nil {
+					return "", &LedgerError{err: fmt.Errorf("reconcile idempotent job: %w", err)}
+				}
+			}
+			m.jobsMu.Lock()
+			m.jobs[result.JobID] = recovered
+			m.jobsMu.Unlock()
+			m.signalWorkers()
+			m.emitStatus(recovered)
+			return result.JobID, nil
+		}
 	}
 
 	m.jobsMu.Lock()
 	m.jobs[jobID] = status
 	m.jobsMu.Unlock()
+	m.appendJobLog(jobID, fmt.Sprintf("[queued] request accepted for %s-%s (%s)", req.PackageName, req.Version, req.Arch))
+
+	if m.scheduler != nil {
+		m.signalWorkers()
+		m.emitStatus(status)
+		return jobID, nil
+	}
 
 	// Enqueue the job ID alongside the request so the worker processes exactly
 	// this job. If the queue is full, remove the just-added job so it does not
@@ -241,8 +678,49 @@ func (m *Manager) SubmitBuild(req *BuildRequest) (string, error) {
 	}
 }
 
+func (m *Manager) signalWorkers() {
+	if m.scheduler == nil {
+		return
+	}
+	select {
+	case m.workQueue <- nil:
+	default:
+	}
+	if m.wakeHook != nil {
+		go m.wakeHook()
+	}
+}
+
+// WakeWorkersLocal wakes this replica after a Redis notification. It does not
+// publish another notification, preventing a cross-replica feedback loop.
+func (m *Manager) WakeWorkersLocal() {
+	m.submitMu.Lock()
+	defer m.submitMu.Unlock()
+	if m.stopped || m.scheduler == nil {
+		return
+	}
+	select {
+	case m.workQueue <- nil:
+	default:
+	}
+}
+
+func (m *Manager) emitStatus(status *BuildStatus) {
+	if status == nil || m.eventHook == nil {
+		return
+	}
+	copyStatus := *status
+	go m.eventHook(copyStatus)
+}
+
 // versionRegex matches version patterns like "3.9.9" or "7.1.0-r1" in artifact filenames.
-var versionRegex = regexp.MustCompile(`-(\d+\.\d+(?:\.\d+)?(?:-r\d+)?)-\d+\.gpkg\.tar$`)
+var (
+	versionRegex         = regexp.MustCompile(`-(\d+\.\d+(?:\.\d+)?(?:-r\d+)?)-\d+\.gpkg\.tar$`)
+	sha256DigestRegex    = regexp.MustCompile(`^[a-f0-9]{64}$`)
+	capabilityTokenRegex = regexp.MustCompile(`^[a-f0-9]{32}$`)
+)
+
+const verificationCapabilityFile = signing.CapabilityMarkerName
 
 // extractVersionFromArtifact tries to extract version from artifact path.
 // Example: "/var/tmp/portage-artifacts/screenfetch-3.9.9-1.gpkg.tar" -> "3.9.9"
@@ -270,10 +748,16 @@ func (m *Manager) GetStatus(jobID string) (*BuildStatus, error) {
 	status, exists := m.jobs[jobID]
 	if exists {
 		statusCopy := *status
+		statusCopy.Error = redactJobLogLine(statusCopy.Error)
+		statusCopy.Log = redactJobLogLine(statusCopy.Log)
 		m.jobsMu.RUnlock()
 		return &statusCopy, nil
 	}
 	m.jobsMu.RUnlock()
+
+	if m.scheduler != nil {
+		return nil, fmt.Errorf("job not found in PostgreSQL projection: %s", jobID)
+	}
 
 	// Not found locally, try remote builders
 	if len(m.remoteBuilders()) > 0 {
@@ -344,8 +828,8 @@ func (m *Manager) fetchRemoteJobStatus(jobID string) *BuildStatus {
 			UpdatedAt:    job.EndTime,
 			InstanceID:   builderAddr,
 			ArtifactPath: job.ArtifactURL,
-			Log:          job.Log,
-			Error:        job.Error,
+			Log:          redactJobLogLine(job.Log),
+			Error:        redactJobLogLine(job.Error),
 		}
 
 		// Normalize status names
@@ -362,23 +846,137 @@ func (m *Manager) fetchRemoteJobStatus(jobID string) *BuildStatus {
 // claimJob atomically transitions a job from "queued" to "claimed" under the
 // write lock. It returns true only for the caller that performed the
 // transition; a job that is missing or already past "queued" returns false.
-func (m *Manager) claimJob(jobID string) bool {
+func (m *Manager) claimJob(jobID string) (bool, error) {
 	m.jobsMu.Lock()
 	defer m.jobsMu.Unlock()
 
 	job, ok := m.jobs[jobID]
 	if !ok || job.Status != "queued" {
-		return false
+		return false, nil
 	}
-	job.Status = "claimed"
-	job.UpdatedAt = time.Now()
-	return true
+	previous := *job
+	next := previous
+	next.Status = "claimed"
+	next.UpdatedAt = time.Now()
+	if m.jobLedger != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		err := m.jobLedger.RecordTransition(ctx, &previous, &next)
+		cancel()
+		if err != nil {
+			return false, err
+		}
+	}
+	job.Status = next.Status
+	job.UpdatedAt = next.UpdatedAt
+	return true, nil
 }
 
-// worker processes queued jobs from the work queue.
-func (m *Manager) worker() {
+// worker processes legacy channel jobs or atomically claims PostgreSQL queue
+// rows when DB-2 is enabled.
+func (m *Manager) worker(slot int) {
+	if m.scheduler != nil {
+		m.durableWorker(slot)
+		return
+	}
 	for qj := range m.workQueue {
+		if qj == nil {
+			continue
+		}
 		m.processBuild(qj)
+	}
+}
+
+func (m *Manager) durableWorker(slot int) {
+	workerName := fmt.Sprintf("%s/slot-%d", m.schedulerID, slot)
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		claim, err := m.scheduler.ClaimNext(ctx, workerName, 30*time.Second)
+		cancel()
+		if err == nil && claim != nil {
+			m.jobsMu.Lock()
+			m.jobs[claim.Status.JobID] = claim.Status
+			m.jobsMu.Unlock()
+
+			renewStop := make(chan struct{})
+			go m.renewClaimLoop(claim.Status.JobID, renewStop)
+			m.processClaimedBuild(&queuedJob{jobID: claim.Status.JobID, req: claim.Request})
+			close(renewStop)
+			continue
+		}
+
+		select {
+		case <-m.stopCh:
+			return
+		case <-m.workQueue:
+		case <-ticker.C:
+		}
+	}
+}
+
+func (m *Manager) renewClaimLoop(jobID string, stop <-chan struct{}) {
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-m.stopCh:
+			return
+		case <-ticker.C:
+			m.jobsMu.RLock()
+			status, ok := m.jobs[jobID]
+			if ok {
+				copyStatus := *status
+				status = &copyStatus
+			}
+			m.jobsMu.RUnlock()
+			if !ok || terminalStatus(status.Status) {
+				return
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			_ = m.scheduler.RenewClaim(ctx, status, 30*time.Second)
+			cancel()
+		}
+	}
+}
+
+// infraCleanupLoop continuously claims abandoned/expired Terraform workspaces.
+// It deliberately uses a separate lease from the build attempt: once an
+// attempt fence expires, no retrying builder can race cleanup of its old VM.
+func (m *Manager) infraCleanupLoop(ledger InfraCleanupLedger) {
+	owner := m.schedulerID + "/infra-cleaner"
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		m.runOneInfraCleanup(ledger, owner)
+		select {
+		case <-m.stopCh:
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+func (m *Manager) runOneInfraCleanup(ledger InfraCleanupLedger, owner string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	claim, err := ledger.ClaimInfraCleanup(ctx, owner, 35*time.Minute)
+	cancel()
+	if err != nil || claim == nil {
+		return
+	}
+
+	err = m.iacMgr.DestroyRecorded(claim.Provider, claim.ProviderInstanceID, claim.RemoteStateRef)
+	resultCtx, resultCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer resultCancel()
+	if err != nil {
+		_ = ledger.FailInfraCleanup(resultCtx, claim.ID, owner, claim.CleanupFence, redactJobLogLine(err.Error()))
+		return
+	}
+	if err := ledger.CompleteInfraCleanup(resultCtx, claim.ID, owner, claim.CleanupFence); err == nil {
+		_ = m.iacMgr.RemoveRecordedWorkspace(claim.RemoteStateRef)
 	}
 }
 
@@ -387,12 +985,31 @@ func (m *Manager) worker() {
 // worker proceeds — no scanning, no double-processing.
 func (m *Manager) processBuild(qj *queuedJob) {
 	jobID := qj.jobID
-	req := qj.req
 
-	if !m.claimJob(jobID) {
-		// Already claimed (or gone) — another worker owns it, or it was removed.
-		return
+	for {
+		claimed, err := m.claimJob(jobID)
+		if err == nil {
+			if !claimed {
+				// Already claimed (or gone) — another worker owns it, or it was removed.
+				return
+			}
+			break
+		}
+		select {
+		case <-m.stopCh:
+			return
+		case <-time.After(2 * time.Second):
+			// PostgreSQL is required for new claims in DB-1. Keep the legacy
+			// queue item owned by this worker and retry after a short backoff.
+		}
 	}
+
+	m.processClaimedBuild(qj)
+}
+
+func (m *Manager) processClaimedBuild(qj *queuedJob) {
+	jobID := qj.jobID
+	req := qj.req
 
 	// Prefer a configured static remote builder.
 	if len(m.remoteBuilders()) > 0 {
@@ -413,6 +1030,8 @@ func (m *Manager) processCloudBuild(jobID string, req *BuildRequest) {
 	if err != nil {
 		// Refuse rather than fabricate success when cloud builds are not
 		// configured (previously this path faked a completed build).
+		m.setFailedStage(jobID, "provision")
+		m.appendJobLog(jobID, "[provision] configuration rejected: "+err.Error())
 		m.updateStatus(jobID, "failed", "", err.Error())
 		return
 	}
@@ -428,54 +1047,77 @@ func (m *Manager) processCloudBuild(jobID string, req *BuildRequest) {
 			deployingOnce.Do(func() { m.updateStatus(jobID, "deploying", "", "") })
 		}
 	}
-
-	// Reuse a warm idle instance when one is available: skipping provision +
-	// deploy turns a ~15 minute cold start into a couple of minutes.
-	instance := m.iacMgr.AcquireIdleInstance(provReq.Provider, req.Arch)
-	if instance != nil && !m.builderHealthy(instance) {
-		// A warm instance whose builder does not answer is useless — destroy
-		// it and fall through to provisioning a fresh one.
-		m.appendJobLog(jobID, fmt.Sprintf("[provision] warm instance %s failed its health check — destroying it and provisioning fresh", instance.ID))
-		if termErr := m.iacMgr.Terminate(instance.ID); termErr != nil {
-			m.appendJobLog(jobID, fmt.Sprintf("[provision] destroy of unhealthy instance failed (cleanup will retry): %v", termErr))
+	var infraFence atomic.Pointer[BuildStatus]
+	provReq.Lifecycle = func(instance *iac.Instance, state, failure string, deletedAt *time.Time) error {
+		if captured := infraFence.Load(); captured != nil {
+			return m.recordInfraWithStatus(captured, instance, state, failure, deletedAt)
 		}
-		instance = nil
-	}
-	if instance != nil {
-		m.appendJobLog(jobID, fmt.Sprintf("[provision] reusing warm instance %s at %s (no provisioning needed)", instance.ID, instance.IPAddress))
-		m.appendJobLog(jobID, "[deploy] builder already deployed on the reused instance")
-	} else {
-		m.updateStatus(jobID, "provisioning", "", "")
-		m.appendJobLog(jobID, fmt.Sprintf("[build] provisioning a %s instance for %s…", provReq.Provider, req.PackageName))
-		fresh, err := m.iacMgr.Provision(provReq)
-		if err != nil {
-			stage := "provision"
-			if strings.Contains(err.Error(), "deployment failed") {
-				stage = "deploy"
-			}
-			m.setFailedStage(jobID, stage)
-			m.appendJobLog(jobID, fmt.Sprintf("[build] provisioning failed: %v", err))
-			m.updateStatus(jobID, "failed", "", fmt.Sprintf("provisioning failed: %v", err))
-			return
-		}
-		instance = fresh
-		// Mark the fresh instance busy so the TTL cleanup ignores it mid-build.
-		m.iacMgr.SetInstanceActiveTasks(instance.ID, 1)
+		return m.recordInfra(jobID, instance, state, failure, deletedAt)
 	}
 
-	// On exit, release the instance back to the warm pool instead of
-	// destroying it: idle instances serve subsequent builds and the TTL
-	// cleanup reclaims them after the configured idle window.
+	// Every build receives a fresh native Gentoo instance/root. There is no
+	// warm-pool path: emerge mutates VDB, installed files and arbitrary ebuild
+	// post-install state.
+	m.updateStatus(jobID, "provisioning", "", "")
+	m.appendJobLog(jobID, fmt.Sprintf("[provision] provisioning a fresh native %s instance for %s…", provReq.Provider, req.PackageName))
+	instance, err := m.iacMgr.Provision(provReq)
+	if err != nil {
+		stage := "provision"
+		if strings.Contains(err.Error(), "deployment failed") {
+			stage = "deploy"
+		}
+		m.setFailedStage(jobID, stage)
+		m.appendJobLog(jobID, fmt.Sprintf("[provision] provisioning failed: %v", err))
+		m.updateStatus(jobID, "failed", "", fmt.Sprintf("provisioning failed: %v", err))
+		return
+	}
+	m.iacMgr.SetInstanceActiveTasks(instance.ID, 1)
+	if err := m.recordInfra(jobID, instance, "running", "", nil); err != nil {
+		m.appendJobLog(jobID, "[provision] durable infra ownership failed: "+err.Error())
+		_ = m.iacMgr.Terminate(instance.ID)
+		m.setFailedStage(jobID, "provision")
+		m.updateStatus(jobID, "failed", instance.ID, "persist infrastructure ownership: "+err.Error())
+		return
+	}
+	cleanupFence, err := m.jobStatusSnapshot(jobID)
+	if err != nil {
+		m.appendJobLog(jobID, "[provision] durable cleanup fence snapshot failed: "+err.Error())
+		_ = m.iacMgr.Terminate(instance.ID)
+		m.setFailedStage(jobID, "provision")
+		m.updateStatus(jobID, "failed", instance.ID, "snapshot infrastructure cleanup fence: "+err.Error())
+		return
+	}
+	infraFence.Store(cleanupFence)
+
+	pipelineClean := true
 	defer func() {
-		m.iacMgr.SetInstanceActiveTasks(instance.ID, 0)
-		ttl := "the configured idle TTL"
-		if instance.TTL > 0 {
-			ttl = instance.TTL.String()
+		var termErr error
+		if !pipelineClean {
+			m.appendJobLog(jobID, fmt.Sprintf("[cleanup] destroying tainted instance %s after pipeline failure", instance.ID))
+			if termErr = m.iacMgr.Terminate(instance.ID); termErr != nil {
+				m.appendJobLog(jobID, fmt.Sprintf("[cleanup] destroy failed; cleanup routine will retry: %v", termErr))
+			}
+		} else {
+			m.appendJobLog(jobID, fmt.Sprintf("[cleanup] destroying single-use native instance %s after successful publication", instance.ID))
+			if termErr = m.iacMgr.Terminate(instance.ID); termErr != nil {
+				m.appendJobLog(jobID, fmt.Sprintf("[cleanup] destroy failed; cleanup routine will retry: %v", termErr))
+			}
 		}
-		m.appendJobLog(jobID, fmt.Sprintf("[cleanup] instance %s released to the warm pool (idle for %s before auto-destroy)", instance.ID, ttl))
+		state := "destroyed"
+		var deletedAt *time.Time
+		if termErr != nil {
+			state = "destroy_failed"
+		} else {
+			now := time.Now().UTC()
+			deletedAt = &now
+		}
+		if err := m.recordInfraWithStatus(cleanupFence, instance, state, errorString(termErr), deletedAt); err != nil {
+			m.appendJobLog(jobID, "[cleanup] warning: durable infra result was not recorded: "+err.Error())
+		}
 	}()
 
 	if instance.BuilderEndpoint == "" {
+		pipelineClean = false
 		m.updateStatus(jobID, "failed", instance.ID, "provisioned instance has no builder endpoint")
 		return
 	}
@@ -485,6 +1127,7 @@ func (m *Manager) processCloudBuild(jobID string, req *BuildRequest) {
 	// deploy returns. Wait for /health before submitting, so the first build
 	// doesn't race the builder startup with a connection-refused.
 	if !m.waitForBuilderReady(jobID, instance) {
+		pipelineClean = false
 		m.setFailedStage(jobID, "deploy")
 		m.updateStatus(jobID, "failed", instance.ID, "builder did not become ready after deployment")
 		return
@@ -496,6 +1139,7 @@ func (m *Manager) processCloudBuild(jobID string, req *BuildRequest) {
 	// Submit and wait for the build on the builder, then pull the resulting
 	// artifact back to the server's binpkg dir.
 	if err := m.runBuildOnInstance(jobID, instance, req); err != nil {
+		pipelineClean = false
 		stage := "build"
 		if strings.Contains(err.Error(), "artifact retrieval failed") {
 			stage = "collect"
@@ -505,30 +1149,12 @@ func (m *Manager) processCloudBuild(jobID string, req *BuildRequest) {
 		return
 	}
 
-	// Push the fresh packages (and index/pubkey) to the internal mirror when
-	// one is configured; verification then exercises the mirror URL end-to-end.
-	verifyBinhost := ""
-	if up := newMirrorUploader(m.CloudSettings()); up != nil {
-		m.appendJobLog(jobID, "[collect] uploading artifacts to the mirror "+up.base+"…")
-		if err := m.uploadJobToMirror(jobID, up); err != nil {
-			m.appendJobLog(jobID, "[collect] warning: mirror upload failed (verify falls back to the server binhost): "+err.Error())
-		} else {
-			verifyBinhost = up.binhostURL()
-			m.appendJobLog(jobID, "[collect] mirror binhost ready: "+verifyBinhost)
-		}
-	}
-
-	// Verify the freshly published binpkg actually installs from the binhost
-	// before declaring success (a broken artifact must never sit in the repo
-	// marked "success").
-	if !m.CloudSettings().SkipVerifyInstall {
-		if err := m.verifyOnInstance(jobID, instance, req, verifyBinhost); err != nil {
-			m.setFailedStage(jobID, "verify")
-			m.removeJobArtifact(jobID)
-			m.updateStatus(jobID, "failed", instance.ID, fmt.Sprintf("install verification failed: %v", err))
-			return
-		}
-		m.updateStatus(jobID, "completed", instance.ID, "")
+	if stage, err := m.verifyAndPublish(jobID, instance.BuilderEndpoint, instance.ID, req); err != nil {
+		pipelineClean = false
+		m.setFailedStage(jobID, stage)
+		m.cleanupArtifactQuarantine(jobID)
+		m.updateStatus(jobID, "failed", instance.ID, err.Error())
+		return
 	}
 }
 
@@ -557,56 +1183,306 @@ func (m *Manager) waitForBuilderReady(jobID string, instance *iac.Instance) bool
 	return false
 }
 
-// builderHealthy probes a warm instance's builder, tolerating a short
-// restart window (e.g. a just-updated builder binary coming back up).
-func (m *Manager) builderHealthy(instance *iac.Instance) bool {
-	baseURL := normalizeBuilderURL(instance.BuilderEndpoint)
-	for attempt := 0; attempt < 3; attempt++ {
-		if attempt > 0 {
-			time.Sleep(5 * time.Second)
+// verifyAndPublish runs the mandatory unsigned install gate, delegates
+// digest-bound GPKG signing to the isolated signer, verifies the signed result,
+// and only then promotes the complete set into the public binhost.
+func (m *Manager) verifyAndPublish(jobID, builderEndpoint, instanceID string, req *BuildRequest) (stage string, resultErr error) {
+	defer func() {
+		if resultErr != nil {
+			m.cleanupArtifactQuarantine(jobID)
 		}
-		resp, err := builderHTTPClient.Get(baseURL + "/health")
+	}()
+
+	verifyBinhost, err := m.prepareVerificationBinhost(jobID, req.Arch)
+	if err != nil {
+		return "collect", fmt.Errorf("prepare quarantined verification binhost: %w", err)
+	}
+	if err := m.verifyOnBuilder(jobID, builderEndpoint, instanceID, req, verifyBinhost); err != nil {
+		return "verify", fmt.Errorf("install verification failed: %w", err)
+	}
+
+	if m.config.GPGEnabled {
+		if err := m.verifyUnsignedRejectedOnBuilder(jobID, builderEndpoint, req, verifyBinhost); err != nil {
+			return "verify", fmt.Errorf("unsigned negative-control verification failed: %w", err)
+		}
+		m.revokeArtifactCapability(jobID)
+		m.updateStatus(jobID, "signing", instanceID, "")
+		m.appendJobLog(jobID, "[sign] submitting verified unsigned artifact digests to the isolated signer…")
+		if err := m.requireActiveClaim(jobID); err != nil {
+			return "sign", fmt.Errorf("durable claim fence rejected signing: %w", err)
+		}
+		if err := m.signJobArtifacts(jobID); err != nil {
+			return "sign", fmt.Errorf("isolated signing failed: %w", err)
+		}
+		m.appendJobLog(jobID, "[sign] signed GPKG generation passed signer self-verification")
+		signedBinhost, err := m.prepareVerificationBinhost(jobID, req.Arch)
 		if err != nil {
-			continue
+			return "sign", fmt.Errorf("prepare signed verification binhost: %w", err)
 		}
-		ok := resp.StatusCode == http.StatusOK
-		_ = resp.Body.Close()
-		if ok {
-			return true
+		if err := m.verifyOnBuilder(jobID, builderEndpoint, instanceID, req, signedBinhost); err != nil {
+			return "verify", fmt.Errorf("signed install verification failed: %w", err)
 		}
 	}
-	return false
+
+	m.updateStatus(jobID, "publishing", instanceID, "")
+	m.appendJobLog(jobID, "[publish] promoting verified artifacts into the public binhost…")
+	if err := m.requireActiveClaim(jobID); err != nil {
+		return "publish", fmt.Errorf("durable claim fence rejected publication: %w", err)
+	}
+	if err := m.promoteJobArtifacts(jobID); err != nil {
+		return "publish", fmt.Errorf("artifact promotion failed: %w", err)
+	}
+	m.appendJobLog(jobID, "[publish] Packages index atomically updated")
+
+	if up := newMirrorUploader(m.CloudSettings()); up != nil {
+		m.appendJobLog(jobID, "[publish] uploading promoted artifacts to mirror "+up.base+"…")
+		if err := m.uploadJobToMirror(jobID, up); err != nil {
+			m.appendJobLog(jobID, "[publish] warning: secondary mirror update failed: "+err.Error())
+		} else {
+			m.appendJobLog(jobID, "[publish] secondary mirror updated: "+up.binhostURL())
+		}
+	}
+	m.updateStatus(jobID, "completed", instanceID, "")
+	return "", nil
 }
 
-// verifyOnInstance asks the instance's builder to install the just-built
-// package from the binhost in a pristine container.
-func (m *Manager) verifyOnInstance(jobID string, instance *iac.Instance, req *BuildRequest, binhostURL string) error {
-	m.updateStatus(jobID, "verifying", instance.ID, "")
-	from := "the binhost"
-	if binhostURL != "" {
-		from = binhostURL
+func (m *Manager) revokeArtifactCapability(jobID string) {
+	m.jobsMu.RLock()
+	job := m.jobs[jobID]
+	root := ""
+	if job != nil {
+		root = job.StagingRoot
 	}
-	m.appendJobLog(jobID, fmt.Sprintf("[verify] installing %s from %s in a pristine container…", req.PackageName, from))
+	m.jobsMu.RUnlock()
+	if root != "" {
+		_ = os.Remove(filepath.Join(root, verificationCapabilityFile))
+	}
+}
 
-	pubkey := ""
-	if m.gpgKeyProvider != nil {
-		if _, pub, _ := m.gpgKeyProvider(); len(pub) > 0 {
-			pubkey = string(pub)
+func (m *Manager) signJobArtifacts(jobID string) error {
+	if m.signing == nil {
+		return fmt.Errorf("GPG_ENABLED requires PostgreSQL signing queue and an independent portage-signer")
+	}
+	m.jobsMu.RLock()
+	job, ok := m.jobs[jobID]
+	if !ok {
+		m.jobsMu.RUnlock()
+		return fmt.Errorf("job %s not found", jobID)
+	}
+	status := *job
+	sourceRoot := job.StagingRoot
+	sourceToken := job.VerificationToken
+	rels := append([]string(nil), job.StagedArtifacts...)
+	m.jobsMu.RUnlock()
+	if sourceRoot == "" || !capabilityTokenRegex.MatchString(sourceToken) || len(rels) == 0 {
+		return fmt.Errorf("job quarantine is incomplete")
+	}
+
+	records, err := artifactMetadata(sourceRoot, rels, &status, "verified_unsigned")
+	if err != nil {
+		return err
+	}
+	inputs := make([]signing.Artifact, len(records))
+	for index := range records {
+		records[index].Location = "quarantine:" + sourceToken + "/" + filepath.ToSlash(rels[index])
+		inputs[index] = signing.Artifact{
+			RelativePath: filepath.ToSlash(rels[index]),
+			InputDigest:  records[index].Digest,
+			InputSize:    records[index].SizeBytes,
 		}
 	}
+	if m.metadata == nil {
+		return fmt.Errorf("isolated signing requires durable artifact metadata")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	err = m.metadata.RecordArtifacts(ctx, &status, records)
+	cancel()
+	if err != nil {
+		return fmt.Errorf("persist verified unsigned artifact metadata: %w", err)
+	}
+
+	ctx, cancel = context.WithTimeout(context.Background(), 10*time.Second)
+	task, err := m.signing.EnqueueSigning(ctx, signing.Request{
+		JobID: status.JobID, AttemptID: status.AttemptID,
+		AttemptFence: status.FenceToken, LeaseOwner: status.LeaseOwner,
+		SourceToken: sourceToken, Architecture: status.Arch, Artifacts: inputs,
+	})
+	cancel()
+	if err != nil {
+		return fmt.Errorf("enqueue signing task: %w", err)
+	}
+	if task == nil || task.ID == "" {
+		return fmt.Errorf("signing queue returned an empty task")
+	}
+
+	waitTimeout := time.Duration(m.config.SignerWaitTimeoutSeconds) * time.Second
+	if waitTimeout <= 0 {
+		waitTimeout = 10 * time.Minute
+	}
+	deadline := time.Now().Add(waitTimeout)
+	for {
+		if time.Now().After(deadline) {
+			return fmt.Errorf("signing task %s did not finish within %s", task.ID, waitTimeout)
+		}
+		ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
+		current, getErr := m.signing.GetSigningTask(ctx, task.ID)
+		cancel()
+		if getErr != nil {
+			return getErr
+		}
+		switch current.State {
+		case "completed":
+			return m.adoptSignedArtifacts(jobID, sourceRoot, current)
+		case "failed", "canceled":
+			if current.Error == "" {
+				current.Error = "signing task did not complete"
+			}
+			return fmt.Errorf("%s", current.Error)
+		}
+		select {
+		case <-m.stopCh:
+			return fmt.Errorf("control plane stopped while waiting for signer")
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
+}
+
+func (m *Manager) adoptSignedArtifacts(jobID, sourceRoot string, task *signing.Task) error {
+	outputToken, err := signing.OutputToken(task.ID)
+	if err != nil {
+		return err
+	}
+	outputRoot, err := signing.TokenRoot(m.config.BinpkgPath, outputToken)
+	if err != nil {
+		return err
+	}
+	if len(task.Artifacts) == 0 {
+		return fmt.Errorf("signer returned no artifacts")
+	}
+	rels := make([]string, len(task.Artifacts))
+	for index, artifact := range task.Artifacts {
+		if err := signing.ValidateArtifact(artifact, true); err != nil {
+			return err
+		}
+		rels[index] = artifact.RelativePath
+		records, err := artifactMetadata(outputRoot, []string{artifact.RelativePath}, &BuildStatus{}, "signed")
+		if err != nil {
+			return err
+		}
+		if records[0].Digest != artifact.OutputDigest || records[0].SizeBytes != artifact.OutputSize {
+			return fmt.Errorf("signed artifact %q does not match signer output digest", artifact.RelativePath)
+		}
+	}
+	m.jobsMu.Lock()
+	job, ok := m.jobs[jobID]
+	if ok {
+		job.StagingRoot = outputRoot
+		job.VerificationToken = outputToken
+		job.StagedArtifacts = rels
+		job.Signed = true
+	}
+	m.jobsMu.Unlock()
+	if !ok {
+		return fmt.Errorf("job %s disappeared while adopting signer output", jobID)
+	}
+	if sourceRoot != outputRoot {
+		_ = os.RemoveAll(sourceRoot)
+	}
+	return nil
+}
+
+func (m *Manager) requireActiveClaim(jobID string) error {
+	if m.scheduler == nil {
+		return nil
+	}
+	m.jobsMu.RLock()
+	status, ok := m.jobs[jobID]
+	if ok {
+		copyStatus := *status
+		status = &copyStatus
+	}
+	m.jobsMu.RUnlock()
+	if !ok {
+		return fmt.Errorf("job is missing from the local execution projection")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := m.scheduler.RenewClaim(ctx, status, 30*time.Second); err != nil {
+		return err
+	}
+	return m.scheduler.CheckClaim(ctx, status)
+}
+
+// verifyOnBuilder asks a builder to install the just-built package from the
+// job-private verification binhost in a throwaway native Portage root.
+func (m *Manager) verifyOnBuilder(jobID, builderEndpoint, instanceID string, req *BuildRequest, binhostURL string) error {
+	m.updateStatus(jobID, "verifying", instanceID, "")
+
 	signed := false
+	stagingRoot := ""
+	var rels, builtPackages []string
 	m.jobsMu.RLock()
 	if job, ok := m.jobs[jobID]; ok {
 		signed = job.Signed
+		stagingRoot = job.StagingRoot
+		rels = append(rels, job.StagedArtifacts...)
+		for _, rel := range rels {
+			if cpv := artifactRelCPV(rel); cpv != "" && !slices.Contains(builtPackages, cpv) {
+				builtPackages = append(builtPackages, cpv)
+			}
+		}
 	}
 	m.jobsMu.RUnlock()
+	if stagingRoot == "" || len(rels) == 0 {
+		return fmt.Errorf("verification generation is missing staged artifacts")
+	}
 
-	baseURL := normalizeBuilderURL(instance.BuilderEndpoint)
-	body, _ := json.Marshal(map[string]any{
-		"package_name":      req.PackageName,
-		"binhost_url":       binhostURL,
-		"gpg_pubkey":        pubkey,
-		"require_signature": signed && pubkey != "",
+	generation := "unsigned"
+	if signed {
+		generation = "signed"
+	}
+	records, err := artifactMetadata(stagingRoot, rels, &BuildStatus{}, "verifying_"+generation)
+	if err != nil {
+		return fmt.Errorf("bind %s verification generation: %w", generation, err)
+	}
+	artifacts := make([]VerificationArtifact, len(records))
+	for index := range records {
+		artifacts[index] = VerificationArtifact{
+			RelativePath: filepath.ToSlash(rels[index]),
+			SHA256:       records[index].Digest,
+			Size:         records[index].SizeBytes,
+		}
+	}
+
+	keyID, pubkey := "", ""
+	if signed {
+		if m.gpgKeyProvider == nil {
+			return fmt.Errorf("signed verification requires an isolated-signer public-key provider; refusing unsigned downgrade")
+		}
+		var public []byte
+		keyID, public, _ = m.gpgKeyProvider()
+		if keyID == "" || len(public) == 0 {
+			return fmt.Errorf("signed verification requires a ready signer public key; refusing unsigned downgrade")
+		}
+		pubkey = string(public)
+	}
+	m.appendJobLog(jobID, fmt.Sprintf(
+		"[verify] generation=%s signature_required=%t key_id=%s artifacts=%d digests=%s",
+		generation, signed, keyID, len(artifacts), verificationDigestSummary(artifacts)))
+	m.appendJobLog(jobID, fmt.Sprintf(
+		"[verify] installing %s from the digest-bound %s job-private generation in a fresh PKGDIR and throwaway native root…",
+		req.PackageName, generation))
+
+	baseURL := normalizeBuilderURL(builderEndpoint)
+	body, _ := json.Marshal(VerifyInstallRequest{
+		PackageName:      req.PackageName,
+		BinhostURL:       binhostURL,
+		Generation:       generation,
+		GPGPubkey:        pubkey,
+		ExpectedKeyID:    keyID,
+		BuiltPackages:    builtPackages,
+		Artifacts:        artifacts,
+		RequireSignature: signed,
 	})
 	httpReq, err := http.NewRequest(http.MethodPost, baseURL+"/api/v1/verify", bytes.NewReader(body))
 	if err != nil {
@@ -639,58 +1515,86 @@ func (m *Manager) verifyOnInstance(jobID string, instance *iac.Instance, req *Bu
 	return nil
 }
 
-// removeJobArtifact deletes a job's stored artifact from the binhost (used
-// when verification fails) and refreshes the index.
-func (m *Manager) removeJobArtifact(jobID string) {
-	m.jobsMu.Lock()
-	var paths, rels []string
-	if job, ok := m.jobs[jobID]; ok {
-		paths = append(paths, job.ArtifactPaths...)
-		if len(paths) == 0 && job.ArtifactPath != "" {
-			paths = append(paths, job.ArtifactPath)
-		}
-		for _, w := range job.Artifacts {
-			rels = append(rels, strings.TrimPrefix(w, "/binpkgs/"))
-		}
-		if len(rels) == 0 && job.ArtifactURL != "" {
-			rels = append(rels, strings.TrimPrefix(job.ArtifactURL, "/binpkgs/"))
-		}
-		job.ArtifactPath = ""
-		job.ArtifactURL = ""
-		job.ArtifactPaths = nil
-		job.Artifacts = nil
+// verifyUnsignedRejectedOnBuilder is a mandatory negative control for signed
+// pipelines. It submits the exact unsigned generation under the signed policy
+// and requires the builder's independent GPKG verifier to reject it before the
+// isolated signer is allowed to run.
+func (m *Manager) verifyUnsignedRejectedOnBuilder(jobID, builderEndpoint string, req *BuildRequest, binhostURL string) error {
+	m.jobsMu.RLock()
+	job, ok := m.jobs[jobID]
+	if !ok {
+		m.jobsMu.RUnlock()
+		return fmt.Errorf("job %s not found", jobID)
 	}
-	m.jobsMu.Unlock()
-	if len(paths) == 0 {
-		return
+	if job.Signed {
+		m.jobsMu.RUnlock()
+		return fmt.Errorf("negative control requires an unsigned generation")
 	}
-	for _, p := range paths {
-		if err := os.Remove(p); err != nil {
-			m.appendJobLog(jobID, fmt.Sprintf("[verify] warning: could not remove broken artifact: %v", err))
+	root := job.StagingRoot
+	rels := append([]string(nil), job.StagedArtifacts...)
+	var builtPackages []string
+	for _, rel := range rels {
+		if cpv := artifactRelCPV(rel); cpv != "" && !slices.Contains(builtPackages, cpv) {
+			builtPackages = append(builtPackages, cpv)
 		}
 	}
-	m.appendJobLog(jobID, "[verify] broken artifact(s) removed from the binhost")
-	if m.onArtifactStored != nil {
-		m.onArtifactStored()
+	m.jobsMu.RUnlock()
+	if root == "" || len(rels) == 0 {
+		return fmt.Errorf("unsigned generation is missing staged artifacts")
 	}
-	// Mirror copies must go too, and the index must stop referencing them.
-	if up := newMirrorUploader(m.CloudSettings()); up != nil {
-		if err := up.login(); err != nil {
-			m.appendJobLog(jobID, "[verify] warning: mirror cleanup login failed: "+err.Error())
-			return
-		}
-		for _, rel := range rels {
-			if err := up.deletePath(rel); err != nil {
-				m.appendJobLog(jobID, fmt.Sprintf("[verify] warning: mirror cleanup of %s failed: %v", rel, err))
-			}
-		}
-		if idx := filepath.Join(m.config.BinpkgPath, "Packages"); m.config.BinpkgPath != "" {
-			if _, err := os.Stat(idx); err == nil {
-				_, _ = up.uploadLocalFile(idx, "")
-			}
-		}
-		m.appendJobLog(jobID, "[verify] broken artifact(s) removed from the mirror")
+	if m.gpgKeyProvider == nil {
+		return fmt.Errorf("negative control requires an isolated-signer public-key provider")
 	}
+	keyID, public, _ := m.gpgKeyProvider()
+	if keyID == "" || len(public) == 0 {
+		return fmt.Errorf("negative control requires a ready signer public key")
+	}
+	records, err := artifactMetadata(root, rels, &BuildStatus{}, "negative_control")
+	if err != nil {
+		return err
+	}
+	artifacts := make([]VerificationArtifact, len(records))
+	for index := range records {
+		artifacts[index] = VerificationArtifact{
+			RelativePath: filepath.ToSlash(rels[index]),
+			SHA256:       records[index].Digest,
+			Size:         records[index].SizeBytes,
+		}
+	}
+	body, _ := json.Marshal(VerifyInstallRequest{
+		PackageName: req.PackageName, BinhostURL: binhostURL,
+		Generation: "signed", GPGPubkey: string(public), ExpectedKeyID: keyID,
+		BuiltPackages: builtPackages, Artifacts: artifacts, RequireSignature: true,
+	})
+	httpReq, err := http.NewRequest(http.MethodPost,
+		normalizeBuilderURL(builderEndpoint)+"/api/v1/verify", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	setBuilderAuth(httpReq, m.config.BuilderToken)
+	response, err := artifactHTTPClient.Do(httpReq)
+	if err != nil {
+		return fmt.Errorf("negative-control request failed: %w", err)
+	}
+	defer func() { _ = response.Body.Close() }()
+	var result struct {
+		OK    bool   `json:"ok"`
+		Error string `json:"error"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&result); err != nil {
+		return fmt.Errorf("negative-control response invalid (status %d): %w", response.StatusCode, err)
+	}
+	if result.OK {
+		return fmt.Errorf("unsigned GPKG was accepted under the signed verification policy")
+	}
+	if result.Error == "" {
+		return fmt.Errorf("builder rejected the negative control without an auditable reason")
+	}
+	m.appendJobLog(jobID, fmt.Sprintf(
+		"[verify-negative] unsigned generation rejected under signer key %s before signing (artifacts=%d digests=%s)",
+		keyID, len(artifacts), verificationDigestSummary(artifacts)))
+	return nil
 }
 
 // uploadJobToMirror pushes every stored artifact of a job (plus the Packages
@@ -698,7 +1602,10 @@ func (m *Manager) removeJobArtifact(jobID string) {
 func (m *Manager) uploadJobToMirror(jobID string, up *mirrorUploader) error {
 	m.jobsMu.RLock()
 	var locals, rels []string
+	var status *BuildStatus
 	if job, ok := m.jobs[jobID]; ok {
+		snapshot := *job
+		status = &snapshot
 		if len(job.ArtifactPaths) == len(job.Artifacts) {
 			locals = append(locals, job.ArtifactPaths...)
 			for _, w := range job.Artifacts {
@@ -713,6 +1620,10 @@ func (m *Manager) uploadJobToMirror(jobID string, up *mirrorUploader) error {
 	m.jobsMu.RUnlock()
 	if len(locals) == 0 {
 		return fmt.Errorf("no artifacts recorded for upload")
+	}
+	binhostPath, err := buildStatusBinhostPath(status)
+	if err != nil {
+		return err
 	}
 	if err := up.login(); err != nil {
 		return err
@@ -729,12 +1640,12 @@ func (m *Manager) uploadJobToMirror(jobID string, up *mirrorUploader) error {
 		m.appendJobLog(jobID, "[collect] uploaded to mirror: "+url)
 	}
 	if m.config.BinpkgPath != "" {
-		idx := filepath.Join(m.config.BinpkgPath, "Packages")
+		idx := filepath.Join(m.config.BinpkgPath, filepath.FromSlash(binhostPath), "Packages")
 		if _, err := os.Stat(idx); err == nil {
-			if _, err := up.uploadLocalFile(idx, ""); err != nil {
+			if _, err := up.uploadLocalFile(idx, binhostPath); err != nil {
 				return fmt.Errorf("upload Packages index: %w", err)
 			}
-			m.appendJobLog(jobID, "[collect] uploaded to mirror: "+up.binhostURL()+"/Packages")
+			m.appendJobLog(jobID, "[collect] uploaded to mirror: "+up.binhostURL()+"/"+binhostPath+"/Packages")
 		}
 	}
 	if m.gpgKeyProvider != nil {
@@ -773,6 +1684,18 @@ func (m *Manager) buildProvisionRequest(req *BuildRequest) (*iac.ProvisionReques
 		fmt.Println("Warning: neither CLOUD_BUILDER_BINARY_PATH nor CLOUD_BUILDER_BINARY_URL is set; " +
 			"the instance can only build if its image ships /opt/portage-builder/portage-builder")
 	}
+	if cs.BuilderBinaryPath == "" && cs.BuilderBinaryURL != "" {
+		builderURL, err := neturl.Parse(cs.BuilderBinaryURL)
+		if err != nil || (builderURL.Scheme != "http" && builderURL.Scheme != "https") || builderURL.Host == "" {
+			return nil, fmt.Errorf("CLOUD_BUILDER_BINARY_URL must be an absolute http or https URL")
+		}
+		if builderURL.User != nil || builderURL.RawQuery != "" || builderURL.Fragment != "" {
+			return nil, fmt.Errorf("CLOUD_BUILDER_BINARY_URL must not contain credentials, query parameters, or a fragment")
+		}
+		if !sha256DigestRegex.MatchString(cs.BuilderBinarySHA256) {
+			return nil, fmt.Errorf("CLOUD_BUILDER_BINARY_SHA256 must be exactly 64 lowercase hexadecimal characters when downloading the builder")
+		}
+	}
 
 	ttl := time.Duration(cs.InstanceTTLMinutes) * time.Minute
 
@@ -782,25 +1705,52 @@ func (m *Manager) buildProvisionRequest(req *BuildRequest) (*iac.ProvisionReques
 	// nodes cannot route to), and the mirror already serves the signed
 	// binpkgs the server publishes there.
 	binhost := ""
+	binhostPath, err := buildBinhostPath(req)
+	if err != nil {
+		return nil, err
+	}
 	if cs.ServerCallbackURL != "" {
-		binhost = strings.TrimRight(cs.ServerCallbackURL, "/") + "/binpkgs"
+		binhost = strings.TrimRight(cs.ServerCallbackURL, "/") + "/binpkgs/" + binhostPath
 	}
 	if cs.UploadURL != "" {
 		dir := strings.Trim(cs.UploadDir, "/")
 		if dir == "" {
 			dir = "portage-engine"
 		}
-		binhost = strings.TrimRight(cs.UploadURL, "/") + "/local/" + dir
+		binhost = strings.TrimRight(cs.UploadURL, "/") + "/local/" + dir + "/" + binhostPath
 	}
 
 	spec := req.MachineSpec
+	buildMode := "native-gentoo"
+	if req.ResolvedContext != nil && req.ResolvedContext.BuildMode != "" {
+		buildMode = req.ResolvedContext.BuildMode
+	}
+	if buildMode != "native-gentoo" {
+		return nil, fmt.Errorf("build mode %q is no longer supported; only native-gentoo is available", buildMode)
+	}
 	switch provider {
 	case "pve":
-		spec = pveSpecWithDefaults(cs, req.MachineSpec)
+		spec = pveSpecWithDefaults(cs, req.MachineSpec, buildMode)
+		if req.ResolvedContext != nil && req.ResolvedContext.Template != "" {
+			// The catalog, never machine_spec, owns template selection.
+			spec["template"] = req.ResolvedContext.Template
+		}
 	case "gcp":
 		spec = gcpSpecWithDefaults(cs, req.MachineSpec)
 	case "aws":
 		spec = awsSpecWithDefaults(cs, req.MachineSpec)
+	}
+	if req.ResolvedContext != nil {
+		// Persist the catalog identity with the IaC instance so provisioning,
+		// cleanup and audit evidence remain bound to the exact image/profile
+		// generation used by this single-use VM.
+		spec["pe_catalog_version"] = strconv.Itoa(req.ResolvedContext.CatalogVersion)
+		spec["pe_profile_id"] = req.ResolvedContext.ProfileID
+		spec["pe_image_id"] = req.ResolvedContext.ImageID
+		spec["pe_image_generation"] = req.ResolvedContext.ImageGeneration
+		spec["pe_image_digest"] = req.ResolvedContext.ImageDigest
+		spec["pe_mirror_bundle_id"] = req.ResolvedContext.MirrorBundleID
+		spec["pe_mirror_bundle_digest"] = req.ResolvedContext.MirrorBundleDigest
 	}
 
 	preq := &iac.ProvisionRequest{
@@ -814,33 +1764,21 @@ func (m *Manager) buildProvisionRequest(req *BuildRequest) (*iac.ProvisionReques
 			KnownHostsPath:  cs.SSHKnownHosts,
 			InsecureHostKey: cs.SSHInsecureHostKey,
 		},
-		ServerCallback:    cs.ServerCallbackURL,
-		BuilderPort:       9090,
-		BuilderToken:      m.config.BuilderToken,
-		BinpkgHost:        binhost,
-		TTL:               ttl,
-		BuilderBinaryPath: cs.BuilderBinaryPath,
-		BuilderBinaryURL:  cs.BuilderBinaryURL,
+		ServerCallback:      cs.ServerCallbackURL,
+		BuilderPort:         9090,
+		BuilderToken:        m.config.BuilderToken,
+		BinpkgHost:          binhost,
+		TTL:                 ttl,
+		BuilderBinaryPath:   cs.BuilderBinaryPath,
+		BuilderBinaryURL:    cs.BuilderBinaryURL,
+		BuilderBinarySHA256: cs.BuilderBinarySHA256,
 
-		AptMirror:            cs.AptMirror,
-		DockerDownloadMirror: cs.DockerDownloadMirror,
-		DockerRegistryMirror: cs.DockerRegistryMirror,
-		GentooMirror:         cs.GentooMirror,
-		PortageSyncURI:       cs.PortageSyncURI,
-		PortageSyncMethod:    cs.PortageSyncMethod,
-		DockerImage:          cs.DockerImage,
-		MakeConfExtra:        cs.MakeConfExtra,
-		BuildFeatures:        cs.BuildFeatures,
-		BuildMode:            cs.BuildMode,
-	}
-	// Deploy in-emerge signing when explicitly enabled, or always for native
-	// Gentoo VMs (where portage's post-sign self-verify actually works). The
-	// signing pubkey is still distributed for install verification below.
-	if (cs.SignBinpkgs || cs.BuildMode == "native-gentoo") && m.gpgKeyProvider != nil {
-		if keyID, _, sec := m.gpgKeyProvider(); keyID != "" && len(sec) > 0 {
-			preq.GPGKeyID = keyID
-			preq.GPGSecretKey = sec
-		}
+		GentooMirror:      cs.GentooMirror,
+		PortageSyncURI:    cs.PortageSyncURI,
+		PortageSyncMethod: cs.PortageSyncMethod,
+		MakeConfExtra:     cs.MakeConfExtra,
+		BuildFeatures:     cs.BuildFeatures,
+		BuildMode:         buildMode,
 	}
 	return preq, nil
 }
@@ -858,11 +1796,129 @@ func (m *Manager) CloudSettings() *config.CloudSettings {
 	return cs
 }
 
+// SetBuildCatalog atomically replaces the immutable server-owned catalog used
+// for subsequent submissions. In-flight jobs retain their resolved context.
+func (m *Manager) SetBuildCatalog(c *catalog.Catalog) {
+	if c != nil {
+		m.buildCatalog.Store(c)
+	}
+}
+
+// BuildCatalog returns the currently active catalog.
+func (m *Manager) BuildCatalog() *catalog.Catalog {
+	return m.buildCatalog.Load()
+}
+
+// resolveBuildRequest converts client identifiers and legacy metadata into an
+// authoritative catalog context before a job ID or infrastructure is created.
+func (m *Manager) resolveBuildRequest(req *BuildRequest) error {
+	c := m.BuildCatalog()
+	if c == nil {
+		return fmt.Errorf("build catalog is unavailable")
+	}
+
+	profileID := strings.TrimSpace(req.ProfileID)
+	legacyProfile := ""
+	repositoryIDs := append([]string(nil), req.RepositoryIDs...)
+	if req.ConfigBundle != nil {
+		if profileID == "" {
+			profileID = strings.TrimSpace(req.ConfigBundle.Metadata.ProfileID)
+		}
+		legacyProfile = strings.TrimSpace(req.ConfigBundle.Metadata.Profile)
+		if req.ConfigBundle.Config != nil {
+			for _, repo := range req.ConfigBundle.Config.Repos {
+				id := strings.TrimSpace(repo.RegistryID)
+				if id == "" {
+					id = strings.TrimSpace(repo.Name)
+				}
+				if id != "" {
+					repositoryIDs = append(repositoryIDs, id)
+				}
+			}
+		}
+	}
+
+	resolved, err := c.Resolve(catalog.ResolveRequest{
+		ProfileID: profileID, LegacyProfile: legacyProfile, Arch: req.Arch,
+		RepositoryIDs: repositoryIDs, ResourceClass: req.ResourceClass,
+		CloudProvider: req.CloudProvider,
+	})
+	if err != nil {
+		return err
+	}
+
+	// A compatibility image explicitly inherits the dashboard-managed current
+	// template. Candidate/stable catalogs must name their own immutable one.
+	if resolved.Template == "" && resolved.ImageChannel == "compatibility" {
+		resolved.Template = m.CloudSettings().PVETemplate
+	}
+	if len(req.MachineSpec) > 0 && resolved.ProfileChannel != "compatibility" {
+		return fmt.Errorf("machine_spec overrides are disabled for catalog profiles; select a resource_class")
+	}
+	for key, value := range req.MachineSpec {
+		resolved.MachineSpec[key] = value
+	}
+
+	req.ProfileID = resolved.ProfileID
+	req.RepositoryIDs = make([]string, 0, len(resolved.Repositories))
+	for _, repo := range resolved.Repositories {
+		req.RepositoryIDs = append(req.RepositoryIDs, repo.ID)
+	}
+	req.ResourceClass = resolved.ResourceClass
+	req.Arch = resolved.Arch
+	req.CloudProvider = resolved.Provider
+	req.MachineSpec = maps.Clone(resolved.MachineSpec)
+	req.ResolvedContext = resolved
+
+	// Every execution path receives the same resolved bundle. This is important
+	// for the simple request endpoint: without a bundle, a remote builder would
+	// otherwise recreate default repos and lose the catalog revision pin.
+	if req.ConfigBundle == nil {
+		req.ConfigBundle = &ConfigBundle{
+			Config: &PortageConfig{},
+			Packages: &BuildPackageSpec{Packages: []PackageSpec{{
+				Atom: req.PackageName, Version: req.Version,
+				UseFlags: append([]string(nil), req.UseFlags...),
+			}}},
+			Metadata: BundleMetadata{CreatedAt: time.Now().UTC().Format(time.RFC3339)},
+		}
+	}
+	req.ConfigBundle.Metadata.ProfileID = resolved.ProfileID
+	req.ConfigBundle.Metadata.Profile = resolved.ProfilePath
+	req.ConfigBundle.Metadata.ProfileRepositoryID = resolved.ProfileRepositoryID
+	req.ConfigBundle.Metadata.ProfileRepositoryName = resolved.ProfileRepositoryName
+	req.ConfigBundle.Metadata.ProfileParents = make([]ProfileParentRef, 0, len(resolved.ProfileParents))
+	for _, parent := range resolved.ProfileParents {
+		req.ConfigBundle.Metadata.ProfileParents = append(req.ConfigBundle.Metadata.ProfileParents, ProfileParentRef{
+			RepositoryID: parent.RepositoryID, RepositoryName: parent.RepositoryName, ProfilePath: parent.ProfilePath,
+		})
+	}
+	req.ConfigBundle.Metadata.TargetArch = resolved.Arch
+	if req.ConfigBundle.Config != nil {
+		repos := make([]RepoConfig, 0, len(resolved.Repositories))
+		for _, repo := range resolved.Repositories {
+			repos = append(repos, RepoConfig{
+				RegistryID: repo.ID, Name: repo.Name, Location: repo.Location,
+				SyncType: repo.SyncType, SyncURI: repo.SyncURI,
+				Revision: repo.Revision, Digest: repo.Digest, Priority: repo.Priority,
+			})
+		}
+		req.ConfigBundle.Config.Repos = repos
+	}
+	if err := validateBundle(req.ConfigBundle); err != nil {
+		return fmt.Errorf("resolved configuration is invalid: %w", err)
+	}
+	return nil
+}
+
 // UpdateCloudSettings atomically replaces the cloud provisioning settings.
 // In-flight builds keep the snapshot they started with; subsequent builds use
 // the new values. Used by the server's settings API (dashboard-managed config).
 func (m *Manager) UpdateCloudSettings(s *config.CloudSettings) {
-	m.cloudSettings.Store(s.Clone())
+	updated := s.Clone()
+	updated.SkipVerifyInstall = false
+	updated.BuildMode = "native-gentoo"
+	m.cloudSettings.Store(updated)
 }
 
 // remoteBuilders returns the current static builder list (runtime-adjustable
@@ -876,7 +1932,7 @@ func (m *Manager) remoteBuilders() []string {
 // PVE without the client re-sending endpoint/template/storage every time.
 // Without this merge the PVE settings (other than the token credentials) would
 // never reach the IaC layer.
-func pveSpecWithDefaults(cs *config.CloudSettings, reqSpec map[string]string) map[string]string {
+func pveSpecWithDefaults(cs *config.CloudSettings, reqSpec map[string]string, buildMode string) map[string]string {
 	spec := make(map[string]string, len(reqSpec)+6)
 	set := func(key, value string) {
 		if value != "" {
@@ -896,7 +1952,7 @@ func pveSpecWithDefaults(cs *config.CloudSettings, reqSpec map[string]string) ma
 	}
 	// A native Gentoo template is a UEFI (ovmf/q35) image; the boot disk clones
 	// onto scsi0. Set these unless the request overrides them.
-	if cs.BuildMode == "native-gentoo" {
+	if buildMode == "native-gentoo" {
 		set("bios", "ovmf")
 		set("machine", "q35")
 		set("disk_type", "scsi")
@@ -972,7 +2028,7 @@ func (m *Manager) runBuildOnInstance(jobID string, instance *iac.Instance, req *
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
 
-	lastLogLen := 0
+	lastLogSnapshot := ""
 	for {
 		if time.Now().After(deadline) {
 			return fmt.Errorf("build timed out on instance %s", instance.ID)
@@ -984,12 +2040,13 @@ func (m *Manager) runBuildOnInstance(jobID string, instance *iac.Instance, req *
 			return fmt.Errorf("failed to poll instance builder: %w", err)
 		}
 		// Forward the remote build log incrementally into the local job log.
-		if len(snap.Log) > lastLogLen {
-			m.appendJobLog(jobID, strings.TrimRight(snap.Log[lastLogLen:], "\n"))
-			lastLogLen = len(snap.Log)
-		}
+		m.appendRemoteBuildLog(jobID, snap.Log, &lastLogSnapshot)
 		m.iacMgr.UpdateInstanceActivity(instance.ID)
-		m.updateStatus(jobID, snap.Status, instance.ID, snap.Error)
+		localStatus := snap.Status
+		if snap.Terminal && snap.Status != "failed" {
+			localStatus = "collecting"
+		}
+		m.updateStatus(jobID, localStatus, instance.ID, snap.Error)
 
 		if snap.Terminal {
 			if snap.Status == "failed" {
@@ -1010,12 +2067,15 @@ func (m *Manager) runBuildOnInstance(jobID string, instance *iac.Instance, req *
 // postBuildToBuilder submits a build to a builder base URL and returns its job ID.
 func (m *Manager) postBuildToBuilder(baseURL string, req *BuildRequest) (string, error) {
 	localReq := LocalBuildRequest{
-		PackageName:  req.PackageName,
-		Version:      req.Version,
-		Arch:         req.Arch,
-		UseFlags:     make(map[string]string),
-		Environment:  make(map[string]string),
-		ConfigBundle: req.ConfigBundle,
+		PackageName:   req.PackageName,
+		Version:       req.Version,
+		Arch:          req.Arch,
+		ProfileID:     req.ProfileID,
+		RepositoryIDs: append([]string(nil), req.RepositoryIDs...),
+		ResourceClass: req.ResourceClass,
+		UseFlags:      make(map[string]string),
+		Environment:   make(map[string]string),
+		ConfigBundle:  req.ConfigBundle,
 	}
 	for _, flag := range req.UseFlags {
 		if name, found := strings.CutPrefix(flag, "-"); found {
@@ -1146,12 +2206,15 @@ func (m *Manager) submitToBuilderAt(jobID, builderAddr, baseURL string, req *Bui
 
 	// Convert BuildRequest to LocalBuildRequest format
 	localReq := LocalBuildRequest{
-		PackageName:  req.PackageName, // Already in category/package format from server
-		Version:      req.Version,
-		Arch:         req.Arch,
-		UseFlags:     make(map[string]string),
-		Environment:  make(map[string]string),
-		ConfigBundle: req.ConfigBundle, // Forward the full config bundle when present.
+		PackageName:   req.PackageName, // Already in category/package format from server
+		Version:       req.Version,
+		Arch:          req.Arch,
+		ProfileID:     req.ProfileID,
+		RepositoryIDs: append([]string(nil), req.RepositoryIDs...),
+		ResourceClass: req.ResourceClass,
+		UseFlags:      make(map[string]string),
+		Environment:   make(map[string]string),
+		ConfigBundle:  req.ConfigBundle, // Forward the full config bundle when present.
 	}
 
 	// Convert UseFlags from []string to map[string]string
@@ -1200,7 +2263,7 @@ func (m *Manager) submitToBuilderAt(jobID, builderAddr, baseURL string, req *Bui
 	m.jobsMu.Unlock()
 
 	// Start polling remote builder for status
-	go m.pollRemoteBuilder(jobID, builderAddr, buildResp.JobID)
+	go m.pollRemoteBuilder(jobID, builderAddr, buildResp.JobID, req)
 	return nil
 }
 
@@ -1210,7 +2273,7 @@ func (m *Manager) submitToBuilderAt(jobID, builderAddr, baseURL string, req *Bui
 const maxConsecutivePollFailures = 6
 
 // pollRemoteBuilder polls remote builder for job status.
-func (m *Manager) pollRemoteBuilder(localJobID, builderAddr, remoteJobID string) {
+func (m *Manager) pollRemoteBuilder(localJobID, builderAddr, remoteJobID string, req *BuildRequest) {
 	baseURL := normalizeBuilderURL(builderAddr)
 	statusURL := fmt.Sprintf("%s/api/v1/jobs/%s", baseURL, remoteJobID)
 
@@ -1218,6 +2281,7 @@ func (m *Manager) pollRemoteBuilder(localJobID, builderAddr, remoteJobID string)
 	defer ticker.Stop()
 
 	failures := 0
+	lastLogSnapshot := ""
 	for range ticker.C {
 		resp, err := m.getFromBuilder(statusURL)
 		if err != nil {
@@ -1240,13 +2304,15 @@ func (m *Manager) pollRemoteBuilder(localJobID, builderAddr, remoteJobID string)
 		failures = 0
 
 		var remoteJob struct {
-			ID          string    `json:"id"`
-			Status      string    `json:"status"`
-			Error       string    `json:"error,omitempty"`
-			Log         string    `json:"log"`
-			ArtifactURL string    `json:"artifact_url"`
-			StartTime   time.Time `json:"start_time"`
-			EndTime     time.Time `json:"end_time"`
+			ID          string                 `json:"id"`
+			Status      string                 `json:"status"`
+			Error       string                 `json:"error,omitempty"`
+			Log         string                 `json:"log"`
+			ArtifactURL string                 `json:"artifact_url"`
+			Artifacts   []string               `json:"artifacts,omitempty"`
+			Metadata    map[string]interface{} `json:"metadata,omitempty"`
+			StartTime   time.Time              `json:"start_time"`
+			EndTime     time.Time              `json:"end_time"`
 		}
 		if err := json.NewDecoder(resp.Body).Decode(&remoteJob); err != nil {
 			_ = resp.Body.Close()
@@ -1255,38 +2321,37 @@ func (m *Manager) pollRemoteBuilder(localJobID, builderAddr, remoteJobID string)
 		}
 		_ = resp.Body.Close()
 
-		// Update local job with remote status including log
-		errorMsg := remoteJob.Error
-		if remoteJob.Log != "" {
-			errorMsg = remoteJob.Log
+		// Logs and errors are distinct surfaces. Keeping the entire remote log
+		// in Error made successful static-builder jobs look failed and left the
+		// actual logs page with only its initial queued marker.
+		m.appendRemoteBuildLog(localJobID, remoteJob.Log, &lastLogSnapshot)
+		localStatus := remoteJob.Status
+		if (remoteJob.Status == "completed" || remoteJob.Status == "success") && remoteJob.Error == "" {
+			localStatus = "collecting"
 		}
-		m.updateStatus(localJobID, remoteJob.Status, "", errorMsg)
-
-		// Update artifact path if available
-		if remoteJob.ArtifactURL != "" {
-			m.jobsMu.Lock()
-			if job, exists := m.jobs[localJobID]; exists {
-				job.ArtifactPath = remoteJob.ArtifactURL
-			}
-			m.jobsMu.Unlock()
-		}
+		m.updateStatus(localJobID, localStatus, "", remoteJob.Error)
 
 		// Stop polling if terminal state reached
 		if remoteJob.Status == "completed" || remoteJob.Status == "failed" || remoteJob.Status == "success" {
-			// On success, pull the artifact into the central binhost so builds
-			// from every builder converge into one consumable Packages index.
-			// A static builder stays alive, so on failure the remote reference
-			// is kept (the artifact proxy can still serve it) and we only warn.
-			if remoteJob.Status != "failed" && remoteJob.ArtifactURL != "" {
-				if localPath, webPath, err := m.fetchArtifactToBinhost(baseURL, remoteJobID, m.jobPackageName(localJobID), remoteJob.ArtifactURL); err != nil {
-					fmt.Printf("Warning: failed to pull artifact for job %s into binhost: %v\n", localJobID, err)
+			if remoteJob.Status != "failed" {
+				if remoteJob.ArtifactURL == "" {
+					m.setFailedStage(localJobID, "collect")
+					m.updateStatus(localJobID, "failed", "", "remote build completed without an artifact")
 				} else {
-					m.jobsMu.Lock()
-					if job, exists := m.jobs[localJobID]; exists {
-						job.ArtifactPath = localPath
-						job.ArtifactURL = webPath
+					signed, _ := remoteJob.Metadata["signed"].(bool)
+					snap := &remoteJobSnapshot{
+						ArtifactURL: remoteJob.ArtifactURL,
+						Artifacts:   append([]string(nil), remoteJob.Artifacts...),
+						Signed:      signed,
 					}
-					m.jobsMu.Unlock()
+					if err := m.collectInstanceArtifacts(localJobID, baseURL, remoteJobID, req.PackageName, snap); err != nil {
+						m.setFailedStage(localJobID, "collect")
+						m.updateStatus(localJobID, "failed", "", "artifact collection failed: "+err.Error())
+					} else if stage, err := m.verifyAndPublish(localJobID, baseURL, baseURL, req); err != nil {
+						m.setFailedStage(localJobID, stage)
+						m.cleanupArtifactQuarantine(localJobID)
+						m.updateStatus(localJobID, "failed", "", err.Error())
+					}
 				}
 			}
 			m.jobsMu.Lock()
@@ -1305,6 +2370,22 @@ const maxJobLogBytes = 2 * 1024 * 1024
 // (terraform, apt, emerge) stays readable in the web UI.
 var ansiEscapes = regexp.MustCompile("\x1b\\[[0-9;]*[a-zA-Z]")
 
+var (
+	logAuthorizationSecret = regexp.MustCompile(`(?i)(authorization\s*[:=]\s*(?:bearer\s+|pveapitoken=))\S+`)
+	logKeyValueSecret      = regexp.MustCompile(`(?i)\b(password|passwd|token_secret|api_key|pm_pass|secret)\s*([=:])\s*([^\s,;]+)`)
+	logQuerySecret         = regexp.MustCompile(`(?i)([?&](?:token|secret|password|api_key)=)[^&#\s]+`)
+	logURLUserInfo         = regexp.MustCompile(`(https?://)[^/\s:@]+:[^/@\s]+@`)
+	logVerifyCapability    = regexp.MustCompile(`(/verify-binhost/)[^/\s?]+`)
+)
+
+func redactJobLogLine(line string) string {
+	line = logAuthorizationSecret.ReplaceAllString(line, `${1}<redacted>`)
+	line = logKeyValueSecret.ReplaceAllString(line, `${1}${2}<redacted>`)
+	line = logQuerySecret.ReplaceAllString(line, `${1}<redacted>`)
+	line = logVerifyCapability.ReplaceAllString(line, `${1}<redacted>`)
+	return logURLUserInfo.ReplaceAllString(line, `${1}<redacted>@`)
+}
+
 // appendJobLog appends a line to a job's live log (served by the logs API and
 // shown on the dashboard's logs page while provisioning/building runs).
 //
@@ -1313,14 +2394,20 @@ var ansiEscapes = regexp.MustCompile("\x1b\\[[0-9;]*[a-zA-Z]")
 // log (a full portage tree sync prints tens of thousands of lines).
 func (m *Manager) appendJobLog(jobID, line string) {
 	m.jobsMu.Lock()
-	defer m.jobsMu.Unlock()
 	job, ok := m.jobs[jobID]
 	if !ok {
+		m.jobsMu.Unlock()
 		return
 	}
 	line = ansiEscapes.ReplaceAllString(line, "")
 	line = strings.ReplaceAll(line, "\r", "")
-	job.Log += line + "\n"
+	line = redactJobLogLine(line)
+	recordedAt := time.Now().UTC()
+	records := make([]LogRecord, 0, strings.Count(line, "\n")+1)
+	for _, part := range strings.Split(strings.TrimRight(line, "\n"), "\n") {
+		job.Log += recordedAt.Format(time.RFC3339Nano) + " " + part + "\n"
+		records = append(records, LogRecord{OccurredAt: recordedAt, Message: part})
+	}
 	if len(job.Log) > maxJobLogBytes {
 		head := job.Log[:maxJobLogBytes/4]
 		if i := strings.LastIndexByte(head, '\n'); i > 0 {
@@ -1333,6 +2420,13 @@ func (m *Manager) appendJobLog(jobID, line string) {
 		job.Log = head + "[... log truncated: middle omitted ...]\n" + tail
 	}
 	job.UpdatedAt = time.Now()
+	status := *job
+	m.jobsMu.Unlock()
+	if m.logLedger != nil && len(records) > 0 {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		_ = m.logLedger.AppendLogs(ctx, &status, records)
+		cancel()
+	}
 }
 
 // ListInstances returns the current cloud instances (provisioning, running,
@@ -1343,7 +2437,7 @@ func (m *Manager) ListInstances() []*iac.Instance {
 
 // terminalStatus reports whether a job status is final.
 func terminalStatus(s string) bool {
-	return s == "failed" || s == "completed" || s == "success"
+	return s == "failed" || s == "completed" || s == "success" || s == "canceled"
 }
 
 // DeleteJob removes a terminal job record. In-flight jobs are refused so a
@@ -1358,6 +2452,15 @@ func (m *Manager) DeleteJob(jobID string) error {
 	if !terminalStatus(job.Status) {
 		return fmt.Errorf("job %s is %s; only finished jobs can be deleted", jobID, job.Status)
 	}
+	if m.jobLedger != nil {
+		snapshot := *job
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		err := m.jobLedger.HideJob(ctx, &snapshot, "operator_delete")
+		cancel()
+		if err != nil {
+			return fmt.Errorf("hide job in ledger: %w", err)
+		}
+	}
 	delete(m.jobs, jobID)
 	return nil
 }
@@ -1369,11 +2472,67 @@ func (m *Manager) CleanupFailedJobs() int {
 	n := 0
 	for id, job := range m.jobs {
 		if job.Status == "failed" {
+			if m.jobLedger != nil {
+				snapshot := *job
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				err := m.jobLedger.HideJob(ctx, &snapshot, "cleanup_failed")
+				cancel()
+				if err != nil {
+					continue
+				}
+			}
 			delete(m.jobs, id)
 			n++
 		}
 	}
 	return n
+}
+
+// CancelJob fences any active executor before updating the local projection.
+func (m *Manager) CancelJob(jobID, reason string) error {
+	if m.scheduler == nil {
+		return fmt.Errorf("durable scheduler is not enabled")
+	}
+	if strings.TrimSpace(reason) == "" {
+		reason = "canceled by operator"
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	status, err := m.scheduler.CancelJob(ctx, jobID, reason)
+	cancel()
+	if err != nil {
+		return err
+	}
+	m.jobsMu.Lock()
+	if local, ok := m.jobs[jobID]; ok {
+		status.Request = local.Request
+		status.Log = local.Log
+	}
+	m.jobs[jobID] = status
+	m.jobsMu.Unlock()
+	m.emitStatus(status)
+	return nil
+}
+
+// RetryJob queues a new fenced attempt for a failed/canceled job.
+func (m *Manager) RetryJob(jobID string) error {
+	if m.scheduler == nil {
+		return fmt.Errorf("durable scheduler is not enabled")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	status, err := m.scheduler.RetryJob(ctx, jobID)
+	cancel()
+	if err != nil {
+		return err
+	}
+	m.jobsMu.Lock()
+	if local, ok := m.jobs[jobID]; ok {
+		status.Log = local.Log
+	}
+	m.jobs[jobID] = status
+	m.jobsMu.Unlock()
+	m.signalWorkers()
+	m.emitStatus(status)
+	return nil
 }
 
 // setFailedStage records which pipeline stage a job failed in.
@@ -1385,31 +2544,81 @@ func (m *Manager) setFailedStage(jobID, stage string) {
 	}
 }
 
-// jobPackageName returns a job's package atom ("category/name"), or "".
-func (m *Manager) jobPackageName(jobID string) string {
-	m.jobsMu.RLock()
-	defer m.jobsMu.RUnlock()
-	if job, ok := m.jobs[jobID]; ok {
-		return job.PackageName
-	}
-	return ""
-}
-
 // updateStatus updates the status of a build job.
 func (m *Manager) updateStatus(jobID, status, instanceID, errorMsg string) {
 	m.jobsMu.Lock()
-	defer m.jobsMu.Unlock()
-
-	if job, exists := m.jobs[jobID]; exists {
-		job.Status = status
-		job.UpdatedAt = time.Now()
-		if instanceID != "" {
-			job.InstanceID = instanceID
-		}
-		if errorMsg != "" {
-			job.Error = errorMsg
-		}
+	job, exists := m.jobs[jobID]
+	if !exists {
+		m.jobsMu.Unlock()
+		return
 	}
+	previous := *job
+	current := previous
+	current.Status = status
+	current.UpdatedAt = time.Now()
+	if instanceID != "" {
+		current.InstanceID = instanceID
+	}
+	if errorMsg != "" {
+		current.Error = redactJobLogLine(errorMsg)
+	} else if status != "failed" {
+		// A successful/non-failed transition must not retain a stale error
+		// from a previous polling or infrastructure state.
+		current.Error = ""
+	}
+	if m.scheduler != nil && current.AttemptID != "" {
+		m.jobsMu.Unlock()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		err := m.scheduler.RecordTransition(ctx, &previous, &current)
+		cancel()
+		if err != nil {
+			return
+		}
+		m.jobsMu.Lock()
+		if live, ok := m.jobs[jobID]; ok &&
+			live.AttemptID == previous.AttemptID &&
+			live.FenceToken == previous.FenceToken &&
+			live.Status == previous.Status {
+			*live = current
+		}
+		m.jobsMu.Unlock()
+		m.emitStatus(&current)
+		return
+	}
+	*job = current
+	m.jobsMu.Unlock()
+
+	if m.jobLedger != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_ = m.jobLedger.RecordTransition(ctx, &previous, &current)
+		cancel()
+	}
+	m.emitStatus(&current)
+}
+
+// appendRemoteBuildLog appends only the newly observed suffix of a builder
+// log. The server owns the ingestion timestamp and stage marker, so both cloud
+// and static builders produce the same structured log surface. If a builder
+// restarts, truncates, or replaces its log, record that discontinuity and
+// ingest the replacement from the beginning.
+func (m *Manager) appendRemoteBuildLog(jobID, current string, previous *string) {
+	if previous == nil || current == "" {
+		return
+	}
+	start := len(*previous)
+	if !strings.HasPrefix(current, *previous) {
+		m.appendJobLog(jobID, "[build] remote log restarted or was truncated")
+		start = 0
+	}
+	if start == len(current) {
+		return
+	}
+	chunk := strings.TrimRight(current[start:], "\r\n")
+	*previous = current
+	if chunk == "" {
+		return
+	}
+	m.appendJobLog(jobID, "[build] "+strings.ReplaceAll(chunk, "\n", "\n[build] "))
 }
 
 // ListAllBuilds returns all build jobs, including those from remote builders.
@@ -1423,6 +2632,9 @@ func (m *Manager) ListAllBuilds() []*BuildStatus {
 		localBuilds = append(localBuilds, &jobCopy)
 	}
 	m.jobsMu.RUnlock()
+	if m.scheduler != nil {
+		return localBuilds
+	}
 
 	// Aggregate builds from remote builders
 	remoteBuilds := m.fetchRemoteBuilderJobs()
@@ -1653,9 +2865,20 @@ func (m *Manager) GetBuildLogs(jobID string) (string, error) {
 	if exists {
 		statusCopy := *status
 		m.jobsMu.RUnlock()
+		if m.logLedger != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			durableLog, err := m.logLedger.LoadLogs(ctx, jobID)
+			cancel()
+			if err == nil {
+				statusCopy.Log = durableLog
+			}
+		}
 		return m.formatLocalLogs(&statusCopy), nil
 	}
 	m.jobsMu.RUnlock()
+	if m.scheduler != nil {
+		return "", fmt.Errorf("job not found in PostgreSQL projection: %s", jobID)
+	}
 
 	// Try to fetch from remote builders
 	logs, err := m.fetchRemoteBuilderLogs(jobID)
@@ -1681,11 +2904,9 @@ func (m *Manager) formatLocalLogs(status *BuildStatus) string {
 
 	// Include actual log if available
 	if status.Log != "" {
-		logs += status.Log
+		logs += redactJobLogLine(status.Log)
 	} else {
-		logs += "Compiling package...\n"
-		logs += "Running configure...\n"
-		logs += "Building sources...\n"
+		logs += "(no build output recorded)\n"
 	}
 
 	switch status.Status {
@@ -1695,7 +2916,7 @@ func (m *Manager) formatLocalLogs(status *BuildStatus) string {
 			logs += fmt.Sprintf("Artifact: %s\n", status.ArtifactPath)
 		}
 	case "failed":
-		logs += fmt.Sprintf("\nBuild failed: %s\n", status.Error)
+		logs += fmt.Sprintf("\nBuild failed: %s\n", redactJobLogLine(status.Error))
 	case "building":
 		logs += "\nBuild in progress...\n"
 	}
@@ -1756,7 +2977,7 @@ func (m *Manager) fetchRemoteBuilderLogs(jobID string) (string, error) {
 		}
 		logs += "\n--- Build Output ---\n"
 		if job.Log != "" {
-			logs += job.Log
+			logs += redactJobLogLine(job.Log)
 		}
 		if job.Error != "" {
 			logs += fmt.Sprintf("\nError: %s\n", job.Error)
@@ -1804,11 +3025,29 @@ func (m *Manager) GetSchedulerStatus() map[string]interface{} {
 		})
 	}
 
-	return map[string]interface{}{
+	status := map[string]interface{}{
+		"authority":     "memory",
 		"builders":      builders,
 		"queued_tasks":  queuedTasks,
 		"running_tasks": runningTasks,
 	}
+	if m.scheduler != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		durable, err := m.scheduler.RuntimeStatus(ctx)
+		cancel()
+		if err != nil {
+			status["authority"] = "postgresql"
+			status["healthy"] = false
+			status["error"] = err.Error()
+			return status
+		}
+		data, err := json.Marshal(durable)
+		if err == nil {
+			_ = json.Unmarshal(data, &status)
+		}
+		status["healthy"] = true
+	}
+	return status
 }
 
 // UpdateBuilderHeartbeat updates builder heartbeat information.
@@ -1844,67 +3083,439 @@ var builderHTTPClient = &http.Client{Timeout: 30 * time.Second}
 // control-plane client's.
 var artifactHTTPClient = &http.Client{Timeout: 15 * time.Minute}
 
-// fetchArtifactToBinhost downloads a completed build's artifact from a builder
-// into this server's binhost PKGDIR (BINPKG_PATH/<category>/<file>), so
-// artifacts from many parallel builders converge into the single Packages
-// index emerge clients consume. Returns the local path.
+func (m *Manager) beginArtifactQuarantine(jobID string) (string, error) {
+	if m.config.BinpkgPath == "" {
+		return "", fmt.Errorf("BINPKG_PATH is not configured")
+	}
+	token := strings.ReplaceAll(uuid.NewString(), "-", "")
+	base := m.artifactQuarantineBase()
+	root := filepath.Join(base, token)
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		return "", fmt.Errorf("create artifact quarantine: %w", err)
+	}
+
+	m.jobsMu.Lock()
+	if job, ok := m.jobs[jobID]; ok {
+		job.StagingRoot = root
+		job.VerificationToken = token
+		job.StagedArtifacts = nil
+		job.StagedPrimary = ""
+	}
+	m.jobsMu.Unlock()
+	return root, nil
+}
+
+func (m *Manager) artifactQuarantineBase() string {
+	return filepath.Join(filepath.Dir(filepath.Clean(m.config.BinpkgPath)), ".portage-engine-quarantine")
+}
+
+func (m *Manager) prepareVerificationBinhost(jobID, arch string) (string, error) {
+	m.jobsMu.RLock()
+	job, ok := m.jobs[jobID]
+	if !ok {
+		m.jobsMu.RUnlock()
+		return "", fmt.Errorf("job %s not found", jobID)
+	}
+	root, token := job.StagingRoot, job.VerificationToken
+	rels := append([]string(nil), job.StagedArtifacts...)
+	m.jobsMu.RUnlock()
+	if root == "" || token == "" || len(rels) == 0 {
+		return "", fmt.Errorf("job %s has no staged artifacts", jobID)
+	}
+	if arch == "" {
+		return "", fmt.Errorf("job %s has no architecture for its verification index", jobID)
+	}
+	if _, err := binpkg.NewStore(root).RegenerateIndex(arch); err != nil {
+		return "", fmt.Errorf("generate quarantine Packages index: %w", err)
+	}
+	// The marker is the shared, revocable capability state. Any control-plane
+	// replica mounting the same BINPKG_PATH can serve it; deleting the
+	// quarantine directory revokes it everywhere.
+	expiresAt := time.Now().UTC().Add(30 * time.Minute)
+	if err := os.WriteFile(filepath.Join(root, verificationCapabilityFile),
+		[]byte(strconv.FormatInt(expiresAt.Unix(), 10)), 0o600); err != nil {
+		return "", fmt.Errorf("activate quarantine capability: %w", err)
+	}
+
+	callback := strings.TrimRight(m.CloudSettings().ServerCallbackURL, "/")
+	parsed, err := neturl.Parse(callback)
+	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return "", fmt.Errorf("SERVER_CALLBACK_URL must be an absolute http or https URL for quarantined verification")
+	}
+	return callback + "/verify-binhost/" + token, nil
+}
+
+// ServeVerificationBinhost exposes one active job quarantine through an
+// unguessable capability URL. It permits only regular-file GET/HEAD requests,
+// disables caching, and is revoked before the job reaches a terminal state.
+func (m *Manager) ServeVerificationBinhost(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	rest := strings.TrimPrefix(r.URL.Path, "/verify-binhost/")
+	parts := strings.SplitN(rest, "/", 2)
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		http.NotFound(w, r)
+		return
+	}
+	token := parts[0]
+	if !capabilityTokenRegex.MatchString(token) {
+		http.NotFound(w, r)
+		return
+	}
+	root := filepath.Join(m.artifactQuarantineBase(), token)
+	marker, err := os.ReadFile(filepath.Join(root, verificationCapabilityFile))
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	expiry, err := strconv.ParseInt(strings.TrimSpace(string(marker)), 10, 64)
+	if err != nil || time.Now().Unix() >= expiry {
+		http.NotFound(w, r)
+		return
+	}
+
+	rel := path.Clean(strings.ReplaceAll(parts[1], "\\", "/"))
+	if rel == verificationCapabilityFile || rel == "." || rel == ".." ||
+		strings.HasPrefix(rel, "../") || strings.HasPrefix(rel, "/") {
+		http.NotFound(w, r)
+		return
+	}
+	file := filepath.Join(root, filepath.FromSlash(rel))
+	info, err := os.Lstat(file)
+	if err != nil || !info.Mode().IsRegular() {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	http.ServeFile(w, r, file)
+}
+
+func (m *Manager) cleanupArtifactQuarantine(jobID string) {
+	m.jobsMu.Lock()
+	job, ok := m.jobs[jobID]
+	if !ok {
+		m.jobsMu.Unlock()
+		return
+	}
+	root := job.StagingRoot
+	job.StagingRoot = ""
+	job.VerificationToken = ""
+	job.StagedArtifacts = nil
+	job.StagedPrimary = ""
+	m.jobsMu.Unlock()
+
+	if root != "" {
+		_ = os.RemoveAll(root)
+	}
+}
+
+func (m *Manager) promoteJobArtifacts(jobID string) error {
+	if m.promoteArtifacts == nil {
+		return fmt.Errorf("artifact promotion is not configured")
+	}
+	m.jobsMu.RLock()
+	job, ok := m.jobs[jobID]
+	if !ok {
+		m.jobsMu.RUnlock()
+		return fmt.Errorf("job %s not found", jobID)
+	}
+	root := job.StagingRoot
+	rels := append([]string(nil), job.StagedArtifacts...)
+	primary := job.StagedPrimary
+	arch := job.Arch
+	status := *job
+	m.jobsMu.RUnlock()
+	binhostPath, err := buildStatusBinhostPath(&status)
+	if err != nil {
+		return err
+	}
+
+	var releasePromotion func() error
+	if m.promotionDB != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		release, err := m.promotionDB.AcquireArtifactPromotion(ctx, &status)
+		cancel()
+		if err != nil {
+			return fmt.Errorf("acquire cross-replica publication lock: %w", err)
+		}
+		releasePromotion = release
+		defer func() { _ = releasePromotion() }()
+	}
+
+	records, err := artifactMetadata(root, rels, &status, "staged")
+	if err != nil {
+		return err
+	}
+	if m.metadata != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		err = m.metadata.RecordArtifacts(ctx, &status, records)
+		cancel()
+		if err != nil {
+			return fmt.Errorf("persist staged artifact metadata: %w", err)
+		}
+	}
+	paths, err := m.promoteArtifacts(root, rels, arch, binhostPath)
+	if err != nil {
+		return err
+	}
+	if len(paths) != len(rels) {
+		return fmt.Errorf("promotion returned %d paths for %d artifacts", len(paths), len(rels))
+	}
+	pathByRel := make(map[string]string, len(rels))
+	webs := make([]string, 0, len(rels))
+	for i, rel := range rels {
+		pathByRel[rel] = paths[i]
+		webs = append(webs, "/binpkgs/"+binhostPath+"/"+filepath.ToSlash(rel))
+	}
+	if primary == "" && len(rels) > 0 {
+		primary = rels[0]
+	}
+
+	m.jobsMu.Lock()
+	if job, ok := m.jobs[jobID]; ok {
+		job.ArtifactPath = pathByRel[primary]
+		job.ArtifactURL = "/binpkgs/" + binhostPath + "/" + filepath.ToSlash(primary)
+		job.ArtifactPaths = append([]string(nil), paths...)
+		job.Artifacts = webs
+	}
+	m.jobsMu.Unlock()
+	if m.metadata != nil {
+		publishedAt := time.Now().UTC()
+		for i := range records {
+			records[i].State = "published"
+			records[i].Published = &publishedAt
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		err = m.metadata.RecordArtifacts(ctx, &status, records)
+		cancel()
+		if err != nil {
+			return fmt.Errorf("persist published artifact metadata: %w", err)
+		}
+	}
+	m.cleanupArtifactQuarantine(jobID)
+	return nil
+}
+
+func artifactMetadata(root string, rels []string, status *BuildStatus, state string) ([]ArtifactRecord, error) {
+	binhostPrefix := "/binpkgs"
+	if status != nil && (status.ResolvedContext != nil || status.Arch != "") {
+		if resolved, err := buildStatusBinhostPath(status); err == nil {
+			binhostPrefix += "/" + resolved
+		}
+	}
+	records := make([]ArtifactRecord, 0, len(rels))
+	for _, rel := range rels {
+		file := filepath.Join(root, filepath.FromSlash(rel))
+		handle, err := os.Open(file)
+		if err != nil {
+			return nil, fmt.Errorf("open artifact for digest %s: %w", rel, err)
+		}
+		hash := sha256.New()
+		size, copyErr := io.Copy(hash, handle)
+		closeErr := handle.Close()
+		if copyErr != nil {
+			return nil, fmt.Errorf("digest artifact %s: %w", rel, copyErr)
+		}
+		if closeErr != nil {
+			return nil, fmt.Errorf("close artifact %s: %w", rel, closeErr)
+		}
+		lineage := map[string]any{
+			"package": status.PackageName,
+			"version": status.Version,
+			"arch":    status.Arch,
+		}
+		if status.ResolvedContext != nil {
+			lineage["profile_id"] = status.ResolvedContext.ProfileID
+			lineage["image_id"] = status.ResolvedContext.ImageID
+			lineage["image_generation"] = status.ResolvedContext.ImageGeneration
+			lineage["image_digest"] = status.ResolvedContext.ImageDigest
+			lineage["mirror_bundle_id"] = status.ResolvedContext.MirrorBundleID
+			lineage["mirror_bundle_digest"] = status.ResolvedContext.MirrorBundleDigest
+		}
+		records = append(records, ArtifactRecord{
+			Kind: "gentoo-binpkg", State: state,
+			Digest: hex.EncodeToString(hash.Sum(nil)), SizeBytes: size,
+			MediaType: "application/vnd.gentoo.gpkg", Location: binhostPrefix + "/" + filepath.ToSlash(rel),
+			Lineage: lineage,
+		})
+	}
+	return records, nil
+}
+
+func buildBinhostPath(req *BuildRequest) (string, error) {
+	if req == nil {
+		return "", fmt.Errorf("build request is required for binhost routing")
+	}
+	status := &BuildStatus{Arch: req.Arch, ResolvedContext: req.ResolvedContext}
+	return buildStatusBinhostPath(status)
+}
+
+func buildStatusBinhostPath(status *BuildStatus) (string, error) {
+	if status == nil {
+		return "", fmt.Errorf("build status is required for binhost routing")
+	}
+	arch := status.Arch
+	if status.ResolvedContext != nil {
+		if status.ResolvedContext.Arch != "" {
+			arch = status.ResolvedContext.Arch
+		}
+		if status.ResolvedContext.BinhostPath != "" {
+			if err := catalog.ValidateBinhostPath(status.ResolvedContext.BinhostPath, arch); err != nil {
+				return "", fmt.Errorf("resolved binhost path: %w", err)
+			}
+			return status.ResolvedContext.BinhostPath, nil
+		}
+		if status.ResolvedContext.ProfileChannel != "" &&
+			status.ResolvedContext.ProfileChannel != "compatibility" {
+			return "", fmt.Errorf("resolved profile %q has no binhost path", status.ResolvedContext.ProfileID)
+		}
+	}
+	// Compatibility for jobs created before binhost_path entered the resolved
+	// context. Non-compatibility catalog jobs fail closed above.
+	if arch == "" {
+		arch = "amd64"
+	}
+	if arch != "amd64" {
+		return "", fmt.Errorf("legacy compatibility binhost path is unavailable for architecture %q", arch)
+	}
+	return "releases/amd64/binpackages/23.0/x86-64", nil
+}
+
+func (m *Manager) recordInfra(jobID string, instance *iac.Instance, state, failure string, deletedAt *time.Time) error {
+	if m.metadata == nil || instance == nil {
+		return nil
+	}
+	job, err := m.jobStatusSnapshot(jobID)
+	if err != nil {
+		return err
+	}
+	return m.recordInfraWithStatus(job, instance, state, failure, deletedAt)
+}
+
+func (m *Manager) jobStatusSnapshot(jobID string) (*BuildStatus, error) {
+	m.jobsMu.RLock()
+	job, ok := m.jobs[jobID]
+	if ok {
+		copyStatus := *job
+		job = &copyStatus
+	}
+	m.jobsMu.RUnlock()
+	if !ok {
+		return nil, fmt.Errorf("job %s is missing from runtime projection", jobID)
+	}
+	return job, nil
+}
+
+// recordInfraWithStatus accepts a fence snapshot captured while the build
+// attempt is active. Terminal ledger transitions release the worker lease and
+// projection refreshes therefore omit the live attempt fields; cleanup still
+// needs the originating attempt/fence to mark its exact VM as destroyed.
+func (m *Manager) recordInfraWithStatus(job *BuildStatus, instance *iac.Instance, state, failure string, deletedAt *time.Time) error {
+	if m.metadata == nil || instance == nil {
+		return nil
+	}
+	if job == nil {
+		return fmt.Errorf("runtime metadata requires a build status")
+	}
+	attributes := map[string]string{
+		"arch": instance.Arch, "ip_address": instance.IPAddress,
+		"builder_endpoint": instance.BuilderEndpoint,
+	}
+	for _, key := range []string{
+		"resource_name", "node",
+		"pe_catalog_version", "pe_profile_id", "pe_image_id", "pe_image_generation",
+		"pe_image_digest", "pe_mirror_bundle_id", "pe_mirror_bundle_digest",
+	} {
+		if value := instance.Metadata[key]; value != "" {
+			attributes[key] = value
+		}
+	}
+	var cleanupAfter *time.Time
+	if instance.TTL > 0 {
+		value := instance.CreatedAt.Add(instance.TTL)
+		cleanupAfter = &value
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return m.metadata.RecordInfra(ctx, job, InfraRecord{
+		Provider: instance.Provider, ProviderInstanceID: instance.ID, State: state,
+		RemoteStateRef: instance.TerraformDir, Attributes: attributes,
+		FailureDetail: failure, CleanupAfter: cleanupAfter, DeletedAt: deletedAt,
+	})
+}
+
+func errorString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
 // collectInstanceArtifacts pulls every artifact the remote job produced into
-// the binhost and records primary/all on the job. Falls back to the legacy
-// single-artifact download when the builder predates artifact lists.
+// a job-private quarantine and records the unpublished relative paths. It
+// falls back to the legacy single-artifact download when the builder predates
+// artifact lists.
 func (m *Manager) collectInstanceArtifacts(jobID, baseURL, remoteJobID, packageName string, snap *remoteJobSnapshot) error {
+	stagingRoot, err := m.beginArtifactQuarantine(jobID)
+	if err != nil {
+		return err
+	}
+	success := false
+	defer func() {
+		if !success {
+			m.cleanupArtifactQuarantine(jobID)
+		}
+	}()
+
 	if len(snap.Artifacts) == 0 {
 		if snap.ArtifactURL == "" {
 			return nil
 		}
-		m.appendJobLog(jobID, "[collect] fetching artifact from the instance into the binhost...")
-		localPath, webPath, err := m.fetchArtifactToBinhost(baseURL, remoteJobID, packageName, snap.ArtifactURL)
+		m.appendJobLog(jobID, "[collect] fetching artifact into job quarantine...")
+		_, rel, err := m.downloadArtifactToRoot(stagingRoot, baseURL, remoteJobID, packageName, snap.ArtifactURL, 0o600)
 		if err != nil {
 			return err
 		}
-		m.appendJobLog(jobID, "[collect] artifact stored: "+localPath)
+		m.appendJobLog(jobID, "[collect] quarantined artifact: "+rel)
 		m.jobsMu.Lock()
 		if job, ok := m.jobs[jobID]; ok {
-			job.ArtifactPath = localPath
-			job.ArtifactURL = webPath
-			job.ArtifactPaths = []string{localPath}
-			job.Artifacts = []string{webPath}
+			job.StagedPrimary = rel
+			job.StagedArtifacts = []string{rel}
 			job.Signed = snap.Signed
 		}
 		m.jobsMu.Unlock()
+		success = true
 		return nil
 	}
 
-	m.appendJobLog(jobID, fmt.Sprintf("[collect] fetching %d artifact(s) from the instance into the binhost...", len(snap.Artifacts)))
-	locals := make([]string, 0, len(snap.Artifacts))
-	webs := make([]string, 0, len(snap.Artifacts))
-	primaryLocal, primaryWeb := "", ""
+	m.appendJobLog(jobID, fmt.Sprintf("[collect] fetching %d artifact(s) into job quarantine...", len(snap.Artifacts)))
+	rels := make([]string, 0, len(snap.Artifacts))
+	primary := ""
 	for _, rel := range snap.Artifacts {
-		localPath, webPath, err := m.fetchArtifactRelToBinhost(baseURL, remoteJobID, rel)
+		_, clean, err := m.downloadArtifactRelToRoot(stagingRoot, baseURL, remoteJobID, rel, 0o600)
 		if err != nil {
 			return err
 		}
-		m.appendJobLog(jobID, "[collect] artifact stored: "+localPath)
-		locals = append(locals, localPath)
-		webs = append(webs, webPath)
+		m.appendJobLog(jobID, "[collect] quarantined artifact: "+clean)
+		rels = append(rels, clean)
 		if artifactMatchesPackage(rel, packageName) {
-			primaryLocal, primaryWeb = localPath, webPath
+			primary = clean
 		}
 	}
-	if primaryWeb == "" && len(webs) > 0 {
-		primaryLocal, primaryWeb = locals[0], webs[0]
-	}
-	if m.onArtifactStored != nil {
-		m.onArtifactStored()
+	if primary == "" && len(rels) > 0 {
+		primary = rels[0]
 	}
 	m.jobsMu.Lock()
 	if job, ok := m.jobs[jobID]; ok {
-		job.ArtifactPath = primaryLocal
-		job.ArtifactURL = primaryWeb
-		job.ArtifactPaths = locals
-		job.Artifacts = webs
+		job.StagedPrimary = primary
+		job.StagedArtifacts = rels
 		job.Signed = snap.Signed
 	}
 	m.jobsMu.Unlock()
+	success = true
 	return nil
 }
 
@@ -1932,12 +3543,48 @@ func artifactMatchesPackage(rel, packageName string) bool {
 	return true
 }
 
-// fetchArtifactRelToBinhost downloads one named artifact of a remote job and
-// stores it at BINPKG_PATH/<rel>, preserving the category directory.
-func (m *Manager) fetchArtifactRelToBinhost(baseURL, remoteJobID, rel string) (string, string, error) {
-	if m.config.BinpkgPath == "" {
-		return "", "", fmt.Errorf("BINPKG_PATH is not configured")
+// artifactRelCPV extracts category/PF from Portage's category-preserving GPKG
+// layout: category/package/PF-BUILD_ID.gpkg.tar. The exact CPV lets native
+// verification remove only this VDB entry, never a similarly prefixed package.
+func artifactRelCPV(rel string) string {
+	parts := strings.Split(strings.Trim(strings.ReplaceAll(rel, "\\", "/"), "/"), "/")
+	if len(parts) < 2 {
+		return ""
 	}
+	for _, part := range parts {
+		if part == "" || part == "." || part == ".." {
+			return ""
+		}
+	}
+	base := parts[len(parts)-1]
+	category := ""
+	switch {
+	case strings.HasSuffix(base, ".gpkg.tar"):
+		if len(parts) < 3 {
+			return ""
+		}
+		category = parts[len(parts)-3]
+		base = strings.TrimSuffix(base, ".gpkg.tar")
+		if cut := strings.LastIndex(base, "-"); cut > 0 {
+			buildID := base[cut+1:]
+			if buildID != "" && strings.IndexFunc(buildID, func(r rune) bool { return r < '0' || r > '9' }) == -1 {
+				base = base[:cut]
+			}
+		}
+	case strings.HasSuffix(base, ".tbz2"):
+		category = parts[len(parts)-2]
+		base = strings.TrimSuffix(base, ".tbz2")
+	default:
+		return ""
+	}
+	cpv := category + "/" + base
+	if !atomPattern.MatchString(cpv) {
+		return ""
+	}
+	return cpv
+}
+
+func (m *Manager) downloadArtifactRelToRoot(root, baseURL, remoteJobID, rel string, mode os.FileMode) (string, string, error) {
 	clean := path.Clean(strings.ReplaceAll(rel, "\\", "/"))
 	if clean == "." || strings.HasPrefix(clean, "..") || strings.HasPrefix(clean, "/") {
 		return "", "", fmt.Errorf("invalid artifact path %q", rel)
@@ -1960,10 +3607,10 @@ func (m *Manager) fetchArtifactRelToBinhost(baseURL, remoteJobID, rel string) (s
 		return "", "", fmt.Errorf("artifact download returned %d: %s", resp.StatusCode, string(body))
 	}
 
-	dest := filepath.Join(m.config.BinpkgPath, filepath.FromSlash(clean))
+	dest := filepath.Join(root, filepath.FromSlash(clean))
 	destDir := filepath.Dir(dest)
-	if err := os.MkdirAll(destDir, 0o755); err != nil { // #nosec G301 -- binhost dirs are served publicly.
-		return "", "", fmt.Errorf("create binhost dir: %w", err)
+	if err := os.MkdirAll(destDir, 0o750); err != nil {
+		return "", "", fmt.Errorf("create artifact directory: %w", err)
 	}
 	tmp, err := os.CreateTemp(destDir, ".artifact-*")
 	if err != nil {
@@ -1979,7 +3626,7 @@ func (m *Manager) fetchArtifactRelToBinhost(baseURL, remoteJobID, rel string) (s
 		_ = os.Remove(tmpName)
 		return "", "", err
 	}
-	if err := os.Chmod(tmpName, 0o644); err != nil { // #nosec G302 -- binpkgs are served publicly.
+	if err := os.Chmod(tmpName, mode); err != nil {
 		_ = os.Remove(tmpName)
 		return "", "", err
 	}
@@ -1987,14 +3634,24 @@ func (m *Manager) fetchArtifactRelToBinhost(baseURL, remoteJobID, rel string) (s
 		_ = os.Remove(tmpName)
 		return "", "", err
 	}
-	return dest, "/binpkgs/" + clean, nil
+	return dest, clean, nil
 }
 
 func (m *Manager) fetchArtifactToBinhost(baseURL, remoteJobID, packageName, remoteArtifact string) (string, string, error) {
 	if m.config.BinpkgPath == "" {
 		return "", "", fmt.Errorf("BINPKG_PATH is not configured")
 	}
+	dest, rel, err := m.downloadArtifactToRoot(m.config.BinpkgPath, baseURL, remoteJobID, packageName, remoteArtifact, 0o644)
+	if err != nil {
+		return "", "", err
+	}
+	if m.onArtifactStored != nil {
+		m.onArtifactStored()
+	}
+	return dest, "/binpkgs/" + rel, nil
+}
 
+func (m *Manager) downloadArtifactToRoot(root, baseURL, remoteJobID, packageName, remoteArtifact string, mode os.FileMode) (string, string, error) {
 	url := fmt.Sprintf("%s/api/v1/artifacts/download/%s", baseURL, remoteJobID)
 	httpReq, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
@@ -2023,9 +3680,9 @@ func (m *Manager) fetchArtifactToBinhost(baseURL, remoteJobID, packageName, remo
 	if i := strings.IndexByte(packageName, '/'); i > 0 {
 		category = packageName[:i]
 	}
-	destDir := filepath.Join(m.config.BinpkgPath, category)
-	if err := os.MkdirAll(destDir, 0o755); err != nil { // #nosec G301 -- binhost dirs must be world-readable for the HTTP file server.
-		return "", "", fmt.Errorf("create binhost dir: %w", err)
+	destDir := filepath.Join(root, category)
+	if err := os.MkdirAll(destDir, 0o750); err != nil {
+		return "", "", fmt.Errorf("create artifact directory: %w", err)
 	}
 
 	// Download to a temp file and rename, so a concurrent index scan never
@@ -2044,7 +3701,7 @@ func (m *Manager) fetchArtifactToBinhost(baseURL, remoteJobID, packageName, remo
 		_ = os.Remove(tmpName)
 		return "", "", err
 	}
-	if err := os.Chmod(tmpName, 0o644); err != nil { // #nosec G302 -- binpkgs are served publicly by the binhost.
+	if err := os.Chmod(tmpName, mode); err != nil {
 		_ = os.Remove(tmpName)
 		return "", "", err
 	}
@@ -2054,14 +3711,11 @@ func (m *Manager) fetchArtifactToBinhost(baseURL, remoteJobID, packageName, remo
 		return "", "", err
 	}
 
-	if m.onArtifactStored != nil {
-		m.onArtifactStored()
-	}
 	rel := filename
 	if category != "" {
 		rel = category + "/" + filename
 	}
-	return dest, "/binpkgs/" + rel, nil
+	return dest, filepath.ToSlash(rel), nil
 }
 
 // artifactFilename extracts a safe filename from a Content-Disposition header,

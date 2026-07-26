@@ -10,7 +10,10 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 )
+
+const activeKeyFile = ".portage-engine-active-key"
 
 // Signer handles GPG signing of packages.
 type Signer struct {
@@ -92,22 +95,104 @@ func (s *Signer) Initialize() error {
 		log.Printf("Configured GPG key %s not found", s.keyID)
 	}
 
-	// If auto-create is enabled and no valid key, create one
+	// If auto-create is enabled and no key ID was configured, serialize key
+	// discovery/generation across signer processes sharing the same GNUPGHOME.
 	if s.autoCreate {
-		log.Printf("Auto-creating GPG key for %s <%s>", s.keyName, s.keyEmail)
-		keyID, err := s.generateKey()
-		if err != nil {
-			return fmt.Errorf("failed to generate GPG key: %w", err)
+		if s.gnupgHome == "" {
+			return fmt.Errorf("GPG auto-create requires a dedicated GNUPGHOME")
 		}
-		s.keyID = keyID
-		log.Printf("Generated GPG key: %s", keyID)
-		return nil
+		if err := os.MkdirAll(s.gnupgHome, 0700); err != nil {
+			return fmt.Errorf("create GNUPGHOME: %w", err)
+		}
+		if err := os.Chmod(s.gnupgHome, 0700); err != nil {
+			return fmt.Errorf("secure GNUPGHOME: %w", err)
+		}
+		lock, err := os.OpenFile(filepath.Join(s.gnupgHome, ".portage-engine-key-init.lock"), os.O_CREATE|os.O_RDWR, 0600)
+		if err != nil {
+			return fmt.Errorf("open GPG key initialization lock: %w", err)
+		}
+		defer func() { _ = lock.Close() }()
+		if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+			return fmt.Errorf("lock GPG key initialization: %w", err)
+		}
+		defer func() { _ = syscall.Flock(int(lock.Fd()), syscall.LOCK_UN) }()
+
+		return s.initializeAutoKey()
 	}
 
 	if s.keyID == "" {
 		return fmt.Errorf("GPG enabled but no key ID configured")
 	}
 
+	return nil
+}
+
+func (s *Signer) initializeAutoKey() error {
+	markerPath := filepath.Join(s.gnupgHome, activeKeyFile)
+	if marker, err := os.ReadFile(markerPath); err == nil {
+		keyID := strings.TrimSpace(string(marker))
+		if keyID == "" || !s.keyExists(keyID) {
+			return fmt.Errorf("active GPG key marker %s references a missing key; restore the key or configure GPG_KEY_ID explicitly", markerPath)
+		}
+		s.keyID = keyID
+		log.Printf("Reusing active GPG key %s", keyID)
+		return nil
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("read active GPG key marker: %w", err)
+	}
+
+	keyIDs, err := s.findSecretKeyIDs(s.keyEmail)
+	if err != nil {
+		return fmt.Errorf("discover existing GPG keys: %w", err)
+	}
+	if len(keyIDs) > 0 {
+		s.keyID = keyIDs[0]
+		if len(keyIDs) > 1 {
+			log.Printf("WARNING: found %d matching secret keys; pinning the first key %s in %s", len(keyIDs), s.keyID, markerPath)
+		} else {
+			log.Printf("Reusing existing GPG key %s", s.keyID)
+		}
+		return writeKeyMarker(markerPath, s.keyID)
+	}
+
+	log.Printf("Auto-creating GPG key for %s <%s>", s.keyName, s.keyEmail)
+	keyID, err := s.generateKey()
+	if err != nil {
+		return fmt.Errorf("failed to generate GPG key: %w", err)
+	}
+	s.keyID = keyID
+	if err := writeKeyMarker(markerPath, keyID); err != nil {
+		return err
+	}
+	log.Printf("Generated GPG key: %s", keyID)
+	return nil
+}
+
+func writeKeyMarker(path, keyID string) error {
+	temp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return fmt.Errorf("create active GPG key marker: %w", err)
+	}
+	tempPath := temp.Name()
+	defer func() { _ = os.Remove(tempPath) }()
+	if err := temp.Chmod(0600); err != nil {
+		_ = temp.Close()
+		return fmt.Errorf("secure active GPG key marker: %w", err)
+	}
+	if _, err := temp.WriteString(keyID + "\n"); err != nil {
+		_ = temp.Close()
+		return fmt.Errorf("write active GPG key marker: %w", err)
+	}
+	if err := temp.Sync(); err != nil {
+		_ = temp.Close()
+		return fmt.Errorf("sync active GPG key marker: %w", err)
+	}
+	if err := temp.Close(); err != nil {
+		return fmt.Errorf("close active GPG key marker: %w", err)
+	}
+	if err := os.Rename(tempPath, path); err != nil {
+		return fmt.Errorf("publish active GPG key marker: %w", err)
+	}
 	return nil
 }
 
@@ -176,8 +261,19 @@ Expire-Date: 0
 
 // getLatestKeyID gets the key ID for a given email.
 func (s *Signer) getLatestKeyID(email string) (string, error) {
+	keyIDs, err := s.findSecretKeyIDs(email)
+	if err != nil {
+		return "", err
+	}
+	if len(keyIDs) == 0 {
+		return "", fmt.Errorf("could not find key ID in output")
+	}
+	return keyIDs[len(keyIDs)-1], nil
+}
+
+func (s *Signer) findSecretKeyIDs(identity string) ([]string, error) {
 	args := s.buildBaseArgs()
-	args = append(args, "--list-secret-keys", "--keyid-format", "long", email)
+	args = append(args, "--batch", "--with-colons", "--list-secret-keys")
 
 	cmd := exec.Command("gpg", args...)
 	if s.gnupgHome != "" {
@@ -185,31 +281,42 @@ func (s *Signer) getLatestKeyID(email string) (string, error) {
 	}
 
 	var stdout bytes.Buffer
+	var stderr bytes.Buffer
 	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
 
 	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("failed to list keys: %w", err)
+		return nil, fmt.Errorf("failed to list keys: %w, stderr: %s", err, strings.TrimSpace(stderr.String()))
 	}
 
-	// Parse output to find key ID
-	output := stdout.String()
-	lines := strings.Split(output, "\n")
-	for _, line := range lines {
-		if strings.Contains(line, "sec") {
-			// Format: sec   rsa4096/KEYID 2024-01-01 [SC]
-			parts := strings.Fields(line)
-			for _, part := range parts {
-				if strings.Contains(part, "/") {
-					keyParts := strings.Split(part, "/")
-					if len(keyParts) == 2 {
-						return keyParts[1], nil
-					}
+	var keyIDs []string
+	seen := make(map[string]struct{})
+	currentKeyID := ""
+	for _, line := range strings.Split(stdout.String(), "\n") {
+		fields := strings.Split(line, ":")
+		if len(fields) <= 4 {
+			continue
+		}
+		switch fields[0] {
+		case "sec":
+			currentKeyID = fields[4]
+			if identity == "" && currentKeyID != "" {
+				if _, ok := seen[currentKeyID]; !ok {
+					seen[currentKeyID] = struct{}{}
+					keyIDs = append(keyIDs, currentKeyID)
 				}
+			}
+		case "uid":
+			if identity == "" || currentKeyID == "" || len(fields) <= 9 || !strings.Contains(fields[9], identity) {
+				continue
+			}
+			if _, ok := seen[currentKeyID]; !ok {
+				seen[currentKeyID] = struct{}{}
+				keyIDs = append(keyIDs, currentKeyID)
 			}
 		}
 	}
-
-	return "", fmt.Errorf("could not find key ID in output")
+	return keyIDs, nil
 }
 
 // buildBaseArgs builds base GPG arguments.

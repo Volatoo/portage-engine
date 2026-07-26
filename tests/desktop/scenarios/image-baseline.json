@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "id": "desktop/image-baseline-v1",
+  "profile_id": "pe/amd64/no-multilib/systemd/desktop-verifier-v1",
+  "image_id": "pe/amd64/no-multilib/desktop-verifier-g3",
+  "resolution": "1280x720",
+  "locale": "C.UTF-8",
+  "timeout_seconds": 600,
+  "steps": [
+    {"id": "restore-clean", "action": "restore", "input": {"snapshot": "clean"}},
+    {"id": "start-desktop", "action": "start", "timeout_seconds": 180},
+    {"id": "launch-terminal", "action": "launch", "input": {"application_id": "xfce4-terminal.desktop"}},
+    {"id": "wait-terminal", "action": "wait_accessible", "timeout_seconds": 90, "input": {"role": "terminal", "name": "Terminal", "state": "showing"}},
+    {"id": "collect-accessibility", "action": "collect_accessibility", "input": {"name": "terminal"}},
+    {"id": "capture-desktop", "action": "screenshot", "input": {"name": "terminal"}},
+    {"id": "collect-application-log", "action": "collect_logs", "input": {"scope": "application", "application_id": "xfce4-terminal.desktop"}},
+    {"id": "collect-system-log", "action": "collect_logs", "input": {"scope": "system"}},
+    {"id": "stop-desktop", "action": "stop", "timeout_seconds": 180}
+  ]
+}
