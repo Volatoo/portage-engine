@@ -147,41 +147,24 @@ func (r *Runner) process(task *Task) ([]Artifact, error) {
 		}
 	}()
 
+	maxOutputBytes := task.MaxOutputBytes
+	if maxOutputBytes <= 0 {
+		// Compatibility for tasks materialized before schema v12 and for
+		// in-memory Queue implementations. PostgreSQL v12 always persists the
+		// explicit attempt budget.
+		maxOutputBytes = 32 << 30
+	}
 	outputs := make([]Artifact, 0, len(task.Artifacts))
+	var outputBytes int64
 	for _, input := range task.Artifacts {
-		if err := ValidateArtifact(input, false); err != nil {
-			return nil, err
-		}
-		source := filepath.Join(sourceRoot, filepath.FromSlash(input.RelativePath))
-		if err := rejectSymlinkPath(sourceRoot, input.RelativePath); err != nil {
-			return nil, fmt.Errorf("validate signing input %q: %w", input.RelativePath, err)
-		}
-		digest, size, err := fileDigest(source)
-		if err != nil {
-			return nil, fmt.Errorf("digest signing input %q: %w", input.RelativePath, err)
-		}
-		if digest != input.InputDigest || size != input.InputSize {
-			return nil, fmt.Errorf("signing input %q does not match its verified digest", input.RelativePath)
-		}
-		destination := filepath.Join(outputRoot, filepath.FromSlash(input.RelativePath))
-		if err := os.MkdirAll(filepath.Dir(destination), 0o750); err != nil {
-			return nil, err
-		}
-		if err := copyRegularFile(source, destination); err != nil {
-			return nil, err
-		}
-		if err := r.GPG.SignGPKG(destination); err != nil {
-			return nil, err
-		}
-		outputDigest, outputSize, err := fileDigest(destination)
+		output, err := r.signArtifact(
+			sourceRoot, outputRoot, input, maxOutputBytes-outputBytes,
+		)
 		if err != nil {
 			return nil, err
 		}
-		outputs = append(outputs, Artifact{
-			RelativePath: input.RelativePath,
-			InputDigest:  input.InputDigest, InputSize: input.InputSize,
-			OutputDigest: outputDigest, OutputSize: outputSize,
-		})
+		outputBytes += output.OutputSize
+		outputs = append(outputs, output)
 	}
 	if _, err := binpkg.NewStore(outputRoot).RegenerateIndex(task.Architecture); err != nil {
 		return nil, fmt.Errorf("generate signed quarantine index: %w", err)
@@ -193,6 +176,59 @@ func (r *Runner) process(task *Task) ([]Artifact, error) {
 	}
 	cleanOutput = false
 	return outputs, nil
+}
+
+func (r *Runner) signArtifact(
+	sourceRoot, outputRoot string,
+	input Artifact,
+	remainingBytes int64,
+) (Artifact, error) {
+	if err := ValidateArtifact(input, false); err != nil {
+		return Artifact{}, err
+	}
+	source := filepath.Join(sourceRoot, filepath.FromSlash(input.RelativePath))
+	if err := rejectSymlinkPath(sourceRoot, input.RelativePath); err != nil {
+		return Artifact{}, fmt.Errorf("validate signing input %q: %w", input.RelativePath, err)
+	}
+	digest, size, err := fileDigest(source)
+	if err != nil {
+		return Artifact{}, fmt.Errorf("digest signing input %q: %w", input.RelativePath, err)
+	}
+	if digest != input.InputDigest || size != input.InputSize {
+		return Artifact{}, fmt.Errorf(
+			"signing input %q does not match its verified digest", input.RelativePath,
+		)
+	}
+	if input.InputSize > remainingBytes {
+		return Artifact{}, fmt.Errorf("signed output would exceed quarantine byte budget")
+	}
+	destination := filepath.Join(outputRoot, filepath.FromSlash(input.RelativePath))
+	if err := os.MkdirAll(filepath.Dir(destination), 0o750); err != nil {
+		return Artifact{}, err
+	}
+	if err := copyRegularFile(source, destination); err != nil {
+		return Artifact{}, err
+	}
+	if err := r.GPG.SignGPKG(destination); err != nil {
+		return Artifact{}, err
+	}
+	outputDigest, outputSize, err := fileDigest(destination)
+	if err != nil {
+		return Artifact{}, err
+	}
+	if outputSize > remainingBytes {
+		return Artifact{}, fmt.Errorf(
+			"signed output exceeds quarantine byte budget: output=%d remaining=%d",
+			outputSize, remainingBytes,
+		)
+	}
+	return Artifact{
+		RelativePath: input.RelativePath,
+		InputDigest:  input.InputDigest,
+		InputSize:    input.InputSize,
+		OutputDigest: outputDigest,
+		OutputSize:   outputSize,
+	}, nil
 }
 
 func fileDigest(path string) (string, int64, error) {
@@ -223,7 +259,7 @@ func copyRegularFile(source, destination string) error {
 	if err != nil || !info.Mode().IsRegular() {
 		return fmt.Errorf("signing input is not a regular file")
 	}
-	output, err := os.OpenFile(destination, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o640)
+	output, err := os.OpenFile(destination, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o640) // #nosec G302,G304 -- signer/server share a dedicated group; destination is confined to validated quarantine storage.
 	if err != nil {
 		return err
 	}

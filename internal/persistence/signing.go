@@ -71,18 +71,18 @@ func (r *JobRepository) EnqueueSigning(ctx context.Context, request signing.Requ
 		err := q.QueryRow(ctx, `
 			INSERT INTO signing_tasks (
 				id, job_id, attempt_id, attempt_fence, state, source_token,
-				architecture, input_manifest
-			) VALUES ($1, $2, $3, $4, 'queued', $5, $6, $7::jsonb)
+				architecture, max_output_bytes, input_manifest
+			) VALUES ($1, $2, $3, $4, 'queued', $5, $6, $7, $8::jsonb)
 			ON CONFLICT (job_id, attempt_id)
 			DO UPDATE SET updated_at = clock_timestamp()
 			RETURNING id::text, job_id::text, attempt_id::text, attempt_fence,
-			          state, source_token, architecture, input_manifest,
+			          state, source_token, architecture, max_output_bytes, input_manifest,
 			          COALESCE(output_manifest, '[]'::jsonb), signing_key_id,
 			          owner, claim_fence, lease_expires_at, error_detail
 		`, taskID, request.JobID, request.AttemptID, request.AttemptFence,
-			request.SourceToken, request.Architecture, string(input)).Scan(
+			request.SourceToken, request.Architecture, request.MaxOutputBytes, string(input)).Scan(
 			&row.ID, &row.JobID, &row.AttemptID, &row.AttemptFence,
-			&row.State, &row.SourceToken, &row.Architecture, &inputJSON,
+			&row.State, &row.SourceToken, &row.Architecture, &row.MaxOutputBytes, &inputJSON,
 			&outputJSON, &row.SigningKeyID, &row.Owner, &row.ClaimFence,
 			&leaseExpires, &row.Error,
 		)
@@ -97,7 +97,8 @@ func (r *JobRepository) EnqueueSigning(ctx context.Context, request signing.Requ
 				return fmt.Errorf("decode signing output: %w", err)
 			}
 		}
-		if row.SourceToken != request.SourceToken || row.Architecture != request.Architecture {
+		if row.SourceToken != request.SourceToken || row.Architecture != request.Architecture ||
+			row.MaxOutputBytes != request.MaxOutputBytes {
 			return fmt.Errorf("existing signing task does not match this immutable request")
 		}
 		if !sameSigningInputs(row.Artifacts, request.Artifacts) {
@@ -116,13 +117,13 @@ func (r *JobRepository) GetSigningTask(ctx context.Context, id string) (*signing
 	var inputJSON, outputJSON []byte
 	err := r.db.Pool().QueryRow(ctx, `
 		SELECT id::text, job_id::text, attempt_id::text, attempt_fence,
-		       state, source_token, architecture, input_manifest,
+		       state, source_token, architecture, max_output_bytes, input_manifest,
 		       COALESCE(output_manifest, '[]'::jsonb), signing_key_id,
 		       owner, claim_fence, lease_expires_at, error_detail
 		FROM signing_tasks WHERE id = $1
 	`, id).Scan(
 		&row.ID, &row.JobID, &row.AttemptID, &row.AttemptFence,
-		&row.State, &row.SourceToken, &row.Architecture, &inputJSON,
+		&row.State, &row.SourceToken, &row.Architecture, &row.MaxOutputBytes, &inputJSON,
 		&outputJSON, &row.SigningKeyID, &row.Owner, &row.ClaimFence,
 		&row.LeaseExpiresAt, &row.Error,
 	)
@@ -214,11 +215,11 @@ func (r *JobRepository) ClaimSigning(ctx context.Context, owner string, lease ti
 			WHERE s.id = c.id
 			RETURNING s.id::text, s.job_id::text, s.attempt_id::text,
 			          s.attempt_fence, s.state, s.source_token, s.architecture,
-			          s.input_manifest, s.owner, s.claim_fence,
+			          s.max_output_bytes, s.input_manifest, s.owner, s.claim_fence,
 			          s.lease_expires_at
 		`, owner, lease.String()).Scan(
 			&row.ID, &row.JobID, &row.AttemptID, &row.AttemptFence,
-			&row.State, &row.SourceToken, &row.Architecture, &inputJSON,
+			&row.State, &row.SourceToken, &row.Architecture, &row.MaxOutputBytes, &inputJSON,
 			&row.Owner, &row.ClaimFence, &row.LeaseExpiresAt,
 		)
 		if errors.Is(err, pgx.ErrNoRows) {

@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/slchris/portage-engine/internal/iac"
 	"github.com/slchris/portage-engine/pkg/config"
 )
@@ -23,6 +25,57 @@ type recordingLedger struct {
 type recordingRuntimeMetadata struct {
 	status *BuildStatus
 	record InfraRecord
+}
+
+type phaseGateScheduler struct {
+	recordingLedger
+	calls     int
+	claimCaps chan []string
+}
+
+func (s *phaseGateScheduler) RecordTransition(
+	_ context.Context,
+	previous, current *BuildStatus,
+) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.calls++
+	if s.calls == 1 {
+		return &PhaseCapacityError{Phase: "verify", Used: 1, Limit: 1}
+	}
+	s.transition = append(s.transition, [2]string{previous.Status, current.Status})
+	return nil
+}
+
+func (s *phaseGateScheduler) ClaimNext(
+	_ context.Context,
+	_ string,
+	_ time.Duration,
+	capabilities ...[]string,
+) (*SchedulerClaim, error) {
+	if s.claimCaps != nil && len(capabilities) > 0 {
+		select {
+		case s.claimCaps <- append([]string(nil), capabilities[0]...):
+		default:
+		}
+	}
+	return nil, nil
+}
+func (*phaseGateScheduler) RenewClaim(context.Context, *BuildStatus, time.Duration) error {
+	return nil
+}
+func (*phaseGateScheduler) CheckClaim(context.Context, *BuildStatus) error { return nil }
+func (*phaseGateScheduler) LoadVisible(context.Context) (map[string]*BuildStatus, error) {
+	return nil, nil
+}
+func (*phaseGateScheduler) CancelJob(context.Context, string, string) (*BuildStatus, error) {
+	return nil, nil
+}
+func (*phaseGateScheduler) RetryJob(context.Context, string) (*BuildStatus, error) {
+	return nil, nil
+}
+func (*phaseGateScheduler) RuntimeStatus(context.Context) (SchedulerRuntimeStatus, error) {
+	return SchedulerRuntimeStatus{}, nil
 }
 
 func (m *recordingRuntimeMetadata) RecordInfra(_ context.Context, status *BuildStatus, record InfraRecord) error {
@@ -135,6 +188,31 @@ func TestManagerClaimWaitsForLedger(t *testing.T) {
 	}
 	if status.Status != "queued" {
 		t.Fatalf("status after failed ledger claim = %q", status.Status)
+	}
+}
+
+func TestManagerWaitsForPhaseCapacityWithoutFailingTransition(t *testing.T) {
+	scheduler := &phaseGateScheduler{}
+	mgr := NewManager(&config.ServerConfig{MaxWorkers: 0, BuildMode: "native-gentoo"})
+	mgr.scheduler = scheduler
+	t.Cleanup(mgr.Shutdown)
+
+	previous := &BuildStatus{
+		JobID: "phase-gate-job", Status: "building",
+		AttemptID: uuid.NewString(), FenceToken: 1, LeaseOwner: "worker",
+	}
+	current := *previous
+	current.Status = "verifying"
+	if err := mgr.recordDurableTransition(previous, &current); err != nil {
+		t.Fatal(err)
+	}
+	scheduler.mu.Lock()
+	defer scheduler.mu.Unlock()
+	if scheduler.calls != 2 || len(scheduler.transition) != 1 {
+		t.Fatalf(
+			"phase transition calls=%d transitions=%v",
+			scheduler.calls, scheduler.transition,
+		)
 	}
 }
 

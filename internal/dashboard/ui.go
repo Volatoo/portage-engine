@@ -126,6 +126,7 @@ a { color: var(--keyColor); text-decoration: none; }
 .btn.blue        { background: var(--keyColor); color: hsla(0, 0%, 100%, .95); }
 .btn.blue:hover  { background: color-mix(in srgb, var(--keyColor), #000 3%); }
 .btn.blue:active { background: color-mix(in srgb, var(--keyColor), #000 6%); }
+.btn.danger      { color: var(--systemRed); }
 .btn[disabled] { opacity: .4; cursor: default; }
 .lang-btn { border: 0; background: none; cursor: pointer; font: var(--callout); color: var(--systemSecondary); padding: 4px 8px; border-radius: 1000px; transition: background-color 175ms ease-in; }
 .lang-btn:hover { background: var(--systemQuinary); }
@@ -175,8 +176,11 @@ a { color: var(--keyColor); text-decoration: none; }
 .auth-card .brand { font: var(--subhead-emphasized); text-transform: uppercase; color: var(--systemSecondary); margin-bottom: 6px; }
 .auth-card h1 { font: var(--title-1-emphasized); margin-bottom: 18px; }
 .auth-card .btn { width: 100%; margin-top: 6px; }
+.auth-card a.btn { display: inline-flex; justify-content: center; text-decoration: none; }
 .auth-err { font: var(--callout); color: var(--systemRed); min-height: 15px; margin: 8px 0 2px; }
 .auth-note { font: var(--callout); color: var(--systemTertiary); margin-top: 14px; text-align: center; display: flex; justify-content: center; gap: 10px; align-items: center; }
+.auth-divider { display: flex; align-items: center; gap: 10px; margin: 14px 0 10px; color: var(--systemTertiary); font: var(--footnote); }
+.auth-divider::before, .auth-divider::after { content: ""; flex: 1; border-top: var(--keyline); }
 
 /* ---- form fields ---- */
 .field { margin-bottom: 12px; }
@@ -225,6 +229,13 @@ a { color: var(--keyColor); text-decoration: none; }
 .sidebar .spacer { flex: 1; }
 .sidebar .foot { padding: 8px; font: var(--footnote); color: var(--systemTertiary); }
 .sidebar .foot a { color: var(--systemSecondary); font: var(--callout); }
+.project-context { padding: 10px 8px; border-top: 1px solid var(--labelDivider); }
+.project-context label { display: block; font: var(--caption-1); color: var(--systemTertiary); margin-bottom: 5px; }
+.project-context select {
+  width: 100%; height: 32px; padding: 0 8px; color: var(--systemPrimary);
+  background: var(--pageRaised); border: 1px solid var(--labelDivider); border-radius: var(--radius-small);
+}
+.project-context .identity { margin-top: 5px; font: var(--caption-2); color: var(--systemTertiary); overflow-wrap: anywhere; }
 
 .content { flex: 1; min-width: 0; padding: 28px var(--bodyGutter) 60px; }
 .page-head { display: flex; align-items: end; justify-content: space-between; gap: 12px; margin-bottom: 20px; flex-wrap: wrap; }
@@ -287,6 +298,8 @@ table.list td.sec { color: var(--systemSecondary); }
 .status.gray   { --status-color: var(--systemGray); }
 
 .empty { padding: 36px 20px; text-align: center; font: var(--callout); color: var(--systemTertiary); }
+.provider-status-list { display: grid; gap: 8px; margin-top: 12px; }
+.provider-status-row { padding: 10px 12px; border: 1px solid var(--separator); border-radius: 8px; font: var(--callout); }
 
 pre.log-view {
   background: var(--systemGray6); border-radius: var(--radius-medium);
@@ -303,6 +316,11 @@ pre.log-view {
 .builder-card .meta { display: flex; justify-content: space-between; font: var(--callout); color: var(--systemSecondary); padding-top: 8px; border-top: var(--keyline); }
 .ledger-grid { grid-template-columns: 1fr; }
 .ledger-grid .builder-card .meta { justify-content: flex-start; gap: 6px 24px; flex-wrap: wrap; }
+.target-card .meta {
+  flex-direction: column; align-items: flex-start; justify-content: flex-start;
+  gap: 5px; min-width: 0;
+}
+.target-card .meta span { max-width: 100%; overflow-wrap: anywhere; }
 
 .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 20px; }
 @media (max-width: 800px) { .form-grid { grid-template-columns: 1fr; } }
@@ -310,6 +328,8 @@ pre.log-view {
 .save-msg { font: var(--callout); min-height: 15px; }
 .save-msg.ok { color: var(--systemGreen); }
 .save-msg.err { color: var(--systemRed); }
+.policy-summary { margin-top: 7px; font: var(--footnote); color: var(--systemTertiary); line-height: 1.45; }
+.policy-summary.suspended { color: var(--systemRed); }
 
 .docs-body { max-width: 720px; }
 .docs-body h2 { font: var(--title-2-emphasized); margin: 26px 0 10px; }
@@ -434,6 +454,7 @@ var I18N = {
 
     'login.h1': '登录', 'login.user': '用户名', 'login.pass': '密码',
     'login.submit': '登录', 'login.back': '返回首页',
+    'login.oidc': '使用身份提供商登录', 'login.or': '或',
     'login.badcreds': '用户名或密码错误', 'login.fail': '登录失败', 'login.neterr': '网络错误:',
 
     'common.refresh': '刷新', 'common.updated': '更新于 ',
@@ -477,10 +498,44 @@ var I18N = {
     'mon.ledger.checked': '最近核对 ',
     'mon.scheduler': '持久化调度器', 'mon.scheduler.pg': 'PostgreSQL 队列与租约',
     'mon.scheduler.healthy': '健康', 'mon.scheduler.degraded': '异常',
-    'mon.scheduler.queue': '排队任务 ', 'mon.scheduler.running': '运行任务 ',
+    'mon.scheduler.queue': '排队任务 ', 'mon.scheduler.unschedulable': '能力不匹配 ',
+    'mon.scheduler.running': '运行任务 ',
     'mon.scheduler.leases': '有效租约 ', 'mon.scheduler.expired': '过期租约 ',
-    'mon.scheduler.workers': '活跃执行槽 ', 'mon.scheduler.stale': '过期执行槽 ',
+    'mon.scheduler.workers': '活跃执行槽 ', 'mon.scheduler.capability': '能力执行槽 ',
+    'mon.scheduler.stale': '过期执行槽 ',
     'mon.scheduler.attempts': '最近一小时尝试 ',
+    'mon.scheduler.fair.projects': '公平队列项目 ',
+    'mon.scheduler.fair.starved': '反饥饿提升 ',
+    'mon.scheduler.fair.dispatches': '公平派发 准入/阶段 ',
+    'mon.scheduler.fair.maxwait': '已观测最长等待 ',
+    'mon.scheduler.score.decisions': '软评分决策/多候选 ',
+    'mon.scheduler.score.worker': 'Worker 决策 ',
+    'mon.scheduler.autoscale': '扩缩容建议 ',
+    'mon.scheduler.autoscale.slots': '槽位 活跃/期望 ',
+    'mon.scheduler.autoscale.demand': '需求 繁忙/积压/不匹配 ',
+    'mon.scheduler.autoscale.pools': '容量池 正常/阻塞 ',
+    'mon.scheduler.autoscale.pool': '容量池 ',
+    'mon.scheduler.autoscale.shadow': 'Phase 执行器处于 shadow；仅发布容量池清单，不产生扩缩容建议',
+    'mon.scheduler.actuator': '执行器动作 开放/失败 ',
+    'mon.scheduler.instances': '常驻实例 创建中/活跃/排空/删除 ',
+    'mon.scheduler.action': '容量动作 ',
+    'mon.scheduler.instance': '容量实例 ',
+    'mon.targets': '目标可靠性与成本',
+    'mon.targets.sub': '按项目、Profile、镜像代际与资源类别聚合',
+    'mon.targets.empty': '最近 30 天没有终态样本',
+    'mon.targets.samples': '样本 成功/失败/取消 ',
+    'mon.targets.slo': '成功率 / SLO ',
+    'mon.targets.latency': 'P50/P95 排队·运行 ',
+    'mon.targets.cost': '预留/结算成本 ',
+    'mon.targets.failure': '主要失败分类 ',
+    'mon.targets.insufficient': '样本不足',
+    'mon.gateway': 'Worker Gateway', 'mon.gateway.mtls': '出站拉取与短期 mTLS 身份',
+    'mon.gateway.enabled': '已启用', 'mon.gateway.disabled': '兼容模式',
+    'mon.gateway.connected': '已连接 ', 'mon.gateway.registered': '已登记 ',
+    'mon.gateway.tasks': '待完成命令 ', 'mon.gateway.uploads': '待上传制品 ',
+    'mon.gateway.inbound': '入站 Builder API ', 'mon.gateway.protocol': '执行协议 ',
+    'mon.gateway.ttl': '证书 TTL ', 'mon.gateway.authority': '事实源 ',
+    'mon.gateway.phase': 'Phase 执行器 ',
     'mon.metadata': '运行元数据', 'mon.metadata.db': 'Infra、制品与镜像工厂',
     'mon.metadata.infra': '存活实例 ', 'mon.metadata.cleanup': '清理失败 ',
     'mon.metadata.published': '已发布制品 ', 'mon.metadata.staged': '隔离制品 ',
@@ -675,15 +730,158 @@ function el(tag, cls, text) {
 }
 function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); }
 async function api(path, opts) {
+  if (typeof iamReady !== 'undefined' && iamReady) await iamReady;
+  opts = opts || {};
+  var stepUpRetry = !!opts._stepUpRetry;
+  delete opts._stepUpRetry;
+  var headers = new Headers(opts.headers || {});
+  try {
+    var projectID = localStorage.getItem('pe_project_id');
+    if (projectID) headers.set('X-Project-ID', projectID);
+  } catch (e) {}
+  opts.headers = headers;
   var r = await fetch(path, opts);
   if (r.status === 401) { location.href = '/login'; throw new Error('unauthorized'); }
   if (!r.ok) {
     var msg = 'HTTP ' + r.status;
-    try { var b = await r.json(); if (b && (b.details || b.error)) msg = b.details || b.error; } catch (e) {}
+    var b = null;
+    try { b = await r.json(); if (b && (b.details || b.error)) msg = b.details || b.error; } catch (e) {}
+    if (r.status === 428 && b && b.code === 'step_up_required' && !stepUpRetry) {
+      if (window.peAuthentication === 'oidc' ||
+          window.peAuthentication === 'federated-session') {
+        location.href = '/login?step_up=1';
+        throw new Error('redirecting to fresh authentication');
+      }
+      var username = window.prompt('Administrator username');
+      if (username === null) throw new Error(msg);
+      var password = window.prompt('Re-enter administrator password');
+      if (password === null) throw new Error(msg);
+      var elevated = await fetch('/auth/step-up', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({username: username, password: password})
+      });
+      if (!elevated.ok) throw new Error('step-up authentication failed');
+      var retry = Object.assign({}, opts, {_stepUpRetry: true});
+      return api(path, retry);
+    }
     throw new Error(msg);
   }
   return r.json();
 }
+async function initIAMContext() {
+  var select = document.getElementById('project-switcher');
+  var identity = document.getElementById('iam-identity');
+  if (!select || !identity) return;
+  try {
+    var r = await fetch('/api/iam/me');
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    var data = await r.json();
+    window.peAuthentication = data.principal && data.principal.authentication || '';
+    var projects = Array.isArray(data.projects) ? data.projects : [];
+    var saved = '';
+    try { saved = localStorage.getItem('pe_project_id') || ''; } catch (e) {}
+    clear(select);
+    for (var i = 0; i < projects.length; i++) {
+      var option = document.createElement('option');
+      option.value = projects[i].project_id;
+      option.textContent = projects[i].project_name + ' · ' + projects[i].role;
+      select.appendChild(option);
+    }
+    if (saved && projects.some(function (p) { return p.project_id === saved; })) select.value = saved;
+    if (!select.value && projects.length) select.value = projects[0].project_id;
+    if (select.value) {
+      try { localStorage.setItem('pe_project_id', select.value); } catch (e) {}
+    }
+    select.disabled = projects.length === 0;
+    var p = data.principal || {};
+    window.peIAM = {
+      principal: p,
+      projects: projects,
+      identityProviders: Array.isArray(data.identity_providers) ? data.identity_providers : []
+    };
+    identity.textContent = (p.preferred_username || p.subject || '-') +
+      (p.provider_id ? ' · ' + p.provider_id : '') +
+      (p.system_admin ? ' · system-admin' : '');
+    document.body.setAttribute('data-system-admin', p.system_admin ? 'true' : 'false');
+    if (select.value) await loadProjectPolicySummary(select.value);
+    if (!p.system_admin) {
+      var adminLinks = document.querySelectorAll(
+        'a[href="/monitor"],a[href="/image-factory"],a[href="/settings"]'
+      );
+      for (var j = 0; j < adminLinks.length; j++) adminLinks[j].remove();
+      var adminActions = document.querySelectorAll('[data-system-admin]');
+      for (var k = 0; k < adminActions.length; k++) adminActions[k].remove();
+    }
+    select.addEventListener('change', function () {
+      try { localStorage.setItem('pe_project_id', select.value); } catch (e) {}
+      location.reload();
+    });
+  } catch (err) {
+    select.disabled = true;
+    identity.textContent = 'IAM unavailable';
+  }
+}
+async function loadProjectPolicySummary(projectID) {
+  var summary = document.getElementById('project-policy-summary');
+  if (!summary || !projectID) return;
+  try {
+    var headers = new Headers();
+    headers.set('X-Project-ID', projectID);
+    var response = await fetch('/api/projects/policy', {headers: headers});
+    if (!response.ok) throw new Error('HTTP ' + response.status);
+    var policy = await response.json();
+    var budgetSuspended = !!policy.abuse_suspended;
+    summary.classList.toggle('suspended', !!policy.suspended || budgetSuspended);
+    summary.textContent = (policy.suspended ? 'Suspended · ' :
+      (budgetSuspended ? 'Abuse cooldown · ' : '')) +
+      'weight ' + (policy.priority_weight || 100) +
+      ' · starvation ' + (policy.starvation_threshold_seconds || 300) + 's' +
+      ' · ' +
+      'queued ' + policy.queued_jobs + '/' + policy.max_queued_jobs +
+      ' · active ' + policy.active_jobs + '/' + policy.max_active_jobs +
+      ' · CPU ' + policy.reserved_vcpus + '/' + policy.max_active_vcpus +
+      ' · RAM ' + policy.reserved_memory_mib + '/' + policy.max_active_memory_mib + ' MiB' +
+      ' · disk ' + policy.reserved_disk_gib + '/' + policy.max_active_disk_gib + ' GiB' +
+      ' · quarantine ' + fmtBytes(policy.quarantine_bytes) +
+      ' (' + policy.active_artifact_budgets + ' jobs; ' +
+      fmtBytes(policy.max_artifact_bytes_per_job) + '/job)' +
+      ' · build ' + Math.ceil((policy.build_seconds_today || 0) / 60) +
+      '/' + Math.ceil((policy.max_daily_build_seconds || 0) / 60) + ' min UTC' +
+      ' · cloud μ ' + (policy.cloud_cost_microunits_today || 0) +
+      '/' + (policy.max_daily_cloud_cost_microunits || 0) +
+      ' (' + (policy.active_runtime_budgets || 0) + ' active)' +
+      ' · failures ' + (policy.failures_last_hour || 0) +
+      '/' + (policy.max_failures_per_hour || 0) + ' hour' +
+      ' · phases c' + policy.claimed_reservations + '/' + policy.max_claimed_attempts +
+      ' p' + policy.provision_reservations + '/' + policy.max_provision_attempts +
+      ' b' + policy.build_reservations + '/' + policy.max_build_attempts +
+      ' v' + policy.verify_reservations + '/' + policy.max_verify_attempts +
+      ' pub' + policy.publish_reservations + '/' + policy.max_publish_attempts +
+      ' wait' + policy.waiting_reservations +
+      ' · plans active ' + policy.phase_work_active +
+      ' shadow ' + policy.phase_work_shadow +
+      ' · work ready ' + policy.phase_work_ready +
+      ' unschedulable ' + (policy.phase_work_unschedulable || 0) +
+      ' claimed ' + policy.phase_work_claimed +
+      ' blocked ' + policy.phase_work_blocked +
+      (policy.phase_work_failed ? ' failed ' + policy.phase_work_failed : '') +
+      ' · UTC today ' + policy.submissions_today + '/' + policy.max_daily_submissions;
+  } catch (err) {
+    summary.textContent = 'Project quota unavailable';
+  }
+}
+function hasProjectRole(required) {
+  var ranks = { viewer: 1, developer: 2, maintainer: 3, owner: 4 };
+  if (window.peIAM && window.peIAM.principal && window.peIAM.principal.system_admin) return true;
+  var selected = '';
+  try { selected = localStorage.getItem('pe_project_id') || ''; } catch (e) {}
+  var projects = window.peIAM && Array.isArray(window.peIAM.projects) ? window.peIAM.projects : [];
+  for (var i = 0; i < projects.length; i++) {
+    if (projects[i].project_id === selected) return (ranks[projects[i].role] || 0) >= (ranks[required] || 99);
+  }
+  return false;
+}
+var iamReady = initIAMContext();
 function fmtTime(s) {
   if (!s) return '-';
   var d = new Date(s);
@@ -761,6 +959,12 @@ func appPage(titleEN, titleKey, active, content, script string) string {
     <div class="brand">Portage Engine<span data-i18n="brand.sub">Gentoo binhost console</span></div>
     ` + nav + `
     <div class="spacer"></div>
+    <div class="project-context">
+      <label for="project-switcher">Project</label>
+      <select id="project-switcher" aria-label="Active project"></select>
+      <div class="identity" id="iam-identity">Loading identity…</div>
+      <div class="policy-summary" id="project-policy-summary">Loading project quota…</div>
+    </div>
     <div class="foot"><button class="lang-btn" type="button">中文</button></div>
     {{if .AuthEnabled}}<div class="foot"><a href="/logout" data-i18n="nav.signout">Sign Out</a></div>{{end}}
     <div class="foot">binhost:<span class="mono"> /binpkgs</span></div>
@@ -859,9 +1063,19 @@ const loginHTML = `<!DOCTYPE html>
 </head>
 <body>
 <div class="auth-wrap">
-  <form class="auth-card" id="login-form">
+  <div class="auth-card">
     <p class="brand">Portage Engine</p>
     <h1 data-i18n="login.h1">Sign In</h1>
+    {{if .OIDCEnabled}}
+    {{range .IdentityProviders}}
+    <a class="btn blue" href="{{.LoginURL}}{{if $.StepUp}}?step_up=1{{end}}">Sign in with {{.DisplayName}}</a>
+    {{end}}
+    {{end}}
+    {{if and .OIDCEnabled .LocalLoginEnabled}}
+    <div class="auth-divider" data-i18n="login.or">or</div>
+    {{end}}
+    {{if .LocalLoginEnabled}}
+    <form id="login-form">
     <div class="field">
       <label for="u" data-i18n="login.user">Username</label>
       <input type="text" id="u" autocomplete="username" autocapitalize="off" autocorrect="off" spellcheck="false">
@@ -872,10 +1086,13 @@ const loginHTML = `<!DOCTYPE html>
     </div>
     <p class="auth-err" id="err" role="status"></p>
     <button class="btn blue" type="submit" data-i18n="login.submit">Sign In</button>
+    </form>
+    {{end}}
     <p class="auth-note"><a href="/" data-i18n="login.back">Back to home</a><button class="lang-btn" type="button">中文</button></p>
-  </form>
+  </div>
 </div>
 <script>` + i18nJS + `
+{{if .LocalLoginEnabled}}
 document.getElementById('login-form').addEventListener('submit', async function (e) {
   e.preventDefault();
   var err = document.getElementById('err');
@@ -897,6 +1114,7 @@ document.getElementById('login-form').addEventListener('submit', async function 
     location.href = '/overview';
   } catch (ex) { err.textContent = t('login.neterr', 'Network error: ') + ex.message; }
 });
+{{end}}
 </script>
 </body>
 </html>`
@@ -981,7 +1199,7 @@ const buildsContent = `
 <div class="page-head">
   <div><h1 data-i18n="builds.h1">Builds</h1><p class="sub" id="count"></p></div>
   <div class="actions">
-    <button class="btn" id="cleanup-failed" data-i18n="builds.cleanup">Clean Up Failed</button>
+    <button class="btn" id="cleanup-failed" data-system-admin data-i18n="builds.cleanup">Clean Up Failed</button>
     <button class="btn" id="refresh" data-i18n="common.refresh">Refresh</button>
   </div>
 </div>
@@ -1131,6 +1349,14 @@ async function load() {
     lastDetail = b;
     g.appendChild(durationTile(b));
     if (b.instance_id) g.appendChild(metaTile('detail.instance', 'Instance', b.instance_id, true));
+    var resolved = b.resolved_context || {};
+    if (resolved.profile_id) g.appendChild(metaTile('detail.profile', 'Profile', resolved.profile_id, true));
+    if (resolved.image_generation) g.appendChild(metaTile('detail.image', 'Image generation', (resolved.image_id || '-') + ' · ' + resolved.image_generation, true));
+    if (resolved.egress_policy && resolved.egress_policy.id) {
+      var egress = resolved.egress_policy.id + ' · ' + (resolved.egress_policy.mode || '-');
+      if (resolved.egress_policy_digest) egress += ' · ' + resolved.egress_policy_digest.slice(0, 19) + '…';
+      g.appendChild(metaTile('detail.egress', 'Egress policy', egress, true));
+    }
     if (b.artifact_url) {
       var wrap = el('div');
       var a = el('a', null, basename(b.artifact_url));
@@ -1158,9 +1384,10 @@ async function load() {
     var retryBtn = document.getElementById('retry-job');
     var cancelBtn = document.getElementById('cancel-job');
     var terminal = b.status === 'failed' || b.status === 'completed' || b.status === 'success' || b.status === 'canceled';
-    delBtn.style.display = terminal ? '' : 'none';
-    retryBtn.style.display = (b.status === 'failed' || b.status === 'canceled') ? '' : 'none';
-    cancelBtn.style.display = terminal ? 'none' : '';
+    var canMaintain = hasProjectRole('maintainer');
+    delBtn.style.display = terminal && canMaintain ? '' : 'none';
+    retryBtn.style.display = canMaintain && (b.status === 'failed' || b.status === 'canceled') ? '' : 'none';
+    cancelBtn.style.display = !terminal && canMaintain ? '' : 'none';
     var errCard = document.getElementById('err-card');
     if (b.error) { errCard.style.display = ''; document.getElementById('err-text').textContent = b.error; }
     else errCard.style.display = 'none';
@@ -1182,7 +1409,8 @@ var STAGES = [
 var FILTERS = [
   { key: 'all',       en: 'All',       prefixes: null },
   { key: 'queued',    en: 'Queued',    prefixes: ['[queued]'] },
-  { key: 'provision', en: 'Provision', prefixes: ['[provision]', '[terraform]'] },
+  { key: 'provision', en: 'Provision', prefixes: ['[provision]', '[terraform]', '[policy]'] },
+  { key: 'policy',    en: 'Network Policy', prefixes: ['[policy]'] },
   { key: 'deploy',    en: 'Deploy',    prefixes: ['[deploy]', '[remote]'] },
   { key: 'build',     en: 'Build',     prefixes: ['[build]'] },
   { key: 'collect',   en: 'Collect',   prefixes: ['[collect]'] },
@@ -1328,7 +1556,10 @@ document.getElementById('refresh').addEventListener('click', function () { load(
 load();
 loadLogs();
 if (window.EventSource) {
-  var jobEvents = new EventSource('/api/events/jobs');
+  var eventProject = '';
+  try { eventProject = localStorage.getItem('pe_project_id') || ''; } catch (e) {}
+  var jobEvents = new EventSource('/api/events/jobs' +
+    (eventProject ? '?project_id=' + encodeURIComponent(eventProject) : ''));
   jobEvents.addEventListener('job', function (event) {
     try {
       var update = JSON.parse(event.data);
@@ -1366,7 +1597,8 @@ document.getElementById('back-link').href = '/build/' + encodeURIComponent(jobID
 var LOG_FILTERS = [
   { key: 'all', en: 'All', prefixes: null },
   { key: 'queued', en: 'Queued', prefixes: ['[queued]'] },
-  { key: 'provision', en: 'Provision', prefixes: ['[provision]', '[terraform]'] },
+  { key: 'provision', en: 'Provision', prefixes: ['[provision]', '[terraform]', '[policy]'] },
+  { key: 'policy', en: 'Network Policy', prefixes: ['[policy]'] },
   { key: 'deploy', en: 'Deploy', prefixes: ['[deploy]', '[remote]'] },
   { key: 'build', en: 'Build', prefixes: ['[build]'] },
   { key: 'collect', en: 'Collect', prefixes: ['[collect]'] },
@@ -1449,6 +1681,13 @@ const monitorContent = `
 <h2 class="section-title" data-i18n="mon.scheduler">Durable Scheduler</h2>
 <div class="builder-grid ledger-grid" id="scheduler"></div>
 <div id="scheduler-error"></div>
+<h2 class="section-title" data-i18n="mon.targets">Target Reliability and Cost</h2>
+<p class="sub" data-i18n="mon.targets.sub">Grouped by project, profile, image generation, and resource class</p>
+<div class="builder-grid" id="target-history"></div>
+<div id="target-history-empty"></div>
+<h2 class="section-title" data-i18n="mon.gateway">Worker Gateway</h2>
+<div class="builder-grid ledger-grid" id="worker-gateway"></div>
+<div id="worker-gateway-error"></div>
 <h2 class="section-title" data-i18n="mon.metadata">Runtime Metadata</h2>
 <div class="builder-grid ledger-grid" id="runtime-metadata"></div>
 <div id="runtime-metadata-error"></div>
@@ -1507,22 +1746,285 @@ async function load() {
     clear(schedulerGrid); clear(document.getElementById('scheduler-error'));
     var schedulerCard = el('article', 'builder-card');
     schedulerCard.appendChild(el('h3', null, t('mon.scheduler.pg', 'PostgreSQL queue and leases')));
-    var schedulerBadge = statusBadge(scheduler.healthy === false || (scheduler.expired_leases || 0) > 0 ? 'failed' : 'passed');
+    var schedulerBadge = statusBadge(
+      scheduler.healthy === false ||
+      (scheduler.expired_leases || 0) > 0 ||
+      (scheduler.unschedulable_tasks || 0) > 0 ? 'failed' : 'passed'
+    );
     schedulerBadge.lastChild.textContent = scheduler.healthy === false
       ? t('mon.scheduler.degraded', 'degraded')
       : t('mon.scheduler.healthy', 'healthy');
     schedulerCard.appendChild(schedulerBadge);
     var schedulerMeta = el('div', 'meta');
     schedulerMeta.appendChild(el('span', null, t('mon.scheduler.queue', 'queued ') + (scheduler.queued_tasks || 0)));
+    schedulerMeta.appendChild(el('span', null, t('mon.scheduler.unschedulable', 'capability mismatch ') + (scheduler.unschedulable_tasks || 0)));
     schedulerMeta.appendChild(el('span', null, t('mon.scheduler.running', 'running ') + (scheduler.running_tasks || 0)));
     schedulerMeta.appendChild(el('span', null, t('mon.scheduler.leases', 'active leases ') + (scheduler.active_leases || 0)));
     schedulerMeta.appendChild(el('span', null, t('mon.scheduler.expired', 'expired leases ') + (scheduler.expired_leases || 0)));
     schedulerMeta.appendChild(el('span', null, t('mon.scheduler.workers', 'active slots ') + (scheduler.active_workers || 0)));
+    schedulerMeta.appendChild(el('span', null, t('mon.scheduler.capability', 'capability slots ') + (scheduler.capability_workers || 0)));
     schedulerMeta.appendChild(el('span', null, t('mon.scheduler.stale', 'stale slots ') + (scheduler.stale_workers || 0)));
     schedulerMeta.appendChild(el('span', null, t('mon.scheduler.attempts', 'attempts last hour ') + (scheduler.attempts_last_hour || 0)));
+    var fairness = scheduler.fairness || {};
+    schedulerMeta.appendChild(el('span', null,
+      t('mon.scheduler.fair.projects', 'fair-queue projects ') +
+      (fairness.eligible_projects || 0)));
+    schedulerMeta.appendChild(el('span', null,
+      t('mon.scheduler.fair.starved', 'anti-starvation boosted ') +
+      (fairness.starved_projects || 0)));
+    schedulerMeta.appendChild(el('span', null,
+      t('mon.scheduler.fair.dispatches', 'fair dispatch admission/phase ') +
+      (fairness.admission_dispatches || 0) + '/' +
+      (fairness.phase_dispatches || 0)));
+    schedulerMeta.appendChild(el('span', null,
+      t('mon.scheduler.fair.maxwait', 'observed max wait ') +
+      (fairness.max_queue_wait_seconds || 0) + 's'));
+    var workerScoring = scheduler.worker_scoring || {};
+    schedulerMeta.appendChild(el('span', null,
+      t('mon.scheduler.score.decisions',
+        'worker soft-score decisions/multi-candidate ') +
+      (workerScoring.decisions_last_hour || 0) + '/' +
+      (workerScoring.multi_candidate_last_hour || 0)));
+    (Array.isArray(workerScoring.recent) ? workerScoring.recent : [])
+      .slice(0, 6).forEach(function(decision) {
+        schedulerMeta.appendChild(el('span', null,
+          t('mon.scheduler.score.worker', 'worker decision ') +
+          (decision.work_kind || 'unknown') +
+          (decision.phase ? '/' + decision.phase : '') + ' · ' +
+          (decision.worker || 'unknown') + ' · candidates ' +
+          (decision.candidate_count || 0) + ' · pressure/failures ' +
+          (decision.pressure_score || 0) + '/' +
+          (decision.recent_failures || 0)));
+      });
+    var autoscaler = scheduler.autoscaler || {};
+    schedulerMeta.appendChild(el('span', null,
+      t('mon.scheduler.autoscale', 'autoscale recommendation ') +
+      (autoscaler.mode || 'off') + ':' +
+      (autoscaler.recommendation || 'off')));
+    schedulerMeta.appendChild(el('span', null,
+      t('mon.scheduler.autoscale.slots', 'slots active/desired ') +
+      (autoscaler.active_slots || 0) + '/' +
+      (autoscaler.desired_slots || 0)));
+    schedulerMeta.appendChild(el('span', null,
+      t('mon.scheduler.autoscale.demand', 'demand busy/backlog/unschedulable ') +
+      (autoscaler.busy_slots || 0) + '/' +
+      (autoscaler.backlog || 0) + '/' +
+      (autoscaler.unschedulable_backlog || 0)));
+    if (autoscaler.reason) {
+      var autoscaleReason = autoscaler.reason ===
+        'phase executor mode is shadow; capacity inventory only'
+        ? t('mon.scheduler.autoscale.shadow',
+            'phase executor mode is shadow; capacity inventory only')
+        : autoscaler.reason;
+      schedulerMeta.appendChild(el('span', null, autoscaleReason));
+    }
+    var capacityPools = Array.isArray(autoscaler.pools)
+      ? autoscaler.pools : [];
+    var blockedPools = capacityPools.filter(function(pool) {
+      return (pool.unschedulable_backlog || 0) > 0;
+    }).length;
+    schedulerMeta.appendChild(el('span', null,
+      t('mon.scheduler.autoscale.pools', 'capacity pools total/blocked ') +
+      capacityPools.length + '/' + blockedPools));
+    capacityPools.forEach(function(pool) {
+      schedulerMeta.appendChild(el('span', null,
+        t('mon.scheduler.autoscale.pool', 'capacity pool ') +
+        (pool.provider || 'unknown') + '/' +
+        (pool.execution_zone || 'default') + ' · ' +
+        (pool.profile_id || pool.id || 'unknown') + ' · ' +
+        (pool.recommendation || 'hold') + ' · ' +
+        (pool.active_slots || 0) + '/' + (pool.desired_slots || 0) +
+        ' active/desired · provider max ' +
+        (pool.provider_max_slots || 0) + ' · ' + (pool.backlog || 0) + '/' +
+        (pool.unschedulable_backlog || 0) + ' backlog/blocked'));
+    });
+    var actuator = autoscaler.actuator || {};
+    schedulerMeta.appendChild(el('span', null,
+      t('mon.scheduler.actuator', 'actuator actions open/failed ') +
+      (actuator.open_actions || 0) + '/' +
+      (actuator.failed_actions || 0)));
+    schedulerMeta.appendChild(el('span', null,
+      t('mon.scheduler.instances',
+        'persistent instances provisioning/active/draining/deleting ') +
+      (actuator.provisioning_instances || 0) + '/' +
+      (actuator.active_instances || 0) + '/' +
+      (actuator.draining_instances || 0) + '/' +
+      (actuator.deleting_instances || 0)));
+    (Array.isArray(actuator.actions) ? actuator.actions : [])
+      .slice(0, 5).forEach(function(action) {
+        var detail = t('mon.scheduler.action', 'capacity action ') +
+          (action.kind || 'unknown') + ' · ' +
+          (action.state || 'unknown') + ' · attempts ' +
+          (action.attempts || 0) + ' · ' +
+          (action.pool_id || 'unknown');
+        if (action.failure_detail) detail += ' · ' + action.failure_detail;
+        schedulerMeta.appendChild(el('span', null, detail));
+      });
+    (Array.isArray(actuator.instances) ? actuator.instances : [])
+      .slice(0, 8).forEach(function(instance) {
+        schedulerMeta.appendChild(el('span', null,
+          t('mon.scheduler.instance', 'capacity instance ') +
+          (instance.provider_instance_id || instance.id || 'unknown') +
+          ' · ' + (instance.state || 'unknown') + ' · ' +
+          (instance.pool_id || 'unknown')));
+      });
     schedulerCard.appendChild(schedulerMeta);
     schedulerGrid.appendChild(schedulerCard);
+    var history = scheduler.target_history || {};
+    var targets = Array.isArray(history.targets) ? history.targets : [];
+    var historyGrid = document.getElementById('target-history');
+    var historyEmpty = document.getElementById('target-history-empty');
+    clear(historyGrid); clear(historyEmpty);
+    if (!targets.length) {
+      historyEmpty.appendChild(el('div', 'empty', t('mon.targets.empty',
+        'No terminal samples in the last 30 days')));
+    }
+    targets.forEach(function(target) {
+      var card = el('article', 'builder-card target-card');
+      card.appendChild(el('h3', null,
+        (target.profile_id || 'compatibility') + ' · ' +
+        (target.image_generation || 'unknown')));
+      card.appendChild(el('div', 'ep',
+        (target.project_name || target.project_id || 'unknown') + ' · ' +
+        (target.provider || 'unknown') + '/' +
+        (target.execution_zone || 'default') + ' · ' +
+        (target.architecture || 'unknown') + ' · ' +
+        (target.resource_class || 'default')));
+      var meta = el('div', 'meta');
+      (Array.isArray(target.windows) ? target.windows : [])
+        .forEach(function(window) {
+          var denominator = (window.successes || 0) +
+            (window.failures || 0);
+          var rate = denominator
+            ? Number(window.success_rate_percent || 0).toFixed(1) + '%'
+            : '—';
+          var slo = window.insufficient_data
+            ? t('mon.targets.insufficient', 'insufficient samples')
+            : (window.slo_met ? 'SLO met' : 'SLO breach');
+          meta.appendChild(el('span', null,
+            (window.name || (window.hours + 'h')) + ' · ' +
+            t('mon.targets.samples', 'samples success/failure/canceled ') +
+            (window.samples || 0) + ' ' + (window.successes || 0) + '/' +
+            (window.failures || 0) + '/' + (window.canceled || 0)));
+          meta.appendChild(el('span', null,
+            (window.name || '') + ' · ' +
+            t('mon.targets.slo', 'success / SLO ') + rate + ' · ' + slo));
+          meta.appendChild(el('span', null,
+            (window.name || '') + ' · ' +
+            t('mon.targets.latency', 'P50/P95 queue·run ') +
+            (window.queue_p50_seconds || 0) + '/' +
+            (window.queue_p95_seconds || 0) + 's · ' +
+            (window.run_p50_seconds || 0) + '/' +
+            (window.run_p95_seconds || 0) + 's'));
+          meta.appendChild(el('span', null,
+            (window.name || '') + ' · ' +
+            t('mon.targets.cost', 'reserved/settled cost ') +
+            ((window.reserved_cost_microunits || 0) / 1000000)
+              .toFixed(3) + '/' +
+            ((window.charged_cost_microunits || 0) / 1000000)
+              .toFixed(3)));
+          if (window.dominant_failure_class) {
+            meta.appendChild(el('span', null,
+              (window.name || '') + ' · ' +
+              t('mon.targets.failure', 'dominant failure ') +
+              window.dominant_failure_class));
+          }
+        });
+      card.appendChild(meta);
+      historyGrid.appendChild(card);
+    });
   } catch (e) { showError('scheduler-error', e); }
+  try {
+    var gateway = await api('/api/worker-gateway/status');
+    var gatewayGrid = document.getElementById('worker-gateway');
+    clear(gatewayGrid); clear(document.getElementById('worker-gateway-error'));
+    var gatewayCard = el('article', 'builder-card');
+    gatewayCard.appendChild(el('h3', null, t('mon.gateway.mtls', 'Outbound pull and short-lived mTLS identity')));
+    var gatewayBadge = statusBadge(
+      gateway.enabled && gateway.issuer_healthy !== false ? 'passed' :
+      (gateway.enabled ? 'failed' : 'pending')
+    );
+    gatewayBadge.lastChild.textContent = gateway.enabled
+      ? t('mon.gateway.enabled', 'enabled')
+      : t('mon.gateway.disabled', 'compatibility mode');
+    gatewayCard.appendChild(gatewayBadge);
+    var gatewayMeta = el('div', 'meta');
+    gatewayMeta.appendChild(el('span', null, t('mon.gateway.authority', 'authority ') + (gateway.authority || 'memory')));
+    gatewayMeta.appendChild(el('span', null, t('mon.gateway.connected', 'connected ') + (gateway.connected_sessions || 0)));
+    gatewayMeta.appendChild(el('span', null, t('mon.gateway.registered', 'registered ') + (gateway.registered_sessions || 0)));
+    gatewayMeta.appendChild(el('span', null, t('mon.gateway.tasks', 'pending tasks ') + (gateway.pending_tasks || 0)));
+    gatewayMeta.appendChild(el('span', null, t('mon.gateway.uploads', 'pending uploads ') + (gateway.pending_uploads || 0)));
+    gatewayMeta.appendChild(el('span', null, t('mon.gateway.issuers', 'issuer generations ') +
+      (gateway.active_issuers || 0) + ' active / ' +
+      (gateway.draining_issuers || 0) + ' draining / ' +
+      (gateway.revoked_issuers || 0) + ' revoked'));
+    gatewayMeta.appendChild(el('span', null, t('mon.gateway.certs', 'workload certificates ') +
+      (gateway.active_certificates || 0) + ' active / ' +
+      (gateway.revoked_certificates || 0) + ' revoked'));
+    if (gateway.expiring_certificates) {
+      gatewayMeta.appendChild(el('span', null, t('mon.gateway.expiring', 'expiring within 30m ') +
+        gateway.expiring_certificates));
+    }
+    gatewayMeta.appendChild(el('span', null, t('mon.gateway.provider', 'issuer provider ') +
+      (gateway.issuer_provider || 'unknown') + ':' + (gateway.issuer_id || 'unknown')));
+    var issuerRuntime = gateway.issuer_runtime || {};
+    gatewayMeta.appendChild(el('span', null, t('mon.gateway.provider.health', 'provider health ') +
+      (issuerRuntime.healthy ? 'healthy' : 'unhealthy') +
+      ' / failures ' + (issuerRuntime.consecutive_failures || 0)));
+    if (issuerRuntime.last_success_at) {
+      gatewayMeta.appendChild(el('span', null, t('mon.gateway.provider.success', 'last issuer success ') +
+        fmtTime(issuerRuntime.last_success_at)));
+    }
+    if (issuerRuntime.last_failure_at) {
+      gatewayMeta.appendChild(el('span', null, t('mon.gateway.provider.failure', 'last issuer failure ') +
+        fmtTime(issuerRuntime.last_failure_at)));
+    }
+    if (issuerRuntime.last_error) {
+      gatewayMeta.appendChild(el('span', null, t('mon.gateway.provider.error', 'issuer error ') +
+        issuerRuntime.last_error));
+    }
+    gatewayMeta.appendChild(el('span', null, t('mon.gateway.inbound', 'inbound builder API ') + (gateway.inbound_builder_api ? 'on' : 'off')));
+    gatewayMeta.appendChild(el('span', null, t('mon.gateway.protocol', 'executor protocol ') + 'v' + (gateway.executor_protocol || 0)));
+    gatewayMeta.appendChild(el('span', null, t('mon.gateway.phase', 'phase executor ') + (gateway.phase_executor_mode || 'shadow')));
+    var phaseWork = gateway.phase_work || {};
+    gatewayMeta.appendChild(el('span', null, t('mon.gateway.phase.active', 'active phase work ') + (phaseWork.active || 0)));
+    gatewayMeta.appendChild(el('span', null, t('mon.gateway.phase.claimed', 'claimed ') + (phaseWork.claimed || 0)));
+    gatewayMeta.appendChild(el('span', null, t('mon.gateway.phase.ready', 'ready ') + (phaseWork.ready || 0)));
+    gatewayMeta.appendChild(el('span', null, t('mon.scheduler.unschedulable', 'capability mismatch ') + (phaseWork.unschedulable || 0)));
+    gatewayMeta.appendChild(el('span', null, t('mon.gateway.phase.blocked', 'blocked ') + (phaseWork.blocked || 0)));
+    if (phaseWork.failed) gatewayMeta.appendChild(el('span', null, t('mon.gateway.phase.failed', 'failed ') + phaseWork.failed));
+    gatewayMeta.appendChild(el('span', null, t('mon.gateway.ttl', 'certificate TTL ') + (gateway.certificate_ttl_min || 0) + 'm'));
+    gatewayCard.appendChild(gatewayMeta);
+    gatewayGrid.appendChild(gatewayCard);
+    try {
+      var identityInventory = await api('/api/worker-gateway/identities');
+      var issuerDetails = el('details', 'factory-step-details');
+      issuerDetails.appendChild(el('summary', null,
+        t('mon.gateway.inventory', 'Issuer and certificate inventory')));
+      var inventoryBody = el('div', 'meta');
+      (identityInventory.issuers || []).forEach(function (issuer) {
+        inventoryBody.appendChild(el('span', 'mono',
+          (issuer.fingerprint || '').slice(0, 12) + '… ' +
+          (issuer.state || 'unknown') + ' · ' +
+          (issuer.provider || 'unknown') + ':' + (issuer.issuer_id || 'unknown') +
+          ' · active leaves ' + (issuer.active_certificates || 0) +
+          ' · expires ' + fmtTime(issuer.not_after)));
+      });
+      if (!(identityInventory.issuers || []).length) {
+        inventoryBody.appendChild(el('span', null,
+          t('mon.gateway.inventory.empty', 'No certificate has been issued yet.')));
+      }
+      inventoryBody.appendChild(el('span', null,
+        t('mon.gateway.inventory.recent', 'recent certificates ') +
+        (identityInventory.certificates || []).length + ' / ' +
+        (identityInventory.certificate_limit || 100)));
+      issuerDetails.appendChild(inventoryBody);
+      gatewayCard.appendChild(issuerDetails);
+    } catch (inventoryError) {
+      gatewayMeta.appendChild(el('span', null,
+        t('mon.gateway.inventory.error', 'identity inventory unavailable')));
+    }
+  } catch (e) { showError('worker-gateway-error', e); }
   try {
     var metadataResponse = await api('/api/runtime-metadata/status');
     var metadata = metadataResponse.status || {};
@@ -1638,9 +2140,30 @@ const settingsContent = `
   <a data-sec="ssh" data-i18n="set.sec.ssh">SSH Keys</a>
   <a data-sec="gpg" data-i18n="set.sec.gpg">GPG Signing</a>
   <a data-sec="net" data-i18n="set.sec.net">Network &amp; Delivery</a>
+  <a data-sec="security">Sessions &amp; Security</a>
 </nav>
 <div class="settings-panels">
 <form id="settings-form">
+
+<section class="panel" data-panel="security">
+  <div class="card"><h3 class="card-title">Identity providers</h3><div class="card-pad">
+    <p class="hint">Upstream credentials are exchanged once. Ordinary API requests use only a short-lived Portage Engine session.</p>
+    <div id="identity-provider-status" class="provider-status-list"></div>
+  </div></div>
+  <div class="card"><h3 class="card-title">Federated sessions</h3><div class="card-pad">
+    <p class="hint">Only token hashes and lifecycle metadata are retained. Revocation is enforced by PostgreSQL across all control-plane replicas.</p>
+    <div class="table-scroll"><table class="list" aria-label="Federated sessions">
+      <thead><tr><th>Session</th><th>Issued</th><th>Last seen</th><th>Expires</th><th>Auth context</th><th>Status</th><th></th></tr></thead>
+      <tbody id="session-rows"></tbody>
+    </table></div>
+    <div id="session-empty"></div>
+    <div class="form-actions">
+      <button class="btn" type="button" id="refresh-sessions">Refresh</button>
+      <button class="btn danger" type="button" id="revoke-all-sessions">Revoke all sessions</button>
+      <a class="btn" href="/login?step_up=1">Re-authenticate with identity provider</a>
+    </div>
+  </div></div>
+</section>
 
 <section class="panel active" data-panel="general">
   <div class="card"><h3 class="card-title" data-i18n="set.backend">Build Backend</h3><div class="card-pad form-grid">
@@ -1995,6 +2518,66 @@ var form = document.getElementById('settings-form');
 var msg = document.getElementById('msg');
 var lastSettings = null;
 
+async function loadSessions() {
+  var rows = document.getElementById('session-rows');
+  var empty = document.getElementById('session-empty');
+  if (!rows || !empty) return;
+  clear(rows); clear(empty);
+  try {
+    var result = await api('/api/iam/sessions');
+    var sessions = Array.isArray(result.sessions) ? result.sessions : [];
+    if (!sessions.length) {
+      empty.appendChild(el('div', 'empty', 'No OIDC sessions are registered.'));
+      return;
+    }
+    sessions.forEach(function (session) {
+      var tr = el('tr');
+      tr.appendChild(el('td', 'mono sec', session.id.slice(0, 8) +
+        (session.id === result.current_session_id ? ' · current' : '')));
+      tr.appendChild(el('td', 'sec', fmtTime(session.issued_at)));
+      tr.appendChild(el('td', 'sec', fmtTime(session.last_seen_at)));
+      tr.appendChild(el('td', 'sec', fmtTime(session.expires_at)));
+      tr.appendChild(el('td', 'sec', (session.acr || '-') + ' · ' +
+        ((session.amr || []).join(', ') || '-')));
+      tr.appendChild(el('td', 'sec', session.revoked_at ? 'revoked' : 'active'));
+      var action = el('td');
+      if (!session.revoked_at) {
+        var revoke = el('button', 'btn', 'Revoke');
+        revoke.type = 'button';
+        revoke.addEventListener('click', async function () {
+          if (!confirm('Revoke this session?')) return;
+          await api('/api/iam/sessions?session_id=' +
+            encodeURIComponent(session.id), {method: 'DELETE'});
+          if (session.id === result.current_session_id) location.href = '/logout';
+          else loadSessions();
+        });
+        action.appendChild(revoke);
+      }
+      tr.appendChild(action);
+      rows.appendChild(tr);
+    });
+  } catch (error) {
+    empty.appendChild(el('div', 'empty', 'Sessions unavailable: ' + error.message));
+  }
+}
+function renderIdentityProviders() {
+  var target = document.getElementById('identity-provider-status');
+  if (!target) return;
+  clear(target);
+  var providers = window.peIAM && Array.isArray(window.peIAM.identityProviders)
+    ? window.peIAM.identityProviders : [];
+  if (!providers.length) {
+    target.appendChild(el('div', 'empty', 'No federated provider is active in the current authentication mode.'));
+    return;
+  }
+  for (var i = 0; i < providers.length; i++) {
+    var provider = providers[i];
+    var text = provider.display_name + ' · ' + provider.type;
+    if (provider.backchannel_logout_enabled) text += ' · back-channel logout';
+    target.appendChild(el('div', 'provider-status-row', text));
+  }
+}
+
 /* --- sub-navigation --- */
 function showSection(sec) {
   var links = document.querySelectorAll('#subnav a[data-sec]');
@@ -2011,6 +2594,22 @@ document.getElementById('subnav').addEventListener('click', function (e) {
 if (location.hash && document.querySelector('.panel[data-panel="' + location.hash.slice(1) + '"]')) {
   showSection(location.hash.slice(1));
 }
+document.getElementById('refresh-sessions').addEventListener('click', loadSessions);
+document.getElementById('revoke-all-sessions').addEventListener('click', async function () {
+  if (!confirm('Revoke every session for this identity? You will be signed out.')) return;
+  try {
+    await api('/api/iam/sessions/revoke-all', {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}'
+    });
+    location.href = '/logout';
+  } catch (error) {
+    alert('Session revocation failed: ' + error.message);
+  }
+});
+Promise.resolve(iamReady).then(function () {
+  renderIdentityProviders();
+  loadSessions();
+});
 
 /* --- placement radio --- */
 function syncPlacement() {
@@ -2292,7 +2891,7 @@ const imageFactoryContent = `
 <h2 class="section-title" data-i18n="factory.catalog">Active Catalog</h2>
 <div class="card">
   <div class="table-scroll"><table class="list" aria-label="Image factory profiles">
-    <thead><tr><th>Profile</th><th data-i18n="th.arch">Arch</th><th data-i18n="factory.image">Image</th><th data-i18n="factory.displayModel">Display</th><th data-i18n="factory.sets">Package sets</th><th data-i18n="factory.channel">Channel</th></tr></thead>
+    <thead><tr><th>Profile</th><th data-i18n="th.arch">Arch</th><th data-i18n="factory.image">Image</th><th>Egress policy</th><th data-i18n="factory.displayModel">Display</th><th data-i18n="factory.sets">Package sets</th><th data-i18n="factory.channel">Channel</th></tr></thead>
     <tbody id="factory-profiles"></tbody>
   </table></div>
   <div id="factory-profile-empty"></div>
@@ -2363,6 +2962,7 @@ function renderFactory(data) {
     tr.appendChild(id);
     tr.appendChild(el('td', 'sec', profile.arch || '-'));
     tr.appendChild(el('td', 'mono sec', profile.image_id || '-'));
+    tr.appendChild(el('td', 'mono sec', profile.egress_policy_id || '-'));
     tr.appendChild(el('td', 'sec', image.display_model || '-'));
     tr.appendChild(el('td', 'sec', (profile.package_sets || []).join(', ') || '-'));
     tr.appendChild(el('td', 'sec', profile.channel || '-'));

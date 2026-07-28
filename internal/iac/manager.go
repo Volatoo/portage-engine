@@ -13,7 +13,10 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
+
+	"github.com/slchris/portage-engine/internal/catalog"
 )
 
 // CloudCredentials holds cloud provider credentials.
@@ -64,17 +67,23 @@ const (
 
 // ProvisionRequest represents an infrastructure provisioning request.
 type ProvisionRequest struct {
-	Provider        string            `json:"provider"`
-	Arch            string            `json:"arch"`
-	Spec            map[string]string `json:"spec"`
-	Credentials     *CloudCredentials `json:"-"`
-	SSH             *SSHConfig        `json:"-"`
-	ServerCallback  string            `json:"server_callback"`
-	BuilderPort     int               `json:"builder_port"`
-	BuilderToken    string            `json:"-"` // Shared secret the deployed builder requires
-	BinpkgHost      string            `json:"binpkg_host"`
-	AllowedIPRanges []string          `json:"allowed_ip_ranges"`
-	TTL             time.Duration     `json:"ttl"` // Instance TTL, 0 uses default
+	// InstanceID, when set by a durable phase executor, makes the Terraform
+	// workspace and provider resource identity stable across control-plane
+	// replay. It is internal authority, never accepted from a public request.
+	InstanceID      string                `json:"-"`
+	Provider        string                `json:"provider"`
+	Arch            string                `json:"arch"`
+	Spec            map[string]string     `json:"spec"`
+	Credentials     *CloudCredentials     `json:"-"`
+	SSH             *SSHConfig            `json:"-"`
+	ServerCallback  string                `json:"server_callback"`
+	BuilderPort     int                   `json:"builder_port"`
+	BuilderToken    string                `json:"-"` // Shared secret the deployed builder requires
+	WorkerPull      *WorkerPullConfig     `json:"-"`
+	BinpkgHost      string                `json:"binpkg_host"`
+	AllowedIPRanges []string              `json:"allowed_ip_ranges"`
+	TTL             time.Duration         `json:"ttl"` // Instance TTL, 0 uses default
+	EgressPolicy    *catalog.EgressPolicy `json:"egress_policy,omitempty"`
 
 	// How the builder binary reaches the instance. BuilderBinaryPath is a local
 	// (linux, arch-matching) binary scp'd over during deployBuilder;
@@ -107,6 +116,16 @@ type ProvisionRequest struct {
 	// every later terminal cleanup result. Returning an error from the initial
 	// "provisioning" event aborts before any cloud-side effect.
 	Lifecycle func(*Instance, string, string, *time.Time) error `json:"-"`
+}
+
+// WorkerPullConfig contains one attempt's short-lived identity. PEM values are
+// copied over the transient SSH bootstrap channel and are never serialized in
+// IaC state or instance metadata.
+type WorkerPullConfig struct {
+	GatewayURL string
+	CertPEM    []byte
+	KeyPEM     []byte
+	CAPEM      []byte
 }
 
 // sinkf writes a formatted progress line to a log sink, if one is set.
@@ -469,191 +488,304 @@ func (m *Manager) Provision(req *ProvisionRequest) (*Instance, error) {
 	if !supportedProviders[req.Provider] {
 		return nil, fmt.Errorf("provider %q not implemented", req.Provider)
 	}
+	instanceID, terraformDir, workspaceLock, err := m.prepareProvisionWorkspace(req)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = workspaceLock.Close() }()
+	defer func() { _ = syscall.Flock(int(workspaceLock.Fd()), syscall.LOCK_UN) }()
+	if err := m.writeProvisionWorkspace(req, terraformDir); err != nil {
+		return nil, err
+	}
+	env := m.prepareEnvironment(req)
+	instance, err := m.registerProvisioningInstance(req, instanceID, terraformDir, env)
+	if err != nil {
+		return nil, err
+	}
+	if err := m.applyTerraform(req, instance, env); err != nil {
+		m.rollback(instance)
+		return nil, err
+	}
+	if err := m.enforceProvisionEgress(req, instance, env); err != nil {
+		m.rollback(instance)
+		return nil, err
+	}
+	if err := m.resolveProvisionedInstance(req, instance, env); err != nil {
+		m.rollback(instance)
+		return nil, err
+	}
+	if err := m.finishProvision(req, instance); err != nil {
+		m.rollback(instance)
+		return nil, err
+	}
+	return instance, nil
+}
 
-	instanceID := fmt.Sprintf("%s-%d", req.Provider, time.Now().UnixNano())
+func (m *Manager) prepareProvisionWorkspace(req *ProvisionRequest) (string, string, *os.File, error) {
+	instanceID := strings.TrimSpace(req.InstanceID)
+	if instanceID == "" {
+		instanceID = fmt.Sprintf("%s-%d", req.Provider, time.Now().UnixNano())
+	}
+	if !validInstanceID(instanceID) {
+		return "", "", nil, fmt.Errorf("invalid durable instance id %q", instanceID)
+	}
 	terraformDir := filepath.Join(m.workspaceDir, instanceID)
-
-	if err := os.MkdirAll(terraformDir, 0750); err != nil {
-		return nil, fmt.Errorf("failed to create terraform directory: %w", err)
+	if err := os.MkdirAll(terraformDir, 0o750); err != nil {
+		return "", "", nil, fmt.Errorf("failed to create terraform directory: %w", err)
+	}
+	workspaceLock, err := os.OpenFile( // #nosec G304 -- manager-owned per-job workspace.
+		filepath.Join(terraformDir, ".provision.lock"),
+		os.O_CREATE|os.O_RDWR, 0o600,
+	)
+	if err != nil {
+		return "", "", nil, fmt.Errorf("open terraform workspace lock: %w", err)
+	}
+	if err := syscall.Flock(int(workspaceLock.Fd()), syscall.LOCK_EX); err != nil {
+		_ = workspaceLock.Close()
+		return "", "", nil, fmt.Errorf("lock terraform workspace: %w", err)
 	}
 	if req.Spec == nil {
 		req.Spec = make(map[string]string)
 	}
-	// Make the provider resource name deterministic from the durable instance
-	// ID. Provider configuration, the lifecycle row, and the crash-cleanup
-	// manifest must all refer to exactly the same name.
 	if req.Spec["resource_name"] == "" {
-		req.Spec["resource_name"] = fmt.Sprintf("portage-builder-%s-%s",
-			req.Arch, strings.TrimPrefix(instanceID, req.Provider+"-"))
+		req.Spec["resource_name"] = fmt.Sprintf(
+			"portage-builder-%s-%s", req.Arch,
+			strings.TrimPrefix(instanceID, req.Provider+"-"),
+		)
 	}
-
-	// Set defaults
 	if req.BuilderPort == 0 {
 		req.BuilderPort = 9090
 	}
 	if req.SSH == nil {
-		req.SSH = &SSHConfig{
-			User: "root",
-		}
+		req.SSH = &SSHConfig{User: "root"}
 	}
+	return instanceID, terraformDir, workspaceLock, nil
+}
 
-	// Generate Terraform configuration with credentials
+func (m *Manager) writeProvisionWorkspace(req *ProvisionRequest, terraformDir string) error {
 	tfConfig, err := m.generateTerraformConfig(req)
 	if err != nil {
-		return nil, fmt.Errorf("failed to generate terraform config: %w", err)
+		return fmt.Errorf("failed to generate terraform config: %w", err)
 	}
-	tfFile := filepath.Join(terraformDir, "main.tf")
-	if err := os.WriteFile(tfFile, []byte(tfConfig), 0600); err != nil {
-		return nil, fmt.Errorf("failed to write terraform config: %w", err)
+	if err := os.WriteFile(filepath.Join(terraformDir, "main.tf"), []byte(tfConfig), 0o600); err != nil {
+		return fmt.Errorf("failed to write terraform config: %w", err)
 	}
-
-	// Generate firewall rules
 	firewallConfig := m.generateFirewallConfig(req)
-	fwFile := filepath.Join(terraformDir, "firewall.tf")
-	if err := os.WriteFile(fwFile, []byte(firewallConfig), 0600); err != nil {
-		return nil, fmt.Errorf("failed to write firewall config: %w", err)
+	if err := os.WriteFile(filepath.Join(terraformDir, "firewall.tf"), []byte(firewallConfig), 0o600); err != nil {
+		return fmt.Errorf("failed to write firewall config: %w", err)
+	}
+	if req.EgressPolicy != nil {
+		if err := writeJSONFile(filepath.Join(terraformDir, "egress-policy.json"), req.EgressPolicy); err != nil {
+			return fmt.Errorf("write egress policy contract: %w", err)
+		}
 	}
 	identity := resourceIdentity{
-		Provider: req.Provider,
-		Name:     req.Spec["resource_name"],
-		Node:     req.Spec["node"],
-		Endpoint: req.Spec["endpoint"],
+		Provider: req.Provider, Name: req.Spec["resource_name"],
+		Node: req.Spec["node"], Endpoint: req.Spec["endpoint"],
 		Insecure: getOrDefault(req.Spec, "insecure", "false") == "true",
 	}
-	identityJSON, err := json.MarshalIndent(identity, "", "  ")
-	if err != nil {
-		return nil, fmt.Errorf("encode infrastructure resource identity: %w", err)
+	if err := writeJSONFile(filepath.Join(terraformDir, resourceIdentityFile), identity); err != nil {
+		return fmt.Errorf("write infrastructure resource identity: %w", err)
 	}
-	if err := os.WriteFile(filepath.Join(terraformDir, resourceIdentityFile), identityJSON, 0600); err != nil {
-		return nil, fmt.Errorf("write infrastructure resource identity: %w", err)
-	}
+	return nil
+}
 
-	// Set environment variables for cloud credentials
-	env := m.prepareEnvironment(req)
-
-	// Determine TTL up front.
+func (m *Manager) registerProvisioningInstance(
+	req *ProvisionRequest,
+	instanceID, terraformDir string,
+	env []string,
+) (*Instance, error) {
 	ttl := req.TTL
 	if ttl == 0 {
 		ttl = m.defaultTTL
 	}
-
-	// Record the instance BEFORE apply completes, so that if apply partially
-	// creates resources (VPC/subnet/instance) and then errors, cleanup can still
-	// find the terraform dir and destroy it. destroyEnv carries the credentials
-	// so a later destroy authenticates the same way apply did.
 	now := time.Now()
 	instance := &Instance{
-		ID:            instanceID,
-		Provider:      req.Provider,
-		Status:        "provisioning",
-		Arch:          req.Arch,
-		Metadata:      req.Spec,
-		TerraformDir:  terraformDir,
-		SSHUser:       req.SSH.User,
-		LastHeartbeat: now,
-		CreatedAt:     now,
-		TTL:           ttl,
-		LastActivity:  now,
-		destroyEnv:    env,
-		lifecycle:     req.Lifecycle,
+		ID: instanceID, Provider: req.Provider, Status: "provisioning",
+		Arch: req.Arch, Metadata: req.Spec, TerraformDir: terraformDir,
+		SSHUser: req.SSH.User, LastHeartbeat: now, CreatedAt: now,
+		TTL: ttl, LastActivity: now, destroyEnv: env, lifecycle: req.Lifecycle,
 	}
 	m.mu.Lock()
 	m.instances[instanceID] = instance
 	m.mu.Unlock()
 	m.persistInstances()
-	if instance.lifecycle != nil {
-		if err := instance.lifecycle(instance, "provisioning", "", nil); err != nil {
-			m.mu.Lock()
-			delete(m.instances, instanceID)
-			m.mu.Unlock()
-			m.persistInstances()
-			_ = os.RemoveAll(terraformDir)
-			return nil, fmt.Errorf("persist infrastructure ownership before terraform apply: %w", err)
-		}
+	if instance.lifecycle == nil {
+		return instance, nil
 	}
+	if err := instance.lifecycle(instance, "provisioning", "", nil); err != nil {
+		m.mu.Lock()
+		delete(m.instances, instanceID)
+		m.mu.Unlock()
+		m.persistInstances()
+		_ = os.RemoveAll(terraformDir)
+		return nil, fmt.Errorf("persist infrastructure ownership before terraform apply: %w", err)
+	}
+	return instance, nil
+}
 
-	// Run Terraform init with a bounded timeout so a hung init cannot block the
-	// build worker forever.
-	sinkf(req.LogSink, "[provision] workspace %s (provider %s)", instanceID, req.Provider)
+func (m *Manager) applyTerraform(
+	req *ProvisionRequest,
+	instance *Instance,
+	env []string,
+) error {
+	sinkf(req.LogSink, "[provision] workspace %s (provider %s)", instance.ID, req.Provider)
 	sinkf(req.LogSink, "[provision] running terraform init…")
 	initCtx, cancelInit := context.WithTimeout(context.Background(), terraformInitTimeout)
-	errInit := m.runTerraformCommand(initCtx, terraformDir, env, req.LogSink, "init")
+	err := m.runTerraformCommand(initCtx, instance.TerraformDir, env, req.LogSink, "init")
 	cancelInit()
-	if errInit != nil {
-		m.rollback(instance)
-		return nil, fmt.Errorf("terraform init failed: %w", errInit)
+	if err != nil {
+		return fmt.Errorf("terraform init failed: %w", err)
 	}
-
-	// Run Terraform apply with a bounded timeout. On any error after this point,
-	// roll back (destroy) so partially-created resources do not leak.
 	sinkf(req.LogSink, "[provision] running terraform apply (creating the build VM)…")
 	applyCtx, cancelApply := context.WithTimeout(context.Background(), terraformApplyTimeout)
-	errApply := m.runTerraformCommand(applyCtx, terraformDir, env, req.LogSink, "apply", "-auto-approve")
+	err = m.runTerraformCommand(
+		applyCtx, instance.TerraformDir, env, req.LogSink,
+		"apply", "-auto-approve",
+	)
 	cancelApply()
-	if errApply != nil {
-		sinkf(req.LogSink, "[provision] apply failed — rolling back")
-		m.rollback(instance)
-		return nil, fmt.Errorf("terraform apply failed: %w", errApply)
-	}
-
-	// Get outputs.
-	ipAddress, err := m.getTerraformOutput(terraformDir, env, "ip_address")
 	if err != nil {
-		m.rollback(instance)
-		return nil, fmt.Errorf("failed to get IP address: %w", err)
+		sinkf(req.LogSink, "[provision] apply failed — rolling back")
+		return fmt.Errorf("terraform apply failed: %w", err)
+	}
+	return nil
+}
+
+func (m *Manager) enforceProvisionEgress(
+	req *ProvisionRequest,
+	instance *Instance,
+	env []string,
+) error {
+	if req.Provider != "pve" || req.EgressPolicy == nil {
+		return nil
+	}
+	if req.EgressPolicy.Mode == catalog.EgressModeDisabled {
+		sinkf(req.LogSink, "[policy] warning: compatibility catalog has no packet-layer egress enforcement")
+		return nil
+	}
+	if req.EgressPolicy.Mode != catalog.EgressModeEnforce {
+		return fmt.Errorf("unsupported egress policy mode %q", req.EgressPolicy.Mode)
+	}
+	vmid, err := m.getTerraformOutput(instance.TerraformDir, env, "vmid")
+	if err != nil {
+		return fmt.Errorf("resolve stopped PVE VMID for egress enforcement: %w", err)
+	}
+	nodeName, err := m.getTerraformOutput(instance.TerraformDir, env, "node")
+	if err != nil {
+		return fmt.Errorf("resolve stopped PVE node for egress enforcement: %w", err)
+	}
+	vmid, nodeName = strings.TrimSpace(vmid), strings.TrimSpace(nodeName)
+	if vmid == "" || nodeName == "" {
+		return fmt.Errorf("resolve stopped PVE VM for egress enforcement: empty VMID or node")
+	}
+	endpoint := getOrDefault(req.Spec, "endpoint", "")
+	auth := pveAuthForProvisionRequest(req)
+	sinkf(req.LogSink, "[policy] applying PVE default-deny egress policy %s before VM boot", req.EgressPolicy.ID)
+	policyCtx, cancelPolicy := context.WithTimeout(context.Background(), 2*time.Minute)
+	evidence, policyErr := ApplyPVEEgressPolicy(
+		policyCtx, endpoint, auth, nodeName, vmid, req.EgressPolicy, time.Now(),
+	)
+	if policyErr == nil {
+		policyErr = writeJSONFile(filepath.Join(instance.TerraformDir, "egress-policy-evidence.json"), evidence)
+	}
+	if policyErr == nil {
+		policyErr = StartPVEVM(policyCtx, endpoint, auth, nodeName, vmid)
+	}
+	cancelPolicy()
+	if policyErr != nil {
+		sinkf(req.LogSink, "[policy] enforcement failed — rolling back stopped VM")
+		return fmt.Errorf("PVE egress policy enforcement failed: %w", policyErr)
+	}
+	instance.Metadata["pe_egress_enforced"] = "true"
+	instance.Metadata["vmid"], instance.Metadata["node"] = vmid, nodeName
+	sinkf(req.LogSink, "[policy] verified policy_out=DROP with %d allow rules; VM started", evidence.RuleCount)
+	return nil
+}
+
+func (m *Manager) resolveProvisionedInstance(
+	req *ProvisionRequest,
+	instance *Instance,
+	env []string,
+) error {
+	ipAddress := ""
+	enforcedPVE := req.Provider == "pve" && req.EgressPolicy != nil &&
+		req.EgressPolicy.Mode == catalog.EgressModeEnforce
+	var err error
+	if !enforcedPVE {
+		ipAddress, err = m.getTerraformOutput(instance.TerraformDir, env, "ip_address")
+		if err != nil {
+			return fmt.Errorf("failed to get IP address: %w", err)
+		}
 	}
 	if strings.TrimSpace(ipAddress) == "" && req.Provider == "pve" {
-		// telmate often finishes apply before the guest agent reports an IP;
-		// resolve it ourselves through the PVE API.
 		sinkf(req.LogSink, "[provision] apply done but no IP yet - polling the guest agent...")
-		vmid, _ := m.getTerraformOutput(terraformDir, env, "vmid")
-		nodeName, _ := m.getTerraformOutput(terraformDir, env, "node")
-		endpoint := getOrDefault(req.Spec, "endpoint", "")
-		auth := PVEAuth{Insecure: getOrDefault(req.Spec, "insecure", "false") == "true"}
-		if req.Credentials != nil {
-			auth.TokenID = req.Credentials.PVETokenID
-			auth.TokenSecret = req.Credentials.PVETokenSecret
-			auth.Username = req.Credentials.PVEUsername
-			auth.Password = req.Credentials.PVEPassword
+		vmid, _ := m.getTerraformOutput(instance.TerraformDir, env, "vmid")
+		nodeName, _ := m.getTerraformOutput(instance.TerraformDir, env, "node")
+		ipAddress, err = WaitForPVEGuestIP(
+			getOrDefault(req.Spec, "endpoint", ""),
+			pveAuthForProvisionRequest(req), nodeName, vmid,
+			5*time.Minute, req.LogSink,
+		)
+		if err != nil {
+			sinkf(req.LogSink, "[provision] %v - rolling back", err)
+			return fmt.Errorf("failed to resolve instance IP: %w", err)
 		}
-		ip, ipErr := WaitForPVEGuestIP(endpoint, auth, nodeName, vmid, 5*time.Minute, req.LogSink)
-		if ipErr != nil {
-			sinkf(req.LogSink, "[provision] %v - rolling back", ipErr)
-			m.rollback(instance)
-			return nil, fmt.Errorf("failed to resolve instance IP: %w", ipErr)
-		}
-		ipAddress = ip
 	}
-	privateIP, _ := m.getTerraformOutput(terraformDir, env, "private_ip")
-
+	privateIP, _ := m.getTerraformOutput(instance.TerraformDir, env, "private_ip")
 	m.mu.Lock()
-	instance.IPAddress = ipAddress
-	instance.PublicIP = ipAddress
-	instance.PrivateIP = privateIP
+	instance.IPAddress, instance.PublicIP, instance.PrivateIP = ipAddress, ipAddress, privateIP
 	instance.BuilderEndpoint = fmt.Sprintf("http://%s:%d", ipAddress, req.BuilderPort)
 	m.mu.Unlock()
-
 	sinkf(req.LogSink, "[provision] instance is up at %s", ipAddress)
+	return nil
+}
 
-	// Deploy builder software via SSH.
+func (m *Manager) finishProvision(req *ProvisionRequest, instance *Instance) error {
 	if req.SSH.KeyPath != "" {
 		if err := m.deployBuilder(instance, req); err != nil {
-			// Deployment failed on a live, billed VM — destroy it rather than
-			// leaving an orphan running.
 			m.setInstanceStatus(instance, "deployment_failed")
-			m.rollback(instance)
-			return nil, fmt.Errorf("builder deployment failed: %w", err)
+			return fmt.Errorf("builder deployment failed: %w", err)
 		}
 	}
-
 	m.setInstanceStatus(instance, "running")
 	if instance.lifecycle != nil {
 		if err := instance.lifecycle(instance, "running", "", nil); err != nil {
-			m.rollback(instance)
-			return nil, fmt.Errorf("persist running infrastructure state: %w", err)
+			return fmt.Errorf("persist running infrastructure state: %w", err)
 		}
 	}
-	return instance, nil
+	return nil
+}
+
+func validInstanceID(value string) bool {
+	if value == "" || len(value) > 160 || value == "." || value == ".." {
+		return false
+	}
+	for _, r := range value {
+		if (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') &&
+			(r < '0' || r > '9') && r != '-' && r != '_' && r != '.' {
+			return false
+		}
+	}
+	return true
+}
+
+func pveAuthForProvisionRequest(req *ProvisionRequest) PVEAuth {
+	auth := PVEAuth{Insecure: getOrDefault(req.Spec, "insecure", "false") == "true"}
+	if req.Credentials != nil {
+		auth.TokenID = req.Credentials.PVETokenID
+		auth.TokenSecret = req.Credentials.PVETokenSecret
+		auth.Username = req.Credentials.PVEUsername
+		auth.Password = req.Credentials.PVEPassword
+	}
+	return auth
+}
+
+func writeJSONFile(path string, value any) error {
+	data, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0o600)
 }
 
 // setInstanceStatus updates an instance's Status under the manager lock, so it
@@ -752,7 +884,7 @@ func (m *Manager) destroyInstance(instance *Instance) error {
 }
 
 func readResourceIdentity(terraformDir string) (*resourceIdentity, error) {
-	data, err := os.ReadFile(filepath.Join(terraformDir, resourceIdentityFile))
+	data, err := os.ReadFile(filepath.Join(terraformDir, resourceIdentityFile)) // #nosec G304 -- terraformDir is the manager-owned per-job workspace and the file name is fixed.
 	if err != nil {
 		if os.IsNotExist(err) {
 			// Workspaces created before the identity manifest was introduced
@@ -842,6 +974,18 @@ func (m *Manager) DestroyRecorded(provider, instanceID, terraformDir string) err
 	if !info.IsDir() {
 		return fmt.Errorf("recorded terraform workspace is not a directory")
 	}
+	workspaceLock, err := os.OpenFile( // #nosec G304 -- dir is the recorded manager-owned Terraform workspace.
+		filepath.Join(dir, ".provision.lock"),
+		os.O_CREATE|os.O_RDWR, 0o600,
+	)
+	if err != nil {
+		return fmt.Errorf("open recorded workspace lock: %w", err)
+	}
+	defer func() { _ = workspaceLock.Close() }()
+	if err := syscall.Flock(int(workspaceLock.Fd()), syscall.LOCK_EX); err != nil {
+		return fmt.Errorf("lock recorded terraform workspace: %w", err)
+	}
+	defer func() { _ = syscall.Flock(int(workspaceLock.Fd()), syscall.LOCK_UN) }()
 
 	instance := &Instance{ID: instanceID, Provider: provider, TerraformDir: dir}
 	if m.credentialResolver != nil {
@@ -963,7 +1107,7 @@ func (m *Manager) CheckStaleInstances(timeout time.Duration) []*Instance {
 func (m *Manager) runTerraformCommand(ctx context.Context, dir string, env []string, sink func(string), args ...string) error {
 	// -no-color keeps ANSI escapes out of the streamed job logs.
 	args = append(args, "-no-color")
-	cmd := exec.CommandContext(ctx, "terraform", args...)
+	cmd := exec.CommandContext(ctx, "terraform", args...) // #nosec G204 -- fixed terraform executable with validated subcommands and separate arguments.
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), env...)
 
@@ -1020,7 +1164,7 @@ func (m *Manager) runTerraformCommand(ctx context.Context, dir string, env []str
 func (m *Manager) getTerraformOutput(dir string, env []string, output string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), terraformOutputTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "terraform", "output", "-raw", output)
+	cmd := exec.CommandContext(ctx, "terraform", "output", "-raw", output) // #nosec G204 -- fixed terraform executable; output is an allow-listed name.
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), env...)
 
@@ -1111,6 +1255,34 @@ func (m *Manager) deployBuilder(instance *Instance, req *ProvisionRequest) error
 		installCmd := "mkdir -p /opt/portage-builder && mv /tmp/portage-builder.bin /opt/portage-builder/portage-builder && chmod +x /opt/portage-builder/portage-builder"
 		if err := m.sshExecute(instance, req.SSH, installCmd); err != nil {
 			return fmt.Errorf("failed to install builder binary: %w", err)
+		}
+	}
+	if req.WorkerPull != nil {
+		for _, item := range []struct {
+			data []byte
+			name string
+		}{
+			{req.WorkerPull.CertPEM, "worker.crt"},
+			{req.WorkerPull.KeyPEM, "worker.key"},
+			{req.WorkerPull.CAPEM, "worker-ca.crt"},
+		} {
+			local := filepath.Join(instance.TerraformDir, item.name)
+			if err := os.WriteFile(local, item.data, 0o600); err != nil {
+				return fmt.Errorf("write temporary worker identity %s: %w", item.name, err)
+			}
+			if err := m.sshCopyFile(instance, req.SSH, local, "/tmp/"+item.name); err != nil {
+				_ = os.Remove(local)
+				return fmt.Errorf("copy worker identity %s: %w", item.name, err)
+			}
+			_ = os.Remove(local)
+		}
+		installIdentity := "install -d -m 0700 /etc/portage-engine/tls && " +
+			"install -m 0600 /tmp/worker.crt /etc/portage-engine/tls/worker.crt && " +
+			"install -m 0600 /tmp/worker.key /etc/portage-engine/tls/worker.key && " +
+			"install -m 0644 /tmp/worker-ca.crt /etc/portage-engine/tls/ca.crt && " +
+			"rm -f /tmp/worker.crt /tmp/worker.key /tmp/worker-ca.crt"
+		if err := m.sshExecute(instance, req.SSH, installIdentity); err != nil {
+			return fmt.Errorf("install worker mTLS identity: %w", err)
 		}
 	}
 
@@ -1254,7 +1426,7 @@ func (m *Manager) sshExecute(instance *Instance, cfg *SSHConfig, command string)
 	// Bound each SSH invocation so a hung connection cannot block a build worker.
 	ctx, cancel := context.WithTimeout(context.Background(), sshCommandTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "ssh", args...)
+	cmd := exec.CommandContext(ctx, "ssh", args...) // #nosec G204 -- fixed ssh executable with validated host and separate arguments.
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 
@@ -1283,7 +1455,7 @@ func (m *Manager) sshCopyFile(instance *Instance, cfg *SSHConfig, localPath, rem
 	// Bound each SCP invocation so a hung transfer cannot block a build worker.
 	ctx, cancel := context.WithTimeout(context.Background(), sshCommandTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "scp", args...)
+	cmd := exec.CommandContext(ctx, "scp", args...) // #nosec G204 -- fixed scp executable with validated paths and separate arguments.
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 
@@ -1322,6 +1494,11 @@ func (m *Manager) generateGentooNativeScript(req *ProvisionRequest, arch string)
 		DataDir:             "/var/lib/portage-engine",
 		WorkDir:             "/var/tmp/portage-builds",
 		ArtifactDir:         "/var/tmp/portage-artifacts",
+	}
+	if req.WorkerPull != nil {
+		config.WorkerPullEnabled = true
+		config.WorkerGatewayURL = req.WorkerPull.GatewayURL
+		config.BuilderToken = ""
 	}
 	return GenerateGentooNativeScript(config)
 }

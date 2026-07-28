@@ -3,9 +3,13 @@ package config
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
+	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 )
@@ -21,10 +25,47 @@ var insecureJWTSecrets = []string{
 	"",
 }
 
+var identityProviderIDPattern = regexp.MustCompile(`^[a-z][a-z0-9-]{1,62}$`)
+var executorCapabilityPattern = regexp.MustCompile(
+	`^[a-z][a-z0-9-]{0,31}:[a-zA-Z0-9][a-zA-Z0-9+._/@:-]{0,479}$`,
+)
+var executorZonePattern = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
+var executorCapacityInstancePattern = regexp.MustCompile(
+	`^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`,
+)
+var autoscaleProviderPattern = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
+
+// IdentityProviderConfig describes one community-selectable sign-in provider.
+// ClientSecretEnv names the environment variable populated by a deployment
+// secret provider; the resolved secret is never serialized back to JSON.
+type IdentityProviderConfig struct {
+	ID                       string `json:"id"`
+	Type                     string `json:"type"`
+	DisplayName              string `json:"display_name"`
+	IssuerURL                string `json:"issuer_url,omitempty"`
+	Audience                 string `json:"audience,omitempty"`
+	ClientID                 string `json:"client_id"`
+	ClientSecretEnv          string `json:"client_secret_env,omitempty"`
+	ClientSecret             string `json:"-"`
+	RedirectURL              string `json:"redirect_url"`
+	AuthorizationURL         string `json:"authorization_url,omitempty"`
+	TokenURL                 string `json:"token_url,omitempty"`
+	APIBaseURL               string `json:"api_base_url,omitempty"`
+	AllowInsecureHTTP        bool   `json:"allow_insecure_http,omitempty"`
+	BackchannelLogout        bool   `json:"backchannel_logout,omitempty"`
+	BackchannelRequireSID    bool   `json:"backchannel_require_sid,omitempty"`
+	BackchannelMaxAgeSeconds int    `json:"backchannel_max_age_seconds,omitempty"`
+}
+
+type identityProviderDocument struct {
+	Providers []IdentityProviderConfig `json:"providers"`
+}
+
 // ServerConfig represents the server configuration.
 type ServerConfig struct {
 	Port                     int
 	ControlPlaneID           string
+	RuntimeRole              string // control-plane or executor
 	BinpkgPath               string
 	MaxWorkers               int
 	BuildMode                string
@@ -97,11 +138,68 @@ type ServerConfig struct {
 	RemoteBuilders           []string
 	// Security settings
 	APIKey                 string   // API key for authenticating requests (empty = auth disabled)
+	StepUpAPIKey           string   // Independent legacy/hybrid credential for high-risk writes
+	AuthMode               string   // legacy, hybrid, or oidc
+	OIDCIssuerURL          string   // Exact issuer used for discovery and iss validation
+	OIDCAudience           string   // Required aud/client ID for control-plane bearer JWTs
+	OIDCAdminSubjects      []string // Exact OIDC subject IDs granted system-admin bootstrap access
+	OIDCAllowInsecureHTTP  bool     // Trusted-LAN-only opt-in for an HTTP issuer
+	OIDCSessionIdleMinutes int      // Server-side inactivity timeout for observed bearer sessions
+	OIDCSessionMaxMinutes  int      // Maximum accepted token/session lifetime
+	OIDCStepUpMaxAgeMin    int      // Maximum auth_time age for sensitive writes
+	OIDCStepUpAMRValues    []string // Optional accepted authentication-method references
+	OIDCStepUpACRValues    []string // Optional accepted authentication-context classes
+	IdentityProvidersPath  string
+	IdentityProviders      []IdentityProviderConfig
+	IdentityAdminSubjects  []string // provider-id:external-subject
 	BuilderToken           string   // Shared secret the server presents to remote builders (empty = no builder auth)
 	CORSAllowedOrigins     []string // Allowed CORS origins (empty = allow all for backward compatibility)
 	MaxRequestBodyBytes    int64    // Maximum request body size in bytes (0 = default 10MB)
 	CatalogPath            string   // Server-owned profile/repository/image catalog JSON (empty = compatibility catalog)
 	ImageFactoryStatusPath string   // Optional read-only image-factory milestone/evidence status JSON
+	// WorkerGateway is a dedicated mTLS listener for disposable workers. The
+	// ordinary control-plane/UI listener may remain HTTP on a trusted LAN.
+	WorkerGatewayEnabled        bool
+	WorkerGatewayPort           int
+	WorkerGatewayAdvertiseURL   string
+	WorkerGatewayTLSCert        string
+	WorkerGatewayTLSKey         string
+	WorkerGatewayServerCA       string
+	WorkerGatewayClientCA       string
+	WorkerGatewayIssuerID       string
+	WorkerGatewayIssuerProvider string
+	WorkerGatewayIssuerCert     string
+	WorkerGatewayIssuerKey      string
+	WorkerGatewayVaultAddress   string
+	WorkerGatewayVaultMount     string
+	WorkerGatewayVaultRole      string
+	WorkerGatewayVaultTokenPath string
+	WorkerGatewayVaultNamespace string
+	WorkerGatewayVaultServerCA  string
+	WorkerGatewayVaultTimeout   int
+	WorkerCertificateTTLMin     int
+	// PhaseExecutorMode controls the explicit cutover from the legacy
+	// whole-pipeline worker to independently leased durable phases. "shadow"
+	// keeps creating non-runnable plans; "active" is PostgreSQL + outbound
+	// worker only and never starts the legacy executor for the same attempt.
+	PhaseExecutorMode    string
+	ExecutorZones        []string // Execution zones this replica can reach; default is "default"
+	ExecutorCapabilities []string // Exact capability-label override; empty derives labels from catalog/config
+	// ExecutorCapacityInstanceID binds every worker slot in a persistent
+	// executor process to one actuator-owned capacity instance UUID.
+	ExecutorCapacityInstanceID string
+	// Scheduler autoscaling can remain advisory or enqueue fenced actions.
+	// Provider side effects are always executed by the independent actuator,
+	// never by the scheduler transaction.
+	SchedulerAutoscaleMode             string
+	SchedulerAutoscaleMinSlots         int
+	SchedulerAutoscaleMaxSlots         int
+	SchedulerAutoscaleTargetReady      int
+	SchedulerAutoscaleCooldownSeconds  int
+	SchedulerAutoscaleScaleDownSeconds int
+	SchedulerAutoscaleIntervalSeconds  int
+	SchedulerAutoscaleProviderMaxSlots map[string]int
+	SchedulerAutoscaleProviderLimitsOK bool
 	// Data persistence
 	DataDir  string // Directory for persisting legacy server state (empty = /var/lib/portage-engine/server)
 	Database DatabaseConfig
@@ -150,10 +248,137 @@ type CacheConfig struct {
 // Validate checks the server configuration for common misconfigurations.
 func (c *ServerConfig) Validate() []string {
 	var warnings []string
-
-	if c.APIKey == "" {
-		warnings = append(warnings, "SECURITY: API_KEY is not set — all API endpoints are unauthenticated")
+	if c.RuntimeRole != "" && c.RuntimeRole != "control-plane" &&
+		c.RuntimeRole != "executor" {
+		warnings = append(
+			warnings,
+			"CONFIG: SERVER_RUNTIME_ROLE must be control-plane or executor",
+		)
 	}
+	if c.RuntimeRole == "executor" {
+		if c.ControlPlaneID == "" {
+			warnings = append(
+				warnings,
+				"CONFIG: executor role requires a stable CONTROL_PLANE_ID",
+			)
+		}
+		if c.PhaseExecutorMode != "active" ||
+			!c.Database.Enabled || !c.Database.Required ||
+			!c.WorkerGatewayEnabled {
+			warnings = append(
+				warnings,
+				"CONFIG: executor role requires active phase execution, required PostgreSQL, and Worker Gateway",
+			)
+		}
+		if len(c.ExecutorCapabilities) == 0 {
+			warnings = append(
+				warnings,
+				"CONFIG: executor role requires explicit EXECUTOR_CAPABILITIES for one immutable pool",
+			)
+		}
+		if c.ExecutorCapacityInstanceID == "" {
+			warnings = append(
+				warnings,
+				"CONFIG: executor role requires EXECUTOR_CAPACITY_INSTANCE_ID",
+			)
+		} else if !executorCapacityInstancePattern.MatchString(
+			c.ExecutorCapacityInstanceID,
+		) {
+			warnings = append(
+				warnings,
+				"CONFIG: EXECUTOR_CAPACITY_INSTANCE_ID must be a lowercase UUID",
+			)
+		}
+	} else if c.ExecutorCapacityInstanceID != "" {
+		warnings = append(
+			warnings,
+			"CONFIG: EXECUTOR_CAPACITY_INSTANCE_ID is only valid for executor role",
+		)
+	}
+	warnings = append(warnings, c.validateAuth()...)
+	warnings = append(warnings, c.validateCore()...)
+	warnings = append(warnings, c.validateDatabaseAndCache()...)
+	warnings = append(warnings, c.validateWorkerGateway()...)
+	return warnings
+}
+
+func (c *ServerConfig) validateAuth() []string {
+	var warnings []string
+	warnings = append(warnings, c.validateAuthMode()...)
+	warnings = append(warnings, c.validateStepUpPolicy()...)
+	warnings = append(warnings, c.validateOIDCSessionPolicy()...)
+	if c.OIDCAllowInsecureHTTP {
+		warnings = append(warnings, "SECURITY: OIDC issuer uses explicitly allowed HTTP; bearer tokens are safe only on a trusted private network")
+	}
+	return warnings
+}
+
+func (c *ServerConfig) validateAuthMode() []string {
+	var warnings []string
+	providerCount := len(c.IdentityProviders)
+	if providerCount == 0 && c.OIDCIssuerURL != "" && c.OIDCAudience != "" {
+		providerCount = 1
+	}
+	switch c.AuthMode {
+	case "", "legacy":
+		if c.APIKey == "" {
+			warnings = append(warnings, "SECURITY: API_KEY is not set — all API endpoints are unauthenticated")
+		}
+	case "hybrid", "oidc":
+		if !c.Database.Enabled || !c.Database.Required {
+			warnings = append(warnings, "CONFIG: OIDC/hybrid auth requires DATABASE_ENABLED=true and DATABASE_REQUIRED=true")
+		}
+		if providerCount == 0 {
+			warnings = append(warnings, "CONFIG: OIDC/hybrid auth requires AUTH_PROVIDERS_PATH or the legacy OIDC issuer/audience pair")
+		}
+		if c.AuthMode == "oidc" && len(c.IdentityAdminSubjects) == 0 &&
+			len(c.OIDCAdminSubjects) == 0 {
+			warnings = append(warnings, "CONFIG: OIDC mode requires at least one AUTH_ADMIN_IDENTITIES bootstrap administrator")
+		}
+		if c.AuthMode == "hybrid" && c.APIKey == "" {
+			warnings = append(warnings, "CONFIG: hybrid auth requires API_KEY for the legacy administrator path")
+		}
+	default:
+		warnings = append(warnings, "CONFIG: AUTH_MODE must be legacy, hybrid, or oidc")
+	}
+	for _, provider := range c.IdentityProviders {
+		if err := validateIdentityProvider(provider); err != nil {
+			warnings = append(warnings, "CONFIG: identity provider "+provider.ID+": "+err.Error())
+		}
+	}
+	return warnings
+}
+
+func (c *ServerConfig) validateStepUpPolicy() []string {
+	var warnings []string
+	if c.AuthMode == "legacy" || c.AuthMode == "hybrid" {
+		if c.APIKey != "" && c.StepUpAPIKey == "" {
+			warnings = append(warnings, "SECURITY: STEP_UP_API_KEY is required for legacy administrator high-risk writes")
+		} else if c.APIKey != "" && c.APIKey == c.StepUpAPIKey {
+			warnings = append(warnings, "SECURITY: STEP_UP_API_KEY must differ from API_KEY")
+		}
+	}
+	return warnings
+}
+
+func (c *ServerConfig) validateOIDCSessionPolicy() []string {
+	var warnings []string
+	if c.AuthMode == "hybrid" || c.AuthMode == "oidc" {
+		if c.OIDCSessionIdleMinutes < 1 || c.OIDCSessionIdleMinutes > 7*24*60 {
+			warnings = append(warnings, "CONFIG: OIDC_SESSION_IDLE_MINUTES must be in 1..10080")
+		}
+		if c.OIDCSessionMaxMinutes < 1 || c.OIDCSessionMaxMinutes > 30*24*60 {
+			warnings = append(warnings, "CONFIG: OIDC_SESSION_MAX_MINUTES must be in 1..43200")
+		}
+		if c.OIDCStepUpMaxAgeMin < 1 || c.OIDCStepUpMaxAgeMin > 60 {
+			warnings = append(warnings, "CONFIG: OIDC_STEP_UP_MAX_AGE_MINUTES must be in 1..60")
+		}
+	}
+	return warnings
+}
+
+func (c *ServerConfig) validateCore() []string {
+	var warnings []string
 	if len(c.CORSAllowedOrigins) == 0 {
 		warnings = append(warnings, "SECURITY: CORS_ALLOWED_ORIGINS is not set — defaulting to allow all origins (*)")
 	}
@@ -172,6 +397,11 @@ func (c *ServerConfig) Validate() []string {
 	if c.GPGEnabled && c.GPGPublicKeyPath == "" {
 		warnings = append(warnings, "CONFIG: GPG_ENABLED requires GPG_PUBLIC_KEY_PATH for isolated signer public-key distribution")
 	}
+	return warnings
+}
+
+func (c *ServerConfig) validateDatabaseAndCache() []string {
+	var warnings []string
 	if c.Database.Enabled && c.Database.URL == "" && c.Database.SSLMode == "disable" {
 		warnings = append(warnings, "SECURITY: PGSSLMODE=disable sends database traffic without TLS; use only on a trusted private network")
 	}
@@ -187,63 +417,369 @@ func (c *ServerConfig) Validate() []string {
 	if c.Cache.Enabled && c.Cache.Password == "" {
 		warnings = append(warnings, "SECURITY: Redis has no password configured; bind it to a private network and enable authentication")
 	}
-
 	return warnings
+}
+
+func (c *ServerConfig) validateWorkerGateway() []string {
+	var warnings []string
+	warnings = append(warnings, c.validatePhaseExecutor()...)
+	if !c.WorkerGatewayEnabled {
+		return warnings
+	}
+	if !c.Database.Enabled || !c.Database.Required {
+		warnings = append(warnings, "CONFIG: WORKER_GATEWAY_ENABLED requires DATABASE_ENABLED=true and DATABASE_REQUIRED=true")
+	}
+	if c.WorkerGatewayPort <= 0 || c.WorkerGatewayPort > 65535 || c.WorkerGatewayPort == c.Port {
+		warnings = append(warnings, "CONFIG: WORKER_GATEWAY_PORT must be a valid port distinct from SERVER_PORT")
+	}
+	if c.workerGatewayTLSIncomplete() {
+		warnings = append(warnings, "CONFIG: worker gateway requires advertise URL, server TLS cert/key, and server/client CA bundles")
+	}
+	switch c.WorkerGatewayIssuerProvider {
+	case "file":
+		if c.WorkerGatewayIssuerCert == "" ||
+			c.WorkerGatewayIssuerKey == "" {
+			warnings = append(warnings, "CONFIG: file worker issuer requires WORKER_GATEWAY_ISSUER_CERT and WORKER_GATEWAY_ISSUER_KEY")
+		}
+	case "vault":
+		if c.WorkerGatewayVaultAddress == "" ||
+			c.WorkerGatewayVaultMount == "" ||
+			c.WorkerGatewayVaultRole == "" ||
+			c.WorkerGatewayVaultTokenPath == "" {
+			warnings = append(warnings, "CONFIG: Vault worker issuer requires address, mount, role, and token file")
+		}
+		if c.WorkerGatewayVaultTimeout <= 0 ||
+			c.WorkerGatewayVaultTimeout > 60 {
+			warnings = append(warnings, "CONFIG: WORKER_GATEWAY_VAULT_TIMEOUT_SECONDS must be in 1..60")
+		}
+	default:
+		warnings = append(warnings, "CONFIG: WORKER_GATEWAY_ISSUER_PROVIDER must be file or vault")
+	}
+	if strings.TrimSpace(c.WorkerGatewayIssuerID) == "" ||
+		len(c.WorkerGatewayIssuerID) > 128 {
+		warnings = append(warnings, "CONFIG: WORKER_GATEWAY_ISSUER_ID must contain 1..128 characters")
+	}
+	if c.WorkerCertificateTTLMin <= 0 || c.WorkerCertificateTTLMin > 24*60 {
+		warnings = append(warnings, "CONFIG: WORKER_CERTIFICATE_TTL_MINUTES must be in 1..1440")
+	}
+	return warnings
+}
+
+func (c *ServerConfig) validatePhaseExecutor() []string {
+	var warnings []string
+	if c.PhaseExecutorMode != "" && c.PhaseExecutorMode != "shadow" &&
+		c.PhaseExecutorMode != "active" {
+		warnings = append(warnings, "CONFIG: PHASE_EXECUTOR_MODE must be shadow or active")
+	}
+	if c.PhaseExecutorMode == "active" {
+		if !c.Database.Enabled || !c.Database.Required {
+			warnings = append(warnings, "CONFIG: active phase executor requires DATABASE_ENABLED=true and DATABASE_REQUIRED=true")
+		}
+		if !c.WorkerGatewayEnabled {
+			warnings = append(warnings, "CONFIG: active phase executor requires WORKER_GATEWAY_ENABLED=true")
+		}
+		if len(c.RemoteBuilders) > 0 {
+			warnings = append(warnings, "CONFIG: active phase executor does not support legacy REMOTE_BUILDERS")
+		}
+	}
+	seenZones := make(map[string]struct{}, len(c.ExecutorZones))
+	for _, zone := range c.ExecutorZones {
+		if !executorZonePattern.MatchString(zone) {
+			warnings = append(warnings, "CONFIG: EXECUTOR_ZONES entries must use lowercase stable IDs")
+			break
+		}
+		if _, exists := seenZones[zone]; exists {
+			warnings = append(warnings, "CONFIG: EXECUTOR_ZONES contains a duplicate")
+			break
+		}
+		seenZones[zone] = struct{}{}
+	}
+	seenCapabilities := make(map[string]struct{}, len(c.ExecutorCapabilities))
+	for _, capability := range c.ExecutorCapabilities {
+		if !executorCapabilityPattern.MatchString(capability) {
+			warnings = append(warnings, "CONFIG: EXECUTOR_CAPABILITIES contains an invalid label")
+			break
+		}
+		if _, exists := seenCapabilities[capability]; exists {
+			warnings = append(warnings, "CONFIG: EXECUTOR_CAPABILITIES contains a duplicate label")
+			break
+		}
+		seenCapabilities[capability] = struct{}{}
+	}
+	if c.PhaseExecutorMode == "active" && len(c.ExecutorCapabilities) > 0 {
+		hasPhase := false
+		for _, capability := range c.ExecutorCapabilities {
+			if strings.HasPrefix(capability, "phase:") {
+				hasPhase = true
+				break
+			}
+		}
+		if !hasPhase {
+			warnings = append(warnings, "CONFIG: explicit EXECUTOR_CAPABILITIES requires at least one phase label")
+		}
+	}
+	if c.SchedulerAutoscaleMode != "off" &&
+		c.SchedulerAutoscaleMode != "observe" &&
+		c.SchedulerAutoscaleMode != "actuate" {
+		warnings = append(
+			warnings,
+			"CONFIG: SCHEDULER_AUTOSCALE_MODE must be off, observe, or actuate",
+		)
+	}
+	if c.SchedulerAutoscaleMode == "actuate" &&
+		(!c.SchedulerAutoscaleProviderLimitsOK ||
+			len(c.SchedulerAutoscaleProviderMaxSlots) == 0) {
+		warnings = append(
+			warnings,
+			"CONFIG: actuate mode requires valid SCHEDULER_AUTOSCALE_PROVIDER_MAX_SLOTS entries",
+		)
+	}
+	if c.SchedulerAutoscaleMinSlots < 0 ||
+		c.SchedulerAutoscaleMaxSlots < c.SchedulerAutoscaleMinSlots ||
+		c.SchedulerAutoscaleMaxSlots > 10000 ||
+		c.SchedulerAutoscaleTargetReady <= 0 ||
+		c.SchedulerAutoscaleTargetReady > 1000 {
+		warnings = append(
+			warnings,
+			"CONFIG: scheduler autoscale slot bounds or target are invalid",
+		)
+	}
+	if c.SchedulerAutoscaleCooldownSeconds < 0 ||
+		c.SchedulerAutoscaleCooldownSeconds > 86400 ||
+		c.SchedulerAutoscaleScaleDownSeconds < 0 ||
+		c.SchedulerAutoscaleScaleDownSeconds > 7*86400 ||
+		c.SchedulerAutoscaleIntervalSeconds < 5 ||
+		c.SchedulerAutoscaleIntervalSeconds > 3600 {
+		warnings = append(
+			warnings,
+			"CONFIG: scheduler autoscale timing is invalid",
+		)
+	}
+	return warnings
+}
+
+func (c *ServerConfig) workerGatewayTLSIncomplete() bool {
+	return c.WorkerGatewayAdvertiseURL == "" || c.WorkerGatewayTLSCert == "" ||
+		c.WorkerGatewayTLSKey == "" || c.WorkerGatewayServerCA == "" ||
+		c.WorkerGatewayClientCA == "" ||
+		c.WorkerGatewayIssuerID == "" || c.WorkerGatewayIssuerProvider == ""
 }
 
 // DashboardConfig represents the dashboard configuration.
 type DashboardConfig struct {
-	Port            int
-	ServerURL       string
-	ServerAPIKey    string // API key forwarded to the backend server (empty = none)
-	AuthEnabled     bool
-	JWTSecret       string
-	AdminUser       string // Username accepted by the login handler
-	AdminPassword   string // Password accepted by the login handler
-	TokenTTLMinutes int    // Issued-token lifetime in minutes
-	AllowAnonymous  bool
-	MetricsEnabled  bool
-	MetricsPort     string
-	MetricsPassword string
+	Port                  int
+	ServerURL             string
+	ServerAPIKey          string // API key forwarded to the backend server (empty = none)
+	ServerStepUpAPIKey    string // Separate high-risk-write key, forwarded only after local re-auth
+	AuthEnabled           bool
+	JWTSecret             string
+	AdminUser             string // Username accepted by the login handler
+	AdminPassword         string // Password accepted by the login handler
+	TokenTTLMinutes       int    // Issued-token lifetime in minutes
+	AllowAnonymous        bool
+	CookieSecure          bool // Mark dashboard session/flow cookies Secure behind an HTTPS proxy
+	OIDCEnabled           bool
+	OIDCIssuerURL         string
+	OIDCClientID          string
+	OIDCClientSecret      string
+	OIDCRedirectURL       string
+	OIDCAllowInsecureHTTP bool
+	IdentityProvidersPath string
+	IdentityProviders     []IdentityProviderConfig
+	MetricsEnabled        bool
+	MetricsPort           string
+	MetricsPassword       string
 }
 
 // Validate checks the dashboard configuration for common misconfigurations.
 // Returns an error if a critical security issue is found.
 func (c *DashboardConfig) Validate() error {
-	serverURL, err := url.Parse(c.ServerURL)
-	if err != nil || (serverURL.Scheme != "http" && serverURL.Scheme != "https") ||
-		serverURL.Host == "" || serverURL.User != nil || serverURL.RawQuery != "" ||
-		serverURL.Fragment != "" || (serverURL.Path != "" && serverURL.Path != "/") {
+	if !validHTTPOrigin(c.ServerURL) {
 		return fmt.Errorf("SERVER_URL must be an HTTP or HTTPS origin without credentials, path, query, or fragment")
 	}
-	if c.AuthEnabled {
-		for _, insecure := range insecureJWTSecrets {
-			if c.JWTSecret == insecure {
-				return fmt.Errorf(
-					"SECURITY: JWT_SECRET is set to a well-known insecure value %q. "+
-						"Please set a strong, unique secret (at least 32 characters) in your configuration",
-					c.JWTSecret,
-				)
+	providerLoginEnabled := c.OIDCEnabled || len(c.IdentityProviders) > 0
+	if providerLoginEnabled && !c.AuthEnabled {
+		return fmt.Errorf("identity provider login requires AUTH_ENABLED=true")
+	}
+	if !c.AuthEnabled {
+		return nil
+	}
+	if err := c.validateDashboardSession(); err != nil {
+		return err
+	}
+	if !c.AllowAnonymous && !providerLoginEnabled &&
+		(c.AdminUser == "" || c.AdminPassword == "") {
+		return fmt.Errorf(
+			"SECURITY: ALLOW_ANONYMOUS is false but ADMIN_USER/ADMIN_PASSWORD are not set; " +
+				"set credentials so operators can log in",
+		)
+	}
+	if len(c.IdentityProviders) > 0 {
+		for _, provider := range c.IdentityProviders {
+			if err := validateIdentityProvider(provider); err != nil {
+				return fmt.Errorf("identity provider %s: %w", provider.ID, err)
 			}
 		}
-		if len(c.JWTSecret) < 32 {
-			return fmt.Errorf(
-				"SECURITY: JWT_SECRET is too short (%d chars). Use at least 32 characters for security",
-				len(c.JWTSecret),
-			)
-		}
-		// When anonymous access is disabled, the login handler must be able to
-		// authenticate a real operator; otherwise the dashboard is unreachable.
-		if !c.AllowAnonymous {
-			if c.AdminUser == "" || c.AdminPassword == "" {
-				return fmt.Errorf(
-					"SECURITY: ALLOW_ANONYMOUS is false but ADMIN_USER/ADMIN_PASSWORD are not set; " +
-						"set credentials so operators can log in",
-				)
-			}
+		return nil
+	}
+	if c.OIDCEnabled {
+		return c.validateDashboardOIDC()
+	}
+	return nil
+}
+
+func validateIdentityProvider(provider IdentityProviderConfig) error {
+	if !identityProviderIDPattern.MatchString(provider.ID) {
+		return fmt.Errorf("id must match %s", identityProviderIDPattern)
+	}
+	if strings.TrimSpace(provider.DisplayName) == "" ||
+		len(strings.TrimSpace(provider.DisplayName)) > 80 {
+		return fmt.Errorf("display_name is required and must not exceed 80 characters")
+	}
+	if provider.ClientID == "" || provider.RedirectURL == "" {
+		return fmt.Errorf("client_id and redirect_url are required")
+	}
+	redirect, err := parseOIDCEndpoint(provider.RedirectURL)
+	if err != nil {
+		return fmt.Errorf("redirect_url must be an absolute HTTP(S) URL")
+	}
+	if !provider.AllowInsecureHTTP && insecureNonLoopback(redirect) {
+		return fmt.Errorf("HTTP redirect requires allow_insecure_http=true outside loopback")
+	}
+	switch provider.Type {
+	case "oidc":
+		return validateOIDCProvider(provider)
+	case "github":
+		return validateGitHubProvider(provider)
+	default:
+		return fmt.Errorf("type must be oidc or github")
+	}
+}
+
+func validateOIDCProvider(provider IdentityProviderConfig) error {
+	if provider.IssuerURL == "" || provider.Audience == "" {
+		return fmt.Errorf("OIDC requires issuer_url and audience")
+	}
+	issuer, err := parseOIDCEndpoint(provider.IssuerURL)
+	if err != nil {
+		return fmt.Errorf("issuer_url must be an absolute HTTP(S) URL")
+	}
+	if !provider.AllowInsecureHTTP && insecureNonLoopback(issuer) {
+		return fmt.Errorf("HTTP issuer requires allow_insecure_http=true outside loopback")
+	}
+	if provider.BackchannelLogout &&
+		(provider.BackchannelMaxAgeSeconds < 30 ||
+			provider.BackchannelMaxAgeSeconds > 900) {
+		return fmt.Errorf("backchannel_max_age_seconds must be in 30..900 when back-channel logout is enabled")
+	}
+	return nil
+}
+
+func validateGitHubProvider(provider IdentityProviderConfig) error {
+	if provider.BackchannelLogout {
+		return fmt.Errorf("GitHub OAuth does not support OIDC back-channel logout")
+	}
+	if provider.ClientSecret == "" {
+		return fmt.Errorf("GitHub requires a populated client_secret_env")
+	}
+	endpoints := []struct {
+		label string
+		raw   string
+	}{
+		{"authorization_url", provider.AuthorizationURL},
+		{"token_url", provider.TokenURL},
+		{"api_base_url", provider.APIBaseURL},
+	}
+	for _, endpoint := range endpoints {
+		if err := validateHTTPSEndpoint(endpoint.raw); err != nil {
+			return fmt.Errorf("%s %w", endpoint.label, err)
 		}
 	}
 	return nil
+}
+
+func validateHTTPSEndpoint(raw string) error {
+	if raw == "" {
+		return nil
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" ||
+		parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return fmt.Errorf("must be an absolute HTTPS URL without credentials, query, or fragment")
+	}
+	return nil
+}
+
+// Validate enforces the fail-closed protocol and transport contract for one
+// identity provider.
+func (provider IdentityProviderConfig) Validate() error {
+	return validateIdentityProvider(provider)
+}
+
+func validHTTPOrigin(raw string) bool {
+	parsed, err := url.Parse(raw)
+	return err == nil &&
+		(parsed.Scheme == "http" || parsed.Scheme == "https") &&
+		parsed.Host != "" && parsed.User == nil && parsed.RawQuery == "" &&
+		parsed.Fragment == "" && (parsed.Path == "" || parsed.Path == "/")
+}
+
+func (c *DashboardConfig) validateDashboardSession() error {
+	for _, insecure := range insecureJWTSecrets {
+		if c.JWTSecret == insecure {
+			return fmt.Errorf(
+				"SECURITY: JWT_SECRET is set to a well-known insecure value %q. "+
+					"Please set a strong, unique secret (at least 32 characters) in your configuration",
+				c.JWTSecret,
+			)
+		}
+	}
+	if len(c.JWTSecret) < 32 {
+		return fmt.Errorf(
+			"SECURITY: JWT_SECRET is too short (%d chars). Use at least 32 characters for security",
+			len(c.JWTSecret),
+		)
+	}
+	return nil
+}
+
+func (c *DashboardConfig) validateDashboardOIDC() error {
+	if c.OIDCIssuerURL == "" || c.OIDCClientID == "" || c.OIDCRedirectURL == "" {
+		return fmt.Errorf("OIDC dashboard login requires OIDC_ISSUER_URL, OIDC_CLIENT_ID, and OIDC_REDIRECT_URL")
+	}
+	issuer, err := parseOIDCEndpoint(c.OIDCIssuerURL)
+	if err != nil {
+		return fmt.Errorf("OIDC_ISSUER_URL must be an absolute HTTP(S) URL without credentials, query, or fragment")
+	}
+	redirect, err := parseOIDCEndpoint(c.OIDCRedirectURL)
+	if err != nil {
+		return fmt.Errorf("OIDC_REDIRECT_URL must be an absolute HTTP(S) URL")
+	}
+	if !c.OIDCAllowInsecureHTTP && insecureNonLoopback(issuer) {
+		return fmt.Errorf("HTTP OIDC issuer requires OIDC_ALLOW_INSECURE_HTTP=true outside loopback")
+	}
+	if !c.OIDCAllowInsecureHTTP && insecureNonLoopback(redirect) {
+		return fmt.Errorf("HTTP OIDC redirect requires OIDC_ALLOW_INSECURE_HTTP=true outside loopback")
+	}
+	if redirect.Scheme == "https" && !c.CookieSecure {
+		return fmt.Errorf("HTTPS OIDC redirect requires COOKIE_SECURE=true")
+	}
+	return nil
+}
+
+func parseOIDCEndpoint(raw string) (*url.URL, error) {
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Host == "" ||
+		(parsed.Scheme != "https" && parsed.Scheme != "http") ||
+		parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return nil, fmt.Errorf("invalid OIDC endpoint")
+	}
+	return parsed, nil
+}
+
+func insecureNonLoopback(endpoint *url.URL) bool {
+	return endpoint.Scheme == "http" &&
+		endpoint.Hostname() != "127.0.0.1" && endpoint.Hostname() != "localhost"
 }
 
 // BuilderConfig represents the builder configuration.
@@ -282,11 +818,16 @@ type BuilderConfig struct {
 	ServerAPIKey string
 	// AdvertiseURL is the URL this builder registers with the server (how the
 	// server reaches it). Defaults to http://<hostname>:<port>.
-	AdvertiseURL    string
-	NotifyConfig    string
-	MetricsEnabled  bool
-	MetricsPort     string
-	MetricsPassword string
+	AdvertiseURL     string
+	PullEnabled      bool
+	WorkerGatewayURL string
+	WorkerTLSCert    string
+	WorkerTLSKey     string
+	WorkerTLSCA      string
+	NotifyConfig     string
+	MetricsEnabled   bool
+	MetricsPort      string
+	MetricsPassword  string
 
 	// Portage mirror settings.
 	SyncMirror      string // Mirror URL for portage sync (rsync or git)
@@ -305,11 +846,15 @@ func (c *BuilderConfig) Validate() []string {
 	if c.Workers <= 0 {
 		warnings = append(warnings, "CONFIG: BUILDER_WORKERS must be > 0")
 	}
-	if c.Port <= 0 || c.Port > 65535 {
+	if !c.PullEnabled && (c.Port <= 0 || c.Port > 65535) {
 		warnings = append(warnings, fmt.Sprintf("CONFIG: BUILDER_PORT %d is invalid, must be 1-65535", c.Port))
 	}
-	if c.AuthToken == "" {
+	if !c.PullEnabled && c.AuthToken == "" {
 		warnings = append(warnings, "SECURITY: BUILDER_TOKEN is not set — the build endpoint is unauthenticated and allows arbitrary remote builds")
+	}
+	if c.PullEnabled && (c.WorkerGatewayURL == "" || c.WorkerTLSCert == "" ||
+		c.WorkerTLSKey == "" || c.WorkerTLSCA == "") {
+		warnings = append(warnings, "CONFIG: pull mode requires WORKER_GATEWAY_URL and worker TLS cert/key/CA paths")
 	}
 	switch c.NativeJobPolicy {
 	case "", "single-use":
@@ -343,6 +888,8 @@ func unquoteEnvValue(v string) string {
 
 // loadEnvFile loads key=value pairs from a .conf file.
 func loadEnvFile(path string) (map[string]string, error) {
+	// #nosec G304 -- the operator explicitly supplies the config path on the
+	// local command line; it is not derived from an HTTP request or tenant.
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -413,17 +960,34 @@ func getEnvBool(env map[string]string, key string, defaultValue bool) bool {
 func LoadServerConfig(path string) (*ServerConfig, error) {
 	// Set defaults
 	config := &ServerConfig{
-		Port:            8080,
-		BinpkgPath:      "/var/cache/binpkgs",
-		MaxWorkers:      5,
-		BuildMode:       "remote",
-		StorageType:     "local",
-		StorageLocalDir: "/var/cache/binpkgs",
-		GPGEnabled:      false,
-		CloudProvider:   "gcp",
-		CloudGCPProject: "portage-engine",
-		CloudGCPRegion:  "us-central1",
-		CloudGCPZone:    "us-central1-a",
+		Port:                               8080,
+		RuntimeRole:                        "control-plane",
+		BinpkgPath:                         "/var/cache/binpkgs",
+		MaxWorkers:                         5,
+		BuildMode:                          "remote",
+		StorageType:                        "local",
+		StorageLocalDir:                    "/var/cache/binpkgs",
+		GPGEnabled:                         false,
+		CloudProvider:                      "gcp",
+		CloudGCPProject:                    "portage-engine",
+		CloudGCPRegion:                     "us-central1",
+		CloudGCPZone:                       "us-central1-a",
+		WorkerGatewayPort:                  9443,
+		WorkerGatewayIssuerID:              "portage-engine-local",
+		WorkerGatewayIssuerProvider:        "file",
+		WorkerGatewayVaultMount:            "pki",
+		WorkerGatewayVaultRole:             "portage-worker",
+		WorkerGatewayVaultTimeout:          15,
+		WorkerCertificateTTLMin:            180,
+		ExecutorZones:                      []string{"default"},
+		SchedulerAutoscaleMode:             "observe",
+		SchedulerAutoscaleMinSlots:         1,
+		SchedulerAutoscaleMaxSlots:         64,
+		SchedulerAutoscaleTargetReady:      2,
+		SchedulerAutoscaleCooldownSeconds:  60,
+		SchedulerAutoscaleScaleDownSeconds: 600,
+		SchedulerAutoscaleIntervalSeconds:  15,
+		SchedulerAutoscaleProviderLimitsOK: true,
 	}
 
 	// If the config file is missing, still honor environment variables (the
@@ -441,6 +1005,9 @@ func LoadServerConfig(path string) (*ServerConfig, error) {
 
 	config.Port = getEnvInt(env, "SERVER_PORT", config.Port)
 	config.ControlPlaneID = getEnvString(env, "CONTROL_PLANE_ID", "")
+	config.RuntimeRole = strings.ToLower(getEnvString(
+		env, "SERVER_RUNTIME_ROLE", config.RuntimeRole,
+	))
 	config.BinpkgPath = getEnvString(env, "BINPKG_PATH", config.BinpkgPath)
 	config.MaxWorkers = getEnvInt(env, "MAX_WORKERS", config.MaxWorkers)
 	config.BuildMode = getEnvString(env, "BUILD_MODE", config.BuildMode)
@@ -539,12 +1106,97 @@ func LoadServerConfig(path string) (*ServerConfig, error) {
 
 	// Security settings
 	config.APIKey = getEnvString(env, "API_KEY", "")
+	config.StepUpAPIKey = getEnvString(env, "STEP_UP_API_KEY", "")
+	config.AuthMode = strings.ToLower(getEnvString(env, "AUTH_MODE", "legacy"))
+	config.OIDCIssuerURL = getEnvString(env, "OIDC_ISSUER_URL", "")
+	config.OIDCAudience = getEnvString(env, "OIDC_AUDIENCE", "")
+	config.OIDCAdminSubjects = getEnvStringSlice(env, "OIDC_ADMIN_SUBJECTS", nil)
+	config.OIDCAllowInsecureHTTP = getEnvBool(env, "OIDC_ALLOW_INSECURE_HTTP", false)
+	config.OIDCSessionIdleMinutes = getEnvInt(env, "OIDC_SESSION_IDLE_MINUTES", 60)
+	config.OIDCSessionMaxMinutes = getEnvInt(env, "OIDC_SESSION_MAX_MINUTES", 720)
+	config.OIDCStepUpMaxAgeMin = getEnvInt(env, "OIDC_STEP_UP_MAX_AGE_MINUTES", 10)
+	config.OIDCStepUpAMRValues = getEnvStringSlice(env, "OIDC_STEP_UP_AMR_VALUES", nil)
+	config.OIDCStepUpACRValues = getEnvStringSlice(env, "OIDC_STEP_UP_ACR_VALUES", nil)
+	config.IdentityProvidersPath = getEnvString(env, "AUTH_PROVIDERS_PATH", "")
+	config.IdentityAdminSubjects = getEnvStringSlice(env, "AUTH_ADMIN_IDENTITIES", nil)
+	if config.IdentityProvidersPath != "" {
+		providers, err := loadIdentityProviders(config.IdentityProvidersPath, path)
+		if err != nil {
+			return nil, err
+		}
+		config.IdentityProviders = providers
+	}
 	config.BuilderToken = getEnvString(env, "BUILDER_TOKEN", "")
 	config.CORSAllowedOrigins = getEnvStringSlice(env, "CORS_ALLOWED_ORIGINS", nil)
 	config.MaxRequestBodyBytes = int64(getEnvInt(env, "MAX_REQUEST_BODY_BYTES", 10*1024*1024)) // Default 10MB
 	config.DataDir = getEnvString(env, "DATA_DIR", "/var/lib/portage-engine/server")
 	config.CatalogPath = getEnvString(env, "CATALOG_PATH", "")
 	config.ImageFactoryStatusPath = getEnvString(env, "IMAGE_FACTORY_STATUS_PATH", "")
+	config.WorkerGatewayEnabled = getEnvBool(env, "WORKER_GATEWAY_ENABLED", false)
+	config.WorkerGatewayPort = getEnvInt(env, "WORKER_GATEWAY_PORT", config.WorkerGatewayPort)
+	config.WorkerGatewayAdvertiseURL = getEnvString(env, "WORKER_GATEWAY_ADVERTISE_URL", "")
+	config.WorkerGatewayTLSCert = getEnvString(env, "WORKER_GATEWAY_TLS_CERT", "")
+	config.WorkerGatewayTLSKey = getEnvString(env, "WORKER_GATEWAY_TLS_KEY", "")
+	config.WorkerGatewayServerCA = getEnvString(env, "WORKER_GATEWAY_SERVER_CA", "")
+	config.WorkerGatewayClientCA = getEnvString(env, "WORKER_GATEWAY_CLIENT_CA", "")
+	config.WorkerGatewayIssuerID = getEnvString(
+		env, "WORKER_GATEWAY_ISSUER_ID", config.WorkerGatewayIssuerID,
+	)
+	config.WorkerGatewayIssuerProvider = strings.ToLower(getEnvString(
+		env, "WORKER_GATEWAY_ISSUER_PROVIDER", config.WorkerGatewayIssuerProvider,
+	))
+	config.WorkerGatewayIssuerCert = getEnvString(env, "WORKER_GATEWAY_ISSUER_CERT", "")
+	config.WorkerGatewayIssuerKey = getEnvString(env, "WORKER_GATEWAY_ISSUER_KEY", "")
+	config.WorkerGatewayVaultAddress = getEnvString(env, "WORKER_GATEWAY_VAULT_ADDRESS", "")
+	config.WorkerGatewayVaultMount = getEnvString(
+		env, "WORKER_GATEWAY_VAULT_MOUNT", config.WorkerGatewayVaultMount,
+	)
+	config.WorkerGatewayVaultRole = getEnvString(
+		env, "WORKER_GATEWAY_VAULT_ROLE", config.WorkerGatewayVaultRole,
+	)
+	config.WorkerGatewayVaultTokenPath = getEnvString(env, "WORKER_GATEWAY_VAULT_TOKEN_FILE", "")
+	config.WorkerGatewayVaultNamespace = getEnvString(env, "WORKER_GATEWAY_VAULT_NAMESPACE", "")
+	config.WorkerGatewayVaultServerCA = getEnvString(env, "WORKER_GATEWAY_VAULT_SERVER_CA", "")
+	config.WorkerGatewayVaultTimeout = getEnvInt(
+		env, "WORKER_GATEWAY_VAULT_TIMEOUT_SECONDS",
+		config.WorkerGatewayVaultTimeout,
+	)
+	config.WorkerCertificateTTLMin = getEnvInt(env, "WORKER_CERTIFICATE_TTL_MINUTES", config.WorkerCertificateTTLMin)
+	config.PhaseExecutorMode = strings.ToLower(getEnvString(env, "PHASE_EXECUTOR_MODE", "shadow"))
+	config.ExecutorZones = getEnvStringSlice(env, "EXECUTOR_ZONES", config.ExecutorZones)
+	config.ExecutorCapabilities = getEnvStringSlice(env, "EXECUTOR_CAPABILITIES", nil)
+	config.ExecutorCapacityInstanceID = getEnvString(
+		env, "EXECUTOR_CAPACITY_INSTANCE_ID", "",
+	)
+	config.SchedulerAutoscaleMode = strings.ToLower(getEnvString(
+		env, "SCHEDULER_AUTOSCALE_MODE", config.SchedulerAutoscaleMode,
+	))
+	config.SchedulerAutoscaleMinSlots = getEnvInt(
+		env, "SCHEDULER_AUTOSCALE_MIN_SLOTS", config.SchedulerAutoscaleMinSlots,
+	)
+	config.SchedulerAutoscaleMaxSlots = getEnvInt(
+		env, "SCHEDULER_AUTOSCALE_MAX_SLOTS", config.SchedulerAutoscaleMaxSlots,
+	)
+	config.SchedulerAutoscaleTargetReady = getEnvInt(
+		env, "SCHEDULER_AUTOSCALE_TARGET_READY_PER_SLOT",
+		config.SchedulerAutoscaleTargetReady,
+	)
+	config.SchedulerAutoscaleCooldownSeconds = getEnvInt(
+		env, "SCHEDULER_AUTOSCALE_COOLDOWN_SECONDS",
+		config.SchedulerAutoscaleCooldownSeconds,
+	)
+	config.SchedulerAutoscaleScaleDownSeconds = getEnvInt(
+		env, "SCHEDULER_AUTOSCALE_SCALE_DOWN_SECONDS",
+		config.SchedulerAutoscaleScaleDownSeconds,
+	)
+	config.SchedulerAutoscaleIntervalSeconds = getEnvInt(
+		env, "SCHEDULER_AUTOSCALE_INTERVAL_SECONDS",
+		config.SchedulerAutoscaleIntervalSeconds,
+	)
+	config.SchedulerAutoscaleProviderMaxSlots,
+		config.SchedulerAutoscaleProviderLimitsOK = parseProviderSlotLimits(
+		getEnvString(env, "SCHEDULER_AUTOSCALE_PROVIDER_MAX_SLOTS", ""),
+	)
 	config.Database.Enabled = getEnvBool(env, "DATABASE_ENABLED", false)
 	config.Database.Required = getEnvBool(env, "DATABASE_REQUIRED", false)
 	if config.Database.Required {
@@ -605,18 +1257,99 @@ func LoadDashboardConfig(path string) (*DashboardConfig, error) {
 	config.Port = getEnvInt(env, "DASHBOARD_PORT", config.Port)
 	config.ServerURL = getEnvString(env, "SERVER_URL", config.ServerURL)
 	config.ServerAPIKey = getEnvString(env, "SERVER_API_KEY", "")
+	config.ServerStepUpAPIKey = getEnvString(env, "SERVER_STEP_UP_API_KEY", "")
 	config.AuthEnabled = getEnvBool(env, "AUTH_ENABLED", config.AuthEnabled)
 	config.JWTSecret = getEnvString(env, "JWT_SECRET", config.JWTSecret)
 	config.AdminUser = getEnvString(env, "ADMIN_USER", "")
 	config.AdminPassword = getEnvString(env, "ADMIN_PASSWORD", "")
 	config.TokenTTLMinutes = getEnvInt(env, "TOKEN_TTL_MINUTES", 720)
 	config.AllowAnonymous = getEnvBool(env, "ALLOW_ANONYMOUS", config.AllowAnonymous)
+	config.CookieSecure = getEnvBool(env, "COOKIE_SECURE", false)
+	config.OIDCEnabled = getEnvBool(env, "OIDC_ENABLED", false)
+	config.OIDCIssuerURL = getEnvString(env, "OIDC_ISSUER_URL", "")
+	config.OIDCClientID = getEnvString(env, "OIDC_CLIENT_ID", "")
+	config.OIDCClientSecret = getEnvString(env, "OIDC_CLIENT_SECRET", "")
+	config.OIDCRedirectURL = getEnvString(env, "OIDC_REDIRECT_URL", "")
+	config.OIDCAllowInsecureHTTP = getEnvBool(env, "OIDC_ALLOW_INSECURE_HTTP", false)
+	config.IdentityProvidersPath = getEnvString(env, "AUTH_PROVIDERS_PATH", "")
+	if config.IdentityProvidersPath != "" {
+		providers, err := loadIdentityProviders(config.IdentityProvidersPath, path)
+		if err != nil {
+			return nil, err
+		}
+		config.IdentityProviders = providers
+	}
 
 	config.MetricsEnabled = getEnvBool(env, "METRICS_ENABLED", false)
 	config.MetricsPort = getEnvString(env, "METRICS_PORT", "2112")
 	config.MetricsPassword = getEnvString(env, "METRICS_PASSWORD", "")
 
 	return config, nil
+}
+
+func loadIdentityProviders(rawPath, configPath string) ([]IdentityProviderConfig, error) {
+	resolved := rawPath
+	if !filepath.IsAbs(resolved) {
+		base := filepath.Dir(configPath)
+		if base == "." && configPath == "" {
+			base = "."
+		}
+		resolved = filepath.Join(base, resolved)
+	}
+	// #nosec G304 -- the deployment operator explicitly selects this config file.
+	data, err := os.ReadFile(resolved)
+	if err != nil {
+		return nil, fmt.Errorf("read AUTH_PROVIDERS_PATH: %w", err)
+	}
+	var document identityProviderDocument
+	decoder := json.NewDecoder(strings.NewReader(string(data)))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&document); err != nil {
+		return nil, fmt.Errorf("decode AUTH_PROVIDERS_PATH: %w", err)
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return nil, fmt.Errorf("decode AUTH_PROVIDERS_PATH: trailing JSON content")
+	}
+	if len(document.Providers) == 0 || len(document.Providers) > 32 {
+		return nil, fmt.Errorf("AUTH_PROVIDERS_PATH must define 1..32 providers")
+	}
+	seen := make(map[string]struct{}, len(document.Providers))
+	for index := range document.Providers {
+		provider := &document.Providers[index]
+		provider.ID = strings.TrimSpace(provider.ID)
+		provider.Type = strings.ToLower(strings.TrimSpace(provider.Type))
+		provider.DisplayName = strings.TrimSpace(provider.DisplayName)
+		provider.IssuerURL = strings.TrimRight(strings.TrimSpace(provider.IssuerURL), "/")
+		provider.Audience = strings.TrimSpace(provider.Audience)
+		provider.ClientID = strings.TrimSpace(provider.ClientID)
+		provider.ClientSecretEnv = strings.TrimSpace(provider.ClientSecretEnv)
+		provider.RedirectURL = strings.TrimSpace(provider.RedirectURL)
+		provider.AuthorizationURL = strings.TrimSpace(provider.AuthorizationURL)
+		provider.TokenURL = strings.TrimSpace(provider.TokenURL)
+		provider.APIBaseURL = strings.TrimRight(strings.TrimSpace(provider.APIBaseURL), "/")
+		if provider.BackchannelLogout && provider.BackchannelMaxAgeSeconds == 0 {
+			provider.BackchannelMaxAgeSeconds = 300
+		}
+		if _, exists := seen[provider.ID]; exists {
+			return nil, fmt.Errorf("AUTH_PROVIDERS_PATH contains duplicate provider id %q", provider.ID)
+		}
+		seen[provider.ID] = struct{}{}
+		if provider.ClientSecretEnv != "" {
+			provider.ClientSecret = os.Getenv(provider.ClientSecretEnv)
+		}
+		if provider.Type == "github" {
+			if provider.AuthorizationURL == "" {
+				provider.AuthorizationURL = "https://github.com/login/oauth/authorize"
+			}
+			if provider.TokenURL == "" {
+				provider.TokenURL = "https://github.com/login/oauth/access_token"
+			}
+			if provider.APIBaseURL == "" {
+				provider.APIBaseURL = "https://api.github.com"
+			}
+		}
+	}
+	return document.Providers, nil
 }
 
 // LoadBuilderConfig loads builder configuration from a file.
@@ -680,6 +1413,11 @@ func LoadBuilderConfig(path string) (*BuilderConfig, error) {
 	config.ServerURL = getEnvString(env, "SERVER_URL", "")
 	config.ServerAPIKey = getEnvString(env, "SERVER_API_KEY", "")
 	config.AdvertiseURL = getEnvString(env, "BUILDER_ADVERTISE_URL", "")
+	config.PullEnabled = getEnvBool(env, "WORKER_PULL_ENABLED", false)
+	config.WorkerGatewayURL = getEnvString(env, "WORKER_GATEWAY_URL", "")
+	config.WorkerTLSCert = getEnvString(env, "WORKER_TLS_CERT", "")
+	config.WorkerTLSKey = getEnvString(env, "WORKER_TLS_KEY", "")
+	config.WorkerTLSCA = getEnvString(env, "WORKER_TLS_CA", "")
 	config.NotifyConfig = getEnvString(env, "NOTIFY_CONFIG", "")
 
 	// Portage mirror settings
@@ -717,4 +1455,29 @@ func getEnvStringSlice(env map[string]string, key string, defaultValue []string)
 		return defaultValue
 	}
 	return result
+}
+
+func parseProviderSlotLimits(raw string) (map[string]int, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, true
+	}
+	limits := make(map[string]int)
+	for _, entry := range strings.Split(raw, ",") {
+		parts := strings.SplitN(strings.TrimSpace(entry), ":", 2)
+		if len(parts) != 2 {
+			return nil, false
+		}
+		provider := strings.ToLower(strings.TrimSpace(parts[0]))
+		limit, err := strconv.Atoi(strings.TrimSpace(parts[1]))
+		if err != nil || !autoscaleProviderPattern.MatchString(provider) ||
+			limit <= 0 || limit > 10000 {
+			return nil, false
+		}
+		if _, duplicate := limits[provider]; duplicate {
+			return nil, false
+		}
+		limits[provider] = limit
+	}
+	return limits, len(limits) > 0
 }

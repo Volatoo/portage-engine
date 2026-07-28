@@ -30,13 +30,14 @@ type Artifact struct {
 
 // Request binds a job attempt to exact unsigned artifacts for signing.
 type Request struct {
-	JobID        string     `json:"job_id"`
-	AttemptID    string     `json:"attempt_id"`
-	AttemptFence int64      `json:"attempt_fence"`
-	LeaseOwner   string     `json:"-"`
-	SourceToken  string     `json:"source_token"`
-	Architecture string     `json:"architecture"`
-	Artifacts    []Artifact `json:"artifacts"`
+	JobID          string     `json:"job_id"`
+	AttemptID      string     `json:"attempt_id"`
+	AttemptFence   int64      `json:"attempt_fence"`
+	LeaseOwner     string     `json:"-"`
+	SourceToken    string     `json:"source_token"`
+	Architecture   string     `json:"architecture"`
+	MaxOutputBytes int64      `json:"max_output_bytes"`
+	Artifacts      []Artifact `json:"artifacts"`
 }
 
 // Task is a leased, durable signing queue item.
@@ -48,6 +49,7 @@ type Task struct {
 	State          string     `json:"state"`
 	SourceToken    string     `json:"source_token"`
 	Architecture   string     `json:"architecture"`
+	MaxOutputBytes int64      `json:"max_output_bytes"`
 	Artifacts      []Artifact `json:"artifacts"`
 	SigningKeyID   string     `json:"signing_key_id,omitempty"`
 	Owner          string     `json:"owner,omitempty"`
@@ -112,7 +114,8 @@ func ValidateRequest(req Request) error {
 	if !tokenPattern.MatchString(req.SourceToken) {
 		return fmt.Errorf("signing request source token is invalid")
 	}
-	if req.Architecture == "" || len(req.Artifacts) == 0 || len(req.Artifacts) > 256 {
+	if req.Architecture == "" || req.MaxOutputBytes <= 0 ||
+		len(req.Artifacts) == 0 || len(req.Artifacts) > 256 {
 		return fmt.Errorf("signing request requires architecture and 1..256 artifacts")
 	}
 	seen := make(map[string]struct{}, len(req.Artifacts))

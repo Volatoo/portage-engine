@@ -311,6 +311,7 @@ func TestPVEProvisioner_GenerateMainTF(t *testing.T) {
 		`cloudinit {`,
 		`id     = 0`,
 		`bridge = "vmbr0"`,
+		`firewall = true`,
 		`ipconfig0 = "ip=dhcp"`,
 		`tags = "portage-builder,test"`,
 		`output "instance_name"`,
@@ -334,6 +335,26 @@ func TestPVEProvisioner_GenerateMainTF(t *testing.T) {
 	// proxmox provider reads credentials from PM_* environment variables.
 	if strings.Contains(tf, "secret-token") {
 		t.Error("token secret leaked as a plaintext literal in generated TF")
+	}
+}
+
+func TestPVEProvisioner_EnforcedVMStartsStopped(t *testing.T) {
+	t.Parallel()
+	provisioner, err := NewPVEProvisioner(&PVEConfig{
+		Endpoint: "https://pve.example.internal", Node: "pve01", Storage: "local-lvm",
+		Network: "vmbr0", Template: "gentoo", TokenID: "test@pve!builder", TokenSecret: "secret",
+		StateDir: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := DefaultPVEInstanceSpec()
+	spec.StartStopped = true
+	tf := provisioner.GenerateMainTF(spec, "egress-test")
+	for _, expected := range []string{`vm_state              = "stopped"`, `define_connection_info = false`, `firewall = true`} {
+		if !strings.Contains(tf, expected) {
+			t.Fatalf("enforced VM Terraform is missing %q", expected)
+		}
 	}
 }
 

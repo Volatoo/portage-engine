@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -55,11 +57,15 @@ type JobRepository struct {
 	stats     JobLedgerStatus
 	workerMu  sync.Mutex
 	workerIDs map[string]cachedWorker
+	monitorMu sync.Mutex
+	monitorAt time.Time
+	monitor   builder.TargetHistoryStatus
 }
 
 type cachedWorker struct {
-	ID        uuid.UUID
-	Heartbeat time.Time
+	ID              uuid.UUID
+	Heartbeat       time.Time
+	CapabilitiesKey string
 }
 
 // NewJobRepository creates a shadow job ledger on an initialized DB-1 schema.
@@ -71,6 +77,8 @@ func NewJobRepository(db *Database) *JobRepository {
 }
 
 type storedBuildRequest struct {
+	ProjectID       string                        `json:"project_id,omitempty"`
+	RequestedBy     string                        `json:"requested_by,omitempty"`
 	PackageName     string                        `json:"package_name"`
 	Version         string                        `json:"version"`
 	Arch            string                        `json:"arch"`
@@ -90,6 +98,7 @@ func requestDocument(req *builder.BuildRequest) ([]byte, string, error) {
 		return nil, "", fmt.Errorf("nil build request")
 	}
 	doc := storedBuildRequest{
+		ProjectID: req.ProjectID, RequestedBy: req.RequestedBy,
 		PackageName: req.PackageName, Version: req.Version, Arch: req.Arch,
 		UseFlags: append([]string(nil), req.UseFlags...), CloudProvider: req.CloudProvider,
 		ProfileID: req.ProfileID, RepositoryIDs: append([]string(nil), req.RepositoryIDs...),
@@ -117,6 +126,7 @@ func requestDocument(req *builder.BuildRequest) ([]byte, string, error) {
 			delete(metadata, "created_at")
 		}
 	}
+	delete(digestDoc, "requested_by")
 	digestData, err := json.Marshal(digestDoc)
 	if err != nil {
 		return nil, "", fmt.Errorf("marshal build request digest: %w", err)
@@ -126,6 +136,8 @@ func requestDocument(req *builder.BuildRequest) ([]byte, string, error) {
 
 type storedJobStatus struct {
 	JobID           string                        `json:"job_id"`
+	ProjectID       string                        `json:"project_id,omitempty"`
+	RequestedBy     string                        `json:"requested_by,omitempty"`
 	Status          string                        `json:"status"`
 	PackageName     string                        `json:"package_name"`
 	Version         string                        `json:"version"`
@@ -151,7 +163,8 @@ func statusDocument(status *builder.BuildStatus) ([]byte, string, error) {
 		errorText = errorText[:maxLedgerErrorBytes] + "\n[... error truncated in ledger ...]"
 	}
 	doc := storedJobStatus{
-		JobID: status.JobID, Status: status.Status, PackageName: status.PackageName,
+		JobID: status.JobID, ProjectID: status.ProjectID, RequestedBy: status.RequestedBy,
+		Status: status.Status, PackageName: status.PackageName,
 		Version: status.Version, Arch: status.Arch, CreatedAt: status.CreatedAt,
 		UpdatedAt: status.UpdatedAt, InstanceID: status.InstanceID, Error: errorText,
 		ArtifactPath: status.ArtifactPath, ArtifactURL: status.ArtifactURL,
@@ -187,32 +200,74 @@ func (r *JobRepository) createJob(ctx context.Context, req *builder.BuildRequest
 	if err != nil {
 		return builder.LedgerCreateResult{}, err
 	}
+	requirements, err := builder.PhaseCapabilityRequirements(req, "provision")
+	if err != nil {
+		return builder.LedgerCreateResult{}, err
+	}
+	requirementsJSON, err := json.Marshal(requirements)
+	if err != nil {
+		return builder.LedgerCreateResult{}, fmt.Errorf("marshal scheduler requirements: %w", err)
+	}
 	result := builder.LedgerCreateResult{}
 	err = r.db.WithTx(ctx, pgx.TxOptions{}, func(q Querier) error {
+		projectID, err := resolveJobProject(ctx, q, req.ProjectID)
+		if err != nil {
+			return err
+		}
+		existing, found, err := prepareJobCreation(
+			ctx, q, projectID, req, requestDigest, source,
+		)
+		if err != nil {
+			return err
+		}
+		if found {
+			result = existing
+			return nil
+		}
+
 		var insertedID uuid.UUID
 		query := `
 			INSERT INTO build_jobs (
-				id, idempotency_key, package_atom, state, request, request_digest,
-				status_snapshot, status_digest, source, created_at, updated_at
-			) VALUES ($1, NULLIF($2, ''), $3, $4, $5::jsonb, $6, $7::jsonb, $8, $9, $10, $11)
+				id, project_id, requested_by_subject_id, idempotency_key,
+				package_atom, state, request, request_digest,
+				status_snapshot, status_digest, source, created_at, updated_at,
+				minimum_executor_protocol, required_capabilities
+			) VALUES (
+				$1,
+				$2::uuid,
+				NULLIF($3, '')::uuid, NULLIF($4, ''), $5, $6, $7::jsonb, $8,
+				$9::jsonb, $10, $11,
+				CASE WHEN $11 = 'api' THEN clock_timestamp() ELSE $12 END,
+				$13, $14, $15::jsonb
+			)
 			RETURNING id
 		`
 		if req.IdempotencyKey != "" {
 			query = `
 				INSERT INTO build_jobs (
-					id, idempotency_key, package_atom, state, request, request_digest,
-					status_snapshot, status_digest, source, created_at, updated_at
-				) VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7::jsonb, $8, $9, $10, $11)
-				ON CONFLICT (idempotency_key)
-					WHERE project_id IS NULL AND idempotency_key IS NOT NULL
+					id, project_id, requested_by_subject_id, idempotency_key,
+					package_atom, state, request, request_digest,
+					status_snapshot, status_digest, source, created_at, updated_at,
+					minimum_executor_protocol, required_capabilities
+				) VALUES (
+					$1,
+					$2::uuid,
+					NULLIF($3, '')::uuid, $4, $5, $6, $7::jsonb, $8,
+					$9::jsonb, $10, $11,
+					CASE WHEN $11 = 'api' THEN clock_timestamp() ELSE $12 END,
+					$13, $14, $15::jsonb
+				)
+				ON CONFLICT (project_id, idempotency_key)
 				DO NOTHING
 				RETURNING id
 			`
 		}
-		err := q.QueryRow(ctx, query,
-			status.JobID, req.IdempotencyKey, req.PackageName, status.Status,
+		err = q.QueryRow(ctx, query,
+			status.JobID, projectID, req.RequestedBy, req.IdempotencyKey,
+			req.PackageName, status.Status,
 			string(requestJSON), requestDigest, string(statusJSON), statusDigest,
-			source, status.CreatedAt, status.UpdatedAt,
+			source, status.CreatedAt, status.UpdatedAt, builder.ExecutorProtocolVersion,
+			string(requirementsJSON),
 		).Scan(&insertedID)
 		if err == nil {
 			result = builder.LedgerCreateResult{JobID: insertedID.String(), Status: status, Created: true}
@@ -230,29 +285,333 @@ func (r *JobRepository) createJob(ctx context.Context, req *builder.BuildRequest
 			return fmt.Errorf("insert job ledger row: %w", err)
 		}
 
-		var existingID uuid.UUID
-		var existingRequestDigest string
-		var existingStatusJSON []byte
-		if err := q.QueryRow(ctx, `
-			SELECT id, request_digest, status_snapshot
-			FROM build_jobs
-			WHERE project_id IS NULL AND idempotency_key = $1
-		`, req.IdempotencyKey).Scan(&existingID, &existingRequestDigest, &existingStatusJSON); err != nil {
-			return fmt.Errorf("read idempotent job: %w", err)
+		found, existing, err = loadIdempotentJob(
+			ctx, q, projectID, req.IdempotencyKey, requestDigest,
+		)
+		if err != nil {
+			return err
 		}
-		if existingRequestDigest != requestDigest {
-			return builder.NewIdempotencyConflictError(
-				fmt.Errorf("idempotency key already belongs to a different build request"),
-			)
+		if !found {
+			return fmt.Errorf("idempotency conflict did not return an existing job")
 		}
-		var existingStatus builder.BuildStatus
-		if err := json.Unmarshal(existingStatusJSON, &existingStatus); err != nil {
-			return fmt.Errorf("decode idempotent job status: %w", err)
-		}
-		result = builder.LedgerCreateResult{JobID: existingID.String(), Status: &existingStatus, Created: false}
+		result = existing
 		return nil
 	})
 	return result, err
+}
+
+func prepareJobCreation(
+	ctx context.Context,
+	q Querier,
+	projectID string,
+	req *builder.BuildRequest,
+	requestDigest string,
+	source string,
+) (builder.LedgerCreateResult, bool, error) {
+	if req.IdempotencyKey != "" {
+		found, existing, err := loadIdempotentJob(
+			ctx, q, projectID, req.IdempotencyKey, requestDigest,
+		)
+		if err != nil || found {
+			return existing, found, err
+		}
+	}
+	if source != "api" {
+		return builder.LedgerCreateResult{}, false, nil
+	}
+	policy, err := lockSubmissionPolicy(ctx, q, projectID)
+	if err != nil {
+		return builder.LedgerCreateResult{}, false, err
+	}
+	// Another replica may have inserted the same key while this transaction
+	// waited for the project policy lock.
+	if req.IdempotencyKey != "" {
+		found, existing, err := loadIdempotentJob(
+			ctx, q, projectID, req.IdempotencyKey, requestDigest,
+		)
+		if err != nil || found {
+			return existing, found, err
+		}
+	}
+	if err := checkSubmissionAdmission(ctx, q, projectID, policy, req); err != nil {
+		return builder.LedgerCreateResult{}, false, err
+	}
+	return builder.LedgerCreateResult{}, false, nil
+}
+
+func resolveJobProject(ctx context.Context, q Querier, requested string) (string, error) {
+	var projectID string
+	if strings.TrimSpace(requested) == "" {
+		err := q.QueryRow(ctx, `
+			SELECT id::text FROM projects WHERE name = $1
+		`, DefaultProjectName).Scan(&projectID)
+		if err != nil {
+			return "", fmt.Errorf("resolve default project: %w", err)
+		}
+		return projectID, nil
+	}
+	if err := q.QueryRow(ctx, `
+		SELECT id::text FROM projects WHERE id = $1
+	`, requested).Scan(&projectID); err != nil {
+		return "", fmt.Errorf("resolve build project: %w", err)
+	}
+	return projectID, nil
+}
+
+func loadIdempotentJob(
+	ctx context.Context,
+	q Querier,
+	projectID, key, requestDigest string,
+) (bool, builder.LedgerCreateResult, error) {
+	var existingID uuid.UUID
+	var existingRequestDigest string
+	var existingStatusJSON []byte
+	err := q.QueryRow(ctx, `
+		SELECT id, request_digest, status_snapshot
+		FROM build_jobs
+		WHERE project_id = $1 AND idempotency_key = $2
+	`, projectID, key).Scan(&existingID, &existingRequestDigest, &existingStatusJSON)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, builder.LedgerCreateResult{}, nil
+	}
+	if err != nil {
+		return false, builder.LedgerCreateResult{}, fmt.Errorf("read idempotent job: %w", err)
+	}
+	if existingRequestDigest != requestDigest {
+		return false, builder.LedgerCreateResult{}, builder.NewIdempotencyConflictError(
+			fmt.Errorf("idempotency key already belongs to a different build request"),
+		)
+	}
+	var existingStatus builder.BuildStatus
+	if err := json.Unmarshal(existingStatusJSON, &existingStatus); err != nil {
+		return false, builder.LedgerCreateResult{}, fmt.Errorf("decode idempotent job status: %w", err)
+	}
+	return true, builder.LedgerCreateResult{
+		JobID: existingID.String(), Status: &existingStatus, Created: false,
+	}, nil
+}
+
+type submissionPolicy struct {
+	suspended       bool
+	abuseUntil      *time.Time
+	now             time.Time
+	maxQueued       int
+	maxDaily        int
+	maxVCPUs        int
+	maxMemoryMiB    int
+	maxDiskGiB      int
+	maxBuildSeconds int64
+	maxCloudCost    int64
+}
+
+type resourceVector struct {
+	VCPUs     int
+	MemoryMiB int
+	DiskGiB   int
+}
+
+// resourceVectorFromRequest turns the immutable, catalog-resolved machine
+// specification into accounting units. Pre-catalog jobs are charged the
+// built-in compatibility class; partially specified catalog resources fail
+// closed rather than silently under-accounting capacity.
+func resourceVectorFromRequest(req *builder.BuildRequest) (resourceVector, error) {
+	const (
+		legacyVCPUs     = 4
+		legacyMemoryMiB = 8192
+		legacyDiskGiB   = 50
+	)
+	if req == nil {
+		return resourceVector{}, fmt.Errorf("resource accounting requires a build request")
+	}
+	spec := req.MachineSpec
+	if len(spec) == 0 && req.ResolvedContext != nil {
+		spec = req.ResolvedContext.MachineSpec
+	}
+	if len(spec) == 0 && req.ResourceClass == "" {
+		return resourceVector{
+			VCPUs: legacyVCPUs, MemoryMiB: legacyMemoryMiB, DiskGiB: legacyDiskGiB,
+		}, nil
+	}
+	parse := func(key string) (int, error) {
+		raw := strings.TrimSpace(spec[key])
+		value, err := strconv.Atoi(raw)
+		if err != nil || value <= 0 {
+			return 0, fmt.Errorf("resource class %q has invalid or missing %s",
+				req.ResourceClass, key)
+		}
+		return value, nil
+	}
+	vcpus, err := parse("cores")
+	if err != nil {
+		return resourceVector{}, err
+	}
+	memoryMiB, err := parse("memory")
+	if err != nil {
+		return resourceVector{}, err
+	}
+	diskGiB, err := parse("disk_size")
+	if err != nil {
+		return resourceVector{}, err
+	}
+	return resourceVector{VCPUs: vcpus, MemoryMiB: memoryMiB, DiskGiB: diskGiB}, nil
+}
+
+func lockSubmissionPolicy(
+	ctx context.Context,
+	q Querier,
+	projectID string,
+) (submissionPolicy, error) {
+	var policy submissionPolicy
+	if err := q.QueryRow(ctx, `
+		SELECT suspended, max_queued_jobs, max_daily_submissions,
+		       max_active_vcpus, max_active_memory_mib, max_active_disk_gib,
+		       max_daily_build_seconds, max_daily_cloud_cost_microunits,
+		       abuse_suspended_until, clock_timestamp()
+		FROM project_policies
+		WHERE project_id = $1
+		FOR UPDATE
+	`, projectID).Scan(
+		&policy.suspended, &policy.maxQueued, &policy.maxDaily,
+		&policy.maxVCPUs, &policy.maxMemoryMiB, &policy.maxDiskGiB,
+		&policy.maxBuildSeconds, &policy.maxCloudCost,
+		&policy.abuseUntil, &policy.now,
+	); err != nil {
+		return submissionPolicy{}, fmt.Errorf("lock project admission policy: %w", err)
+	}
+	return policy, nil
+}
+
+func checkSubmissionAdmission(
+	ctx context.Context,
+	q Querier,
+	projectID string,
+	policy submissionPolicy,
+	request *builder.BuildRequest,
+) error {
+	if policy.suspended {
+		return builder.NewAdmissionError(
+			"project_suspended", 0, 0, 0,
+			fmt.Errorf("project is suspended; new builds and retries are disabled"),
+		)
+	}
+	if policy.abuseUntil != nil && policy.abuseUntil.After(policy.now) {
+		return builder.NewAdmissionError(
+			"project_abuse_suspended", 0, 0,
+			policy.abuseUntil.Sub(policy.now),
+			fmt.Errorf("project is temporarily suspended by the failure-storm gate until %s",
+				policy.abuseUntil.UTC().Format(time.RFC3339)),
+		)
+	}
+	if err := checkResourceRequestLimits(
+		request, policy.maxVCPUs, policy.maxMemoryMiB, policy.maxDiskGiB,
+	); err != nil {
+		return err
+	}
+	if err := checkRuntimeRequestLimits(
+		request, policy.maxBuildSeconds, policy.maxCloudCost,
+	); err != nil {
+		return err
+	}
+	var queued, daily int
+	var dayEnds time.Time
+	if err := q.QueryRow(ctx, `
+		WITH day_window AS (
+			SELECT
+				(date_trunc('day', clock_timestamp() AT TIME ZONE 'UTC')
+					AT TIME ZONE 'UTC') AS starts_at
+		)
+		SELECT
+			(SELECT count(*) FROM build_jobs
+			 WHERE project_id = $1 AND state = 'queued' AND legacy_visible = true),
+			(SELECT count(*) FROM build_jobs
+			 WHERE project_id = $1
+			   AND created_at >= dw.starts_at
+			   AND created_at < dw.starts_at + interval '1 day'),
+			dw.starts_at + interval '1 day'
+		FROM day_window dw
+	`, projectID).Scan(&queued, &daily, &dayEnds); err != nil {
+		return fmt.Errorf("read project admission usage: %w", err)
+	}
+	if queued >= policy.maxQueued {
+		return builder.NewAdmissionError(
+			"queued_limit_reached", policy.maxQueued, queued, 30*time.Second,
+			fmt.Errorf("project queued-job limit reached (%d/%d)", queued, policy.maxQueued),
+		)
+	}
+	if daily >= policy.maxDaily {
+		retryAfter := time.Until(dayEnds)
+		if retryAfter < time.Second {
+			retryAfter = time.Second
+		}
+		return builder.NewAdmissionError(
+			"daily_submission_limit_reached", policy.maxDaily, daily, retryAfter,
+			fmt.Errorf("project UTC daily submission limit reached (%d/%d)", daily, policy.maxDaily),
+		)
+	}
+	return nil
+}
+
+func checkRuntimeRequestLimits(
+	request *builder.BuildRequest,
+	maxBuildSeconds, maxCloudCost int64,
+) error {
+	spec, err := runtimeBudgetSpecFromRequest(request)
+	if err != nil {
+		return builder.NewAdmissionError(
+			"runtime_budget_request_invalid", 0, 0, 0, err,
+		)
+	}
+	if spec.MaxRuntimeSeconds > maxBuildSeconds {
+		return builder.NewAdmissionError(
+			"build_minute_request_exceeds_daily_limit",
+			int(maxBuildSeconds), int(spec.MaxRuntimeSeconds), 0,
+			fmt.Errorf("build reserves %d seconds but project UTC daily limit is %d seconds",
+				spec.MaxRuntimeSeconds, maxBuildSeconds),
+		)
+	}
+	if spec.ReservedCloudCostMicrounits > maxCloudCost {
+		return builder.NewAdmissionError(
+			"cloud_cost_request_exceeds_daily_limit",
+			int(maxCloudCost), int(spec.ReservedCloudCostMicrounits), 0,
+			fmt.Errorf("build reserves %d cloud-cost microunits but project UTC daily limit is %d",
+				spec.ReservedCloudCostMicrounits, maxCloudCost),
+		)
+	}
+	return nil
+}
+
+func checkResourceRequestLimits(
+	request *builder.BuildRequest,
+	maxVCPUs, maxMemoryMiB, maxDiskGiB int,
+) error {
+	resources, err := resourceVectorFromRequest(request)
+	if err != nil {
+		return builder.NewAdmissionError(
+			"resource_request_invalid", 0, 0, 0, err,
+		)
+	}
+	if resources.VCPUs > maxVCPUs {
+		return builder.NewAdmissionError(
+			"vcpu_request_exceeds_limit", maxVCPUs, resources.VCPUs, 0,
+			fmt.Errorf("build requests %d vCPUs but project limit is %d",
+				resources.VCPUs, maxVCPUs),
+		)
+	}
+	if resources.MemoryMiB > maxMemoryMiB {
+		return builder.NewAdmissionError(
+			"memory_request_exceeds_limit", maxMemoryMiB, resources.MemoryMiB, 0,
+			fmt.Errorf("build requests %d MiB memory but project limit is %d MiB",
+				resources.MemoryMiB, maxMemoryMiB),
+		)
+	}
+	if resources.DiskGiB > maxDiskGiB {
+		return builder.NewAdmissionError(
+			"disk_request_exceeds_limit", maxDiskGiB, resources.DiskGiB, 0,
+			fmt.Errorf("build requests %d GiB disk but project limit is %d GiB",
+				resources.DiskGiB, maxDiskGiB),
+		)
+	}
+	return nil
 }
 
 // RecordTransition persists a status snapshot, attempt state, event, and
@@ -269,6 +628,10 @@ func (r *JobRepository) recordTransition(ctx context.Context, previous, current 
 		return err
 	}
 	return r.db.WithTx(ctx, pgx.TxOptions{}, func(q Querier) error {
+		transitionAt, err := readDatabaseClock(ctx, q)
+		if err != nil {
+			return err
+		}
 		var databaseState, databaseDigest string
 		var revision int64
 		if err := q.QueryRow(ctx, `
@@ -285,32 +648,14 @@ func (r *JobRepository) recordTransition(ctx context.Context, previous, current 
 		if previous != nil && databaseState != previous.Status {
 			return fmt.Errorf("job %s ledger state is %s, expected %s", current.JobID, databaseState, previous.Status)
 		}
-		if current.AttemptID != "" {
-			var active bool
-			if err := q.QueryRow(ctx, `
-				SELECT l.expires_at > clock_timestamp()
-				       AND l.fence_token = $3
-				       AND w.stable_name = $4
-				FROM build_attempts a
-				JOIN worker_leases l ON l.attempt_id = a.id
-				JOIN workers w ON w.id = l.worker_id
-				WHERE a.id = $1 AND a.job_id = $2
-				FOR UPDATE OF a, l
-			`, current.AttemptID, current.JobID, current.FenceToken, current.LeaseOwner).Scan(&active); err != nil {
-				if errors.Is(err, pgx.ErrNoRows) {
-					return fmt.Errorf("job %s durable claim is no longer active", current.JobID)
-				}
-				return fmt.Errorf("validate durable transition fence: %w", err)
-			}
-			if !active {
-				return fmt.Errorf("job %s durable claim is stale or expired", current.JobID)
-			}
+		if err := validateTransitionClaim(ctx, q, current); err != nil {
+			return err
 		}
 
 		revision++
 		var completedAt any
 		if isLedgerTerminal(current.Status) {
-			completedAt = current.UpdatedAt
+			completedAt = transitionAt
 		}
 		if _, err := q.Exec(ctx, `
 			UPDATE build_jobs
@@ -323,39 +668,14 @@ func (r *JobRepository) recordTransition(ctx context.Context, previous, current 
 			    ledger_revision = $8
 			WHERE id = $1
 		`, current.JobID, current.Status, string(statusJSON), statusDigest,
-			current.Error, current.UpdatedAt, completedAt, revision); err != nil {
+			current.Error, transitionAt, completedAt, revision); err != nil {
 			return fmt.Errorf("update job ledger row: %w", err)
 		}
 
-		if current.AttemptID != "" {
-			var finishedAt any
-			if isLedgerTerminal(current.Status) {
-				finishedAt = current.UpdatedAt
-			}
-			tag, err := q.Exec(ctx, `
-				UPDATE build_attempts
-				SET state = $2,
-				    failure_detail = CASE WHEN $2 = 'failed' THEN $3 ELSE failure_detail END,
-				    finished_at = COALESCE($4, finished_at),
-				    updated_at = $5
-				WHERE id = $1 AND job_id = $6 AND fence_token = $7
-			`, current.AttemptID, current.Status, current.Error, finishedAt,
-				current.UpdatedAt, current.JobID, current.FenceToken)
-			if err != nil {
-				return fmt.Errorf("update fenced build attempt: %w", err)
-			}
-			if tag.RowsAffected() != 1 {
-				return fmt.Errorf("job %s fenced attempt was replaced", current.JobID)
-			}
-			if isLedgerTerminal(current.Status) {
-				if _, err := q.Exec(ctx, `DELETE FROM worker_leases WHERE attempt_id = $1`, current.AttemptID); err != nil {
-					return fmt.Errorf("release terminal worker lease: %w", err)
-				}
-			}
-		} else if current.Status != "queued" {
-			if err := r.upsertAttemptSnapshot(ctx, q, current); err != nil {
-				return err
-			}
+		if err := r.recordAttemptTransitionTx(
+			ctx, q, current, transitionAt,
+		); err != nil {
+			return err
 		}
 
 		eventType := "job.snapshot_updated"
@@ -373,8 +693,252 @@ func (r *JobRepository) recordTransition(ctx context.Context, previous, current 
 	})
 }
 
+func validateTransitionClaim(
+	ctx context.Context,
+	q Querier,
+	current *builder.BuildStatus,
+) error {
+	if current.AttemptID == "" {
+		return nil
+	}
+	var active bool
+	err := q.QueryRow(ctx, `
+		SELECT l.expires_at > clock_timestamp()
+		       AND l.fence_token = $3
+		       AND w.stable_name = $4
+		       AND u.state = 'active'
+		       AND u.metering_started_at
+		           + make_interval(secs => u.max_runtime_seconds::double precision)
+		           > clock_timestamp()
+		FROM build_attempts a
+		JOIN worker_leases l ON l.attempt_id = a.id
+		JOIN workers w ON w.id = l.worker_id
+		JOIN project_attempt_usage u ON u.attempt_id = a.id
+		WHERE a.id = $1 AND a.job_id = $2
+		FOR UPDATE OF a, l
+	`, current.AttemptID, current.JobID, current.FenceToken,
+		current.LeaseOwner).Scan(&active)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("job %s durable claim is no longer active", current.JobID)
+	}
+	if err != nil {
+		return fmt.Errorf("validate durable transition fence: %w", err)
+	}
+	if !active {
+		return fmt.Errorf("job %s durable claim is stale or expired", current.JobID)
+	}
+	return nil
+}
+
+func (r *JobRepository) recordAttemptTransitionTx(
+	ctx context.Context,
+	q Querier,
+	current *builder.BuildStatus,
+	transitionAt time.Time,
+) error {
+	if current.AttemptID == "" {
+		if current.Status == "queued" {
+			return nil
+		}
+		return r.upsertAttemptSnapshot(ctx, q, current)
+	}
+	var finishedAt any
+	if isLedgerTerminal(current.Status) {
+		finishedAt = transitionAt
+	}
+	tag, err := q.Exec(ctx, `
+		UPDATE build_attempts
+		SET state = $2,
+		    failure_detail = CASE WHEN $2 = 'failed' THEN $3 ELSE failure_detail END,
+		    finished_at = COALESCE($4, finished_at),
+		    updated_at = $5
+		WHERE id = $1 AND job_id = $6 AND fence_token = $7
+	`, current.AttemptID, current.Status, current.Error, finishedAt,
+		transitionAt, current.JobID, current.FenceToken)
+	if err != nil {
+		return fmt.Errorf("update fenced build attempt: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return fmt.Errorf("job %s fenced attempt was replaced", current.JobID)
+	}
+	if !isLedgerTerminal(current.Status) {
+		if reservationPhase(current.Status) == "provision" {
+			if err := markAttemptCloudStarted(
+				ctx, q, current.AttemptID, transitionAt,
+			); err != nil {
+				return err
+			}
+		}
+		return updateResourceReservationPhase(
+			ctx, q, current.AttemptID, current.Status, transitionAt,
+		)
+	}
+	reason := "job_" + current.Status
+	if err := settleAttemptUsage(
+		ctx, q, current.AttemptID, reason, current.Status, transitionAt,
+	); err != nil {
+		return err
+	}
+	if _, err := q.Exec(ctx,
+		`DELETE FROM worker_leases WHERE attempt_id = $1`,
+		current.AttemptID,
+	); err != nil {
+		return fmt.Errorf("release terminal worker lease: %w", err)
+	}
+	if err := releaseResourceReservation(
+		ctx, q, current.AttemptID, reason, transitionAt,
+	); err != nil {
+		return err
+	}
+	if err := releaseArtifactBudgetReservation(
+		ctx, q, current.AttemptID, reason, transitionAt,
+	); err != nil {
+		return err
+	}
+	if err := cancelPhaseWorkItems(
+		ctx, q, current.AttemptID, reason, transitionAt,
+	); err != nil {
+		return err
+	}
+	return revokeWorkerGatewayAttempt(
+		ctx, q, current.AttemptID, reason, transitionAt,
+	)
+}
+
 func isLedgerTerminal(state string) bool {
 	return state == "completed" || state == "success" || state == "failed" || state == "canceled"
+}
+
+func reservationPhase(state string) string {
+	switch state {
+	case "claimed":
+		return "claimed"
+	case "provisioning", "deploying":
+		return "provision"
+	case "forwarding", "building":
+		return "build"
+	case "collecting", "verifying":
+		return "verify"
+	case "signing", "publishing":
+		return "publish"
+	default:
+		return ""
+	}
+}
+
+func updateResourceReservationPhase(
+	ctx context.Context,
+	q Querier,
+	attemptID, state string,
+	changedAt time.Time,
+) error {
+	phase := reservationPhase(state)
+	if phase == "" {
+		return nil
+	}
+	var currentPhase, projectID string
+	var limit int
+	err := q.QueryRow(ctx, `
+		SELECT r.phase, r.project_id::text,
+		       CASE $2
+		         WHEN 'claimed' THEN pp.max_claimed_attempts
+		         WHEN 'provision' THEN pp.max_provision_attempts
+		         WHEN 'build' THEN pp.max_build_attempts
+		         WHEN 'verify' THEN pp.max_verify_attempts
+		         WHEN 'publish' THEN pp.max_publish_attempts
+		       END
+		FROM project_resource_reservations r
+		JOIN project_policies pp ON pp.project_id = r.project_id
+		WHERE r.attempt_id = $1 AND r.state = 'active'
+		FOR UPDATE OF pp, r
+	`, attemptID, phase).Scan(&currentPhase, &projectID, &limit)
+	if err != nil {
+		return fmt.Errorf("lock project phase reservation: %w", err)
+	}
+	if currentPhase == phase {
+		return nil
+	}
+	var used int
+	if err := q.QueryRow(ctx, `
+		SELECT count(*)
+		FROM project_resource_reservations
+		WHERE project_id = $1 AND state = 'active'
+		  AND phase = $2 AND attempt_id <> $3
+	`, projectID, phase, attemptID).Scan(&used); err != nil {
+		return fmt.Errorf("read project phase usage: %w", err)
+	}
+	if used >= limit {
+		return &builder.PhaseCapacityError{
+			Phase: phase, Used: used, Limit: limit,
+		}
+	}
+	if _, err := q.Exec(ctx, `
+		UPDATE project_resource_reservations
+		SET phase = $2, phase_updated_at = $3
+		WHERE attempt_id = $1 AND state = 'active' AND phase <> $2
+	`, attemptID, phase, changedAt); err != nil {
+		return fmt.Errorf("update project resource reservation phase: %w", err)
+	}
+	return nil
+}
+
+func releaseResourceReservation(
+	ctx context.Context,
+	q Querier,
+	attemptID, reason string,
+	releasedAt time.Time,
+) error {
+	if _, err := q.Exec(ctx, `
+		UPDATE project_resource_reservations
+		SET state = 'released', released_at = $2, release_reason = $3
+		WHERE attempt_id = $1 AND state = 'active'
+	`, attemptID, releasedAt, reason); err != nil {
+		return fmt.Errorf("release project resource reservation: %w", err)
+	}
+	return nil
+}
+
+func releaseArtifactBudgetReservation(
+	ctx context.Context,
+	q Querier,
+	attemptID, reason string,
+	releasedAt time.Time,
+) error {
+	if _, err := q.Exec(ctx, `
+		UPDATE artifact_generation_reservations
+		SET state = 'released', released_at = $2, updated_at = $2,
+		    release_reason = $3
+		WHERE attempt_id = $1 AND state = 'active'
+	`, attemptID, releasedAt, reason); err != nil {
+		return fmt.Errorf("release artifact generation reservations: %w", err)
+	}
+	if _, err := q.Exec(ctx, `
+		UPDATE project_artifact_budgets
+		SET state = 'released', active_bytes = 0, released_at = $2,
+		    updated_at = $2, release_reason = $3
+		WHERE attempt_id = $1 AND state = 'active'
+	`, attemptID, releasedAt, reason); err != nil {
+		return fmt.Errorf("release project artifact budget: %w", err)
+	}
+	return nil
+}
+
+func cancelPhaseWorkItems(
+	ctx context.Context,
+	q Querier,
+	attemptID, reason string,
+	finishedAt time.Time,
+) error {
+	if _, err := q.Exec(ctx, `
+		UPDATE phase_work_items
+		SET state = 'canceled', lease_expires_at = NULL,
+		    finished_at = $2, updated_at = $2, error = $3
+		WHERE attempt_id = $1
+		  AND state IN ('blocked', 'ready', 'claimed')
+	`, attemptID, finishedAt, reason); err != nil {
+		return fmt.Errorf("cancel remaining phase work: %w", err)
+	}
+	return nil
 }
 
 func (r *JobRepository) upsertAttemptSnapshot(ctx context.Context, q Querier, status *builder.BuildStatus) error {

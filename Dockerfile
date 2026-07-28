@@ -14,7 +14,8 @@ COPY pkg ./pkg
 RUN CGO_ENABLED=0 go build -trimpath -o /out/portage-server ./cmd/server && \
     CGO_ENABLED=0 go build -trimpath -o /out/portage-dashboard ./cmd/dashboard && \
     CGO_ENABLED=0 go build -trimpath -o /out/portage-migrate ./cmd/migrate && \
-    CGO_ENABLED=0 go build -trimpath -o /out/portage-signer ./cmd/signer
+    CGO_ENABLED=0 go build -trimpath -o /out/portage-signer ./cmd/signer && \
+    CGO_ENABLED=0 go build -trimpath -o /out/portage-capacity-actuator ./cmd/capacity-actuator
 
 FROM hashicorp/terraform:1.15.6 AS terraform
 
@@ -33,6 +34,7 @@ COPY --from=go-build /out/portage-server /usr/local/bin/portage-server
 COPY --from=go-build /out/portage-dashboard /usr/local/bin/portage-dashboard
 COPY --from=go-build /out/portage-migrate /usr/local/bin/portage-migrate
 COPY --from=go-build /out/portage-signer /usr/local/bin/portage-signer
+COPY --from=go-build /out/portage-capacity-actuator /usr/local/bin/portage-capacity-actuator
 COPY --from=terraform /bin/terraform /usr/local/bin/terraform
 COPY configs ./configs
 COPY scripts/rotating-log-tee.sh /usr/local/bin/rotating-log-tee

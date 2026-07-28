@@ -24,6 +24,8 @@ type CloudInitConfig struct {
 	BuilderPort         int    `json:"builder_port"`
 	BuilderToken        string `json:"builder_token"`
 	ServerCallbackURL   string `json:"server_callback_url"`
+	WorkerPullEnabled   bool   `json:"worker_pull_enabled"`
+	WorkerGatewayURL    string `json:"worker_gateway_url"`
 	InstanceID          string `json:"instance_id"`
 	Architecture        string `json:"architecture"`
 
@@ -52,6 +54,7 @@ func DefaultCloudInitConfig() *CloudInitConfig {
 		BuilderBinarySHA256: "",
 		BuilderPort:         9090,
 		ServerCallbackURL:   "",
+		WorkerPullEnabled:   false,
 		InstanceID:          "",
 		Architecture:        "amd64",
 		DataDir:             "/var/lib/portage-engine",

@@ -1,0 +1,35 @@
+{
+  "providers": [
+    {
+      "id": "authentik",
+      "type": "oidc",
+      "display_name": "Authentik",
+      "issuer_url": "https://auth.example.org/application/o/portage-engine/",
+      "audience": "portage-engine",
+      "client_id": "portage-engine",
+      "client_secret_env": "PORTAGE_AUTHENTIK_CLIENT_SECRET",
+      "redirect_url": "https://portage.example.org/auth/provider/authentik/callback",
+      "backchannel_logout": true,
+      "backchannel_require_sid": true,
+      "backchannel_max_age_seconds": 300
+    },
+    {
+      "id": "google",
+      "type": "oidc",
+      "display_name": "Google",
+      "issuer_url": "https://accounts.google.com",
+      "audience": "replace-with-google-client-id",
+      "client_id": "replace-with-google-client-id",
+      "client_secret_env": "PORTAGE_GOOGLE_CLIENT_SECRET",
+      "redirect_url": "https://portage.example.org/auth/provider/google/callback"
+    },
+    {
+      "id": "github",
+      "type": "github",
+      "display_name": "GitHub",
+      "client_id": "replace-with-github-client-id",
+      "client_secret_env": "PORTAGE_GITHUB_CLIENT_SECRET",
+      "redirect_url": "https://portage.example.org/auth/provider/github/callback"
+    }
+  ]
+}

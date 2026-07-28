@@ -180,3 +180,37 @@ func TestList(t *testing.T) {
 		t.Errorf("Expected %d files, got %d", len(testFiles), len(files))
 	}
 }
+
+func TestLocalStorageConfinesRemotePaths(t *testing.T) {
+	parent := t.TempDir()
+	base := filepath.Join(parent, "storage")
+	outside := filepath.Join(parent, "outside")
+	if err := os.MkdirAll(outside, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	source := filepath.Join(parent, "source")
+	if err := os.WriteFile(source, []byte("payload"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	storage, err := NewLocalStorage(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := storage.Upload(source, "../escaped"); err == nil {
+		t.Fatal("Upload accepted a path outside the storage root")
+	}
+	if _, err := storage.GetURL("../escaped"); err == nil {
+		t.Fatal("GetURL accepted a path outside the storage root")
+	}
+
+	if err := os.Symlink("../outside", filepath.Join(base, "escape-link")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(outside, "secret"), []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := storage.Download("escape-link/secret", filepath.Join(parent, "copy")); err == nil {
+		t.Fatal("Download followed a symlink outside the storage root")
+	}
+}

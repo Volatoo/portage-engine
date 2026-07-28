@@ -148,7 +148,7 @@ func (ct *ConfigTransfer) ReadSystemPortageConfig(portageDir string) (*PortageCo
 
 // readMakeConf reads make.conf file.
 func (ct *ConfigTransfer) readMakeConf(path string, config *PortageConfig) error {
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) // #nosec G304 -- path is discovered beneath the user-selected /etc/portage import root.
 	if err != nil {
 		return err
 	}
@@ -208,7 +208,7 @@ func (ct *ConfigTransfer) readPackageUse(path string, config *PortageConfig) err
 
 // parsePackageUseFile parses a package.use file.
 func (ct *ConfigTransfer) parsePackageUseFile(path string, config *PortageConfig) error {
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) // #nosec G304 -- path is discovered beneath the user-selected /etc/portage import root.
 	if err != nil {
 		return err
 	}
@@ -259,7 +259,7 @@ func (ct *ConfigTransfer) readPackageKeywords(path string, config *PortageConfig
 
 // parsePackageKeywordsFile parses a package.accept_keywords file.
 func (ct *ConfigTransfer) parsePackageKeywordsFile(path string, config *PortageConfig) error {
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) // #nosec G304 -- path is discovered beneath the user-selected /etc/portage import root.
 	if err != nil {
 		return err
 	}
@@ -318,7 +318,7 @@ func (ct *ConfigTransfer) readPackageList(path string, list *[]string) error {
 
 // parsePackageListFile parses a file containing package atoms.
 func (ct *ConfigTransfer) parsePackageListFile(path string, list *[]string) error {
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) // #nosec G304 -- path is discovered beneath the user-selected /etc/portage import root.
 	if err != nil {
 		return err
 	}
@@ -361,7 +361,7 @@ func (ct *ConfigTransfer) readReposConf(path string, config *PortageConfig) erro
 
 // parseRepoConfFile parses a repository configuration file.
 func (ct *ConfigTransfer) parseRepoConfFile(path string, config *PortageConfig) error {
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) // #nosec G304 -- path is discovered beneath the user-selected /etc/portage import root.
 	if err != nil {
 		return err
 	}
@@ -475,7 +475,7 @@ func (ct *ConfigTransfer) ExportBundle(bundle *ConfigBundle, outputPath string) 
 	}
 
 	// Create output file
-	outFile, err := os.Create(outputPath)
+	outFile, err := os.Create(outputPath) // #nosec G304 -- outputPath is the caller-selected bundle destination.
 	if err != nil {
 		return fmt.Errorf("failed to create output file: %w", err)
 	}
@@ -684,7 +684,7 @@ func (ct *ConfigTransfer) addReposConfToTar(tw *tar.Writer, repos []RepoConfig) 
 // ImportBundle imports a configuration bundle from a tarball.
 func (ct *ConfigTransfer) ImportBundle(bundlePath string) (*ConfigBundle, error) {
 	// Open the tarball
-	file, err := os.Open(bundlePath)
+	file, err := os.Open(bundlePath) // #nosec G304 -- bundlePath is the caller-selected bundle source.
 	if err != nil {
 		return nil, fmt.Errorf("failed to open bundle: %w", err)
 	}
@@ -796,7 +796,7 @@ func (ct *ConfigTransfer) createPortageDirs(portageDir string) error {
 	for _, dir := range dirs {
 		// Native Portage drops helpers to the portage user, which must be able
 		// to traverse and read the job-scoped configuration tree.
-		if err := os.MkdirAll(dir, 0755); err != nil {
+		if err := os.MkdirAll(dir, 0755); err != nil { // #nosec G301 -- Portage helpers run as the portage user and require traversal.
 			return fmt.Errorf("failed to create directory %s: %w", dir, err)
 		}
 	}
@@ -816,7 +816,7 @@ func (ct *ConfigTransfer) writePackageUse(portageDir string, packageUse map[stri
 	content := strings.Join(lines, "\n") + "\n"
 	path := filepath.Join(portageDir, "package.use", "00-user")
 
-	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil { // #nosec G306 -- Portage package.use must be readable by the portage user.
 		return fmt.Errorf("failed to write package.use: %w", err)
 	}
 	return nil
@@ -835,7 +835,7 @@ func (ct *ConfigTransfer) writePackageKeywords(portageDir string, packageKeyword
 	content := strings.Join(lines, "\n") + "\n"
 	path := filepath.Join(portageDir, "package.accept_keywords", "00-user")
 
-	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil { // #nosec G306 -- Portage package.accept_keywords must be readable by the portage user.
 		return fmt.Errorf("failed to write package.accept_keywords: %w", err)
 	}
 	return nil
@@ -850,7 +850,7 @@ func (ct *ConfigTransfer) writePackageMask(portageDir string, packageMask []stri
 	content := strings.Join(packageMask, "\n") + "\n"
 	path := filepath.Join(portageDir, "package.mask", "00-user")
 
-	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil { // #nosec G306 -- Portage package.mask must be readable by the portage user.
 		return fmt.Errorf("failed to write package.mask: %w", err)
 	}
 	return nil
@@ -865,7 +865,7 @@ func (ct *ConfigTransfer) writePackageUnmask(portageDir string, packageUnmask []
 	content := strings.Join(packageUnmask, "\n") + "\n"
 	path := filepath.Join(portageDir, "package.unmask", "00-user")
 
-	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil { // #nosec G306 -- Portage package.unmask must be readable by the portage user.
 		return fmt.Errorf("failed to write package.unmask: %w", err)
 	}
 	return nil
@@ -881,7 +881,7 @@ func (ct *ConfigTransfer) writeMakeConf(portageDir string, makeConf map[string]s
 	}
 
 	path := filepath.Join(portageDir, "make.conf")
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644) // #nosec G302 -- make.conf must be world-readable.
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644) // #nosec G302,G304 -- make.conf is intentionally readable and path is beneath the selected Portage root.
 	if err != nil {
 		return fmt.Errorf("failed to open make.conf: %w", err)
 	}
@@ -918,7 +918,7 @@ func (ct *ConfigTransfer) writeReposConf(portageDir string, repos []RepoConfig) 
 		content := strings.Join(lines, "\n") + "\n"
 		path := filepath.Join(portageDir, "repos.conf", fmt.Sprintf("%s.conf", repo.Name))
 
-		if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		if err := os.WriteFile(path, []byte(content), 0644); err != nil { // #nosec G306 -- Portage repos.conf must be readable by the portage user.
 			return fmt.Errorf("failed to write repos.conf for %s: %w", repo.Name, err)
 		}
 	}

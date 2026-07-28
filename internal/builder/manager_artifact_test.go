@@ -1,6 +1,7 @@
 package builder
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -14,6 +15,22 @@ import (
 	"github.com/slchris/portage-engine/internal/binpkg"
 	"github.com/slchris/portage-engine/pkg/config"
 )
+
+func TestCopyArtifactWithLimitRejectsUnknownLengthOverflow(t *testing.T) {
+	var destination bytes.Buffer
+	written, err := copyArtifactWithLimit(
+		&destination, strings.NewReader("123456"), 5,
+	)
+	if err == nil || !strings.Contains(err.Error(), "exceeds remaining") {
+		t.Fatalf("overflow written=%d err=%v", written, err)
+	}
+	if written != 6 {
+		t.Fatalf("limited stream read %d bytes, want sentinel byte 6", written)
+	}
+	if err := validateArtifactContentLength(6, 5); err == nil {
+		t.Fatal("declared oversized artifact was accepted")
+	}
+}
 
 func TestArtifactRelCPV(t *testing.T) {
 	tests := map[string]string{

@@ -11,8 +11,16 @@ GPKG artifacts and publishes a standard Portage binhost.
 
 > **Status: trusted alpha.** PVE + Terraform + native Gentoo is the reference
 > backend and has been exercised on real infrastructure. The service is for a
-> trusted private network while public multi-tenant identity, quota, isolation
-> and abuse controls remain roadmap items.
+> trusted private network. OIDC identity, project RBAC and PostgreSQL-atomic
+> queued/active/UTC-daily admission plus per-attempt vCPU, memory and disk
+> reservations, artifact-generation budgets, daily build-time/cloud-cost
+> budgets, failure-storm cooldown, independently fenced
+> provision/build/verify/publish execution, administrator step-up and
+> cross-replica OIDC session revocation, exact executor routing and durable
+> workload certificate/issuer revocation are implemented. Vault PKI external
+> signing, listener-bound CA rollover and token recovery have a real-container
+> Gate. Real community IdP callbacks, production Vault HA recovery and
+> public-service hardening remain.
 
 ## Pick your workflow
 
@@ -41,10 +49,12 @@ Different profiles have independent `Packages` indexes; `/binpkgs/` itself is
 not an aggregate repository.
 
 Developers request missing packages explicitly because Portage has no native
-“ask this binhost to build” protocol:
+“ask this binhost to build” protocol. In OIDC/hybrid mode, select an authorized
+project and use a short-lived token:
 
 ```bash
-export PORTAGE_ENGINE_API_KEY='read-from-a-secret-store'
+export PORTAGE_ENGINE_TOKEN='read-from-your-identity-provider'
+export PORTAGE_ENGINE_PROJECT='project-name-or-uuid'
 
 ./bin/portage-client build \
   -server=http://portage-engine.infra.lan:8080 \
@@ -53,8 +63,10 @@ export PORTAGE_ENGINE_API_KEY='read-from-a-secret-store'
   -resource-class=medium -wait
 ```
 
-Trusted-LAN bring-up may use HTTP; bind/firewall it to that network because API
-keys are plaintext on the wire. Add HTTPS before crossing an untrusted network.
+The legacy `PORTAGE_ENGINE_API_KEY` remains a system-administrator migration
+and break-glass path in `legacy`/`hybrid` mode. Trusted-LAN bring-up may use
+HTTP, but API keys and bearer tokens are plaintext on the wire. Add HTTPS
+before crossing an untrusted network.
 
 The consumer path needs neither the CLI nor an overlay. An overlay is useful
 only for distributing the optional client/service ebuilds; it must not own the
@@ -65,7 +77,9 @@ published binpkg trust key or image/profile policy.
 ```mermaid
 flowchart LR
     Client[CLI / Web] --> API[Server + scheduler]
-    API --> Worker[Disposable PVE / native worker]
+    API -->|provision + transient SSH bootstrap| Worker[Disposable PVE / native worker]
+    Worker -->|outbound TLS 1.3 + attempt certificate| Gateway[Worker Gateway]
+    Gateway --> API
     Worker --> Build[Native emerge]
     Build --> Stage[Unsigned quarantine]
     Stage --> Verify[Unsigned install / GUI verification]
@@ -108,6 +122,22 @@ docker compose --env-file .env.compose ps
 scripts/verify-compose.sh .env.compose
 ```
 
+To exercise PVE workers without exposing a builder listener, generate the
+worker-only PKI and enable the dedicated gateway in `.env.compose`:
+
+```bash
+WORKER_GATEWAY_HOST=portage-engine.infra.lan \
+  scripts/generate-worker-pki.sh .local/worker-pki
+# Set PORTAGE_WORKER_GATEWAY_ENABLED=true, its LAN bind address, and
+# PORTAGE_WORKER_GATEWAY_ADVERTISE_URL=https://portage-engine.infra.lan:19444
+# Keep PORTAGE_PHASE_EXECUTOR_MODE=shadow for rollout; active additionally
+# requires PostgreSQL authority, the Worker Gateway, shared state and
+# capability-equivalent replicas.
+```
+
+This TLS requirement applies only to the worker identity channel. The normal
+API/dashboard can remain HTTP during trusted-LAN bring-up.
+
 - API/binhost: `http://127.0.0.1:18080`
 - Dashboard: `http://127.0.0.1:18081` (`admin` / `portage-demo`)
 - Grafana: `http://127.0.0.1:23000` (`admin` / `portage-grafana-local`)
@@ -123,14 +153,24 @@ Compose does not start package builders or mount the host Docker socket. It
 does start the control plane plus its local PostgreSQL, Redis and observability
 foundation. PostgreSQL/Redis metrics and current process logs are collected
 now; shared process log files rotate at 10 MiB with one backup and Docker JSON
-logs are capped separately. Schema v7 makes PostgreSQL the sole online job,
-infrastructure-cleanup and signing-task authority. The signer uses a
+logs are capped separately. Schema v26 makes PostgreSQL the sole online job,
+infrastructure-cleanup, signing-task, external-subject and project-membership
+authority, including versioned project admission policy and active-attempt
+resource/phase/artifact/runtime reservations, phase execution context and
+durable Worker Gateway commands/uploads. It also owns OIDC session lifetime,
+idle expiry, revocation and per-subject token watermarks. The signer uses a
 least-privilege database role and a separate private GPG volume; server replicas
 see only its public key and queue status. Queue claims, attempts, leases/fencing,
 cancel/retry, redacted logs, cleanup leases, artifact/factory metadata and
 audited runtime settings survive replica failure. Publication is serialized
 across replicas and binpkg locations are immutable. JSON job snapshots are
 disabled whenever the database is enabled. Redis remains disposable.
+Project admission and phase dispatch use shared weighted virtual runtime with
+queue-age anti-starvation. Pull-aware worker score decisions and 24h/7d/30d
+target SLO/latency/cost history are visible in Monitor. Autoscaling can remain
+observe-only or write globally and per-provider budgeted single-slot actions
+for the separate, listener-free `portage-capacity-actuator`; provider calls
+never occur in a scheduler transaction.
 
 Run a second local control-plane replica on port `18082`:
 
@@ -173,12 +213,33 @@ candidate-only until their documented smoke, evidence, promotion and rollback
 gates pass.
 
 The current trusted-alpha boundary includes strict request/config validation,
-server-owned catalog resolution, immutable repository revisions, API/builder
-authentication, strict SSH host keys, quarantine/promotion separation and an
-isolated outbound-pull signer. Builders emit only unsigned GPKG files; neither
-builder nor server mounts the private release key. A public community service
-still needs OIDC/RBAC, per-project quotas, short-lived worker identity, and
-workload/egress isolation.
+server-owned catalog resolution, immutable repository revisions, per-attempt
+worker mTLS identity, VM-level egress default-deny, quarantine/promotion
+separation, an isolated outbound-pull signer, exact-issuer OIDC verification
+and project roles (`viewer`, `developer`, `maintainer`, `owner`). Job queries,
+mutations, overview statistics and SSE streams are project-scoped; mutable
+username/email/token group claims never grant authorization. Disposable builders open no
+inbound build API: after transient SSH bootstrap succeeds, the target PVE VM is
+switched to `policy_in=DROP`, all of that VM's inbound allow rules are removed,
+and both options and rule-list readbacks are verified. Cluster/Node policy and
+other VMs are not changed. Builders emit only unsigned GPKG files; neither
+builder nor server mounts the private release key. Project policy serializes
+submissions and scheduler claims in PostgreSQL: queued, active and UTC-day
+limits cannot be oversubscribed by multiple replicas, and suspension stops new
+submissions, retries and claims. Each claim reserves its catalog maximum
+runtime and estimated cloud cost, terminal settlement charges actual wall
+time, and repeated failed/expired attempts trigger a separately auditable
+time-bounded suspension. High-risk administrator writes require fresh OIDC
+authentication or an independent legacy step-up key; OIDC sessions can be
+listed, individually revoked, or revoked across all replicas. A public
+community service still needs production identity-provider callback validation,
+a Vault HA/unseal/backup runbook, and a reviewed persistent-executor PVE image
+for the live actuator Gate. Schema v24 derives
+provider/zone/architecture/profile/image capacity pools, reports their demand,
+and persists fenced action/instance ownership, heartbeat, drain and deletion
+state. Heterogeneous executors use the same exact pool/capability routing, and
+missing labels fail closed. The existing disposable job-builder template is
+not accepted as an autoscaled persistent executor.
 
 The state platform supports multiple control-plane replicas through PostgreSQL
 `FOR UPDATE SKIP LOCKED` claims, short leases and fencing tokens. Non-secret
@@ -196,6 +257,9 @@ logs containing secrets.
 ## Documentation
 
 - [Using the binhost and requesting builds](docs/USAGE.md)
+- [Federated identity and project RBAC](docs/IAM.md)
+- [Scheduler fairness and autoscaling](docs/SCHEDULER.md)
+- [Authentik, Google, GitHub, and generic OIDC providers](docs/IDENTITY_PROVIDERS.md)
 - [Policy-validated Portage configuration](docs/SYSTEM_CONFIG_USAGE.md)
 - [PVE native Gentoo deployment and testing](docs/PVE_TESTING.md)
 - [Profiles and immutable build catalog](docs/CATALOG.md)

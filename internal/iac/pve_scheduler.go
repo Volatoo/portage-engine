@@ -318,7 +318,8 @@ func (c *pveAPIClient) clusterResources(ctx context.Context) ([]pveClusterResour
 // from the private workspace manifest written before apply and cannot be
 // supplied through the public build request.
 func EnsurePVEVMAbsent(ctx context.Context, endpoint string, auth PVEAuth, expectedNode, expectedName string) error {
-	if !strings.HasPrefix(expectedName, "portage-builder-") {
+	if !strings.HasPrefix(expectedName, "portage-builder-") &&
+		!strings.HasPrefix(expectedName, "portage-capacity-") {
 		return fmt.Errorf("refusing PVE cleanup for unexpected resource name %q", expectedName)
 	}
 	client, err := newPVEAPIClient(ctx, endpoint, auth)

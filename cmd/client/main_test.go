@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -9,6 +10,35 @@ import (
 
 	"github.com/slchris/portage-engine/internal/builder"
 )
+
+func TestExchangeProviderCredential(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/iam/exchange" ||
+			r.Method != http.MethodPost {
+			http.NotFound(w, r)
+			return
+		}
+		var request map[string]string
+		_ = json.NewDecoder(r.Body).Decode(&request)
+		if request["provider_id"] != "google" ||
+			request["credential"] != "upstream-id-token" {
+			http.Error(w, "bad exchange", http.StatusUnauthorized)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "pe1_cli-session",
+			"token_type":   "Bearer", "expires_in": 600,
+		})
+	}))
+	defer server.Close()
+	result, err := exchangeProviderCredential(
+		server.Client(), server.URL, "google", "upstream-id-token",
+	)
+	if err != nil || result.AccessToken != "pe1_cli-session" ||
+		result.ExpiresIn != 600 {
+		t.Fatalf("token exchange = %+v, %v", result, err)
+	}
+}
 
 func TestFetchBinhostProfile(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -80,7 +80,15 @@ func TestAssembleCandidateCatalogBindsSignedBundle(t *testing.T) {
 	writeTestJSON(t, dir, "bundle-manifest.json", bundle)
 	writeTestJSON(t, dir, "bundle-manifest.sig.json", signature)
 	spec := CandidateCatalogAssembly{SchemaVersion: 1, CatalogVersion: 1, DefaultProfileID: plan.ProfileID, DefaultResourceClass: "medium",
-		ResourceClasses: []catalog.ResourceClass{{ID: "medium", MachineSpec: map[string]string{"cores": "4", "memory": "8192"}}},
+		ResourceClasses: []catalog.ResourceClass{{
+			ID: "medium", MachineSpec: map[string]string{"cores": "4", "memory": "8192", "disk_size": "50"},
+			MaxRuntimeMinutes: 90, CloudCostMicrounitsPerMinute: 2000,
+		}},
+		DefaultEgressPolicy: "egress/candidate",
+		EgressPolicies: []catalog.EgressPolicy{{
+			ID: "egress/candidate", Mode: catalog.EgressModeEnforce, Channel: "candidate",
+			Rules: []catalog.EgressRule{{ID: "git", Hosts: []string{"git.internal"}, CIDRs: []string{"10.31.0.2/32"}, Protocol: "tcp", Ports: []int{443}}},
+		}},
 		Artifacts: []CandidateCatalogArtifact{{ImageManifest: filepath.Base(manifestPath), BinhostPath: "releases/amd64/binpackages/23.0/x86-64_test", BuildPlan: filepath.Base(planPath), CommonConfig: filepath.Base(commonPath),
 			BundleManifest: "bundle-manifest.json", BundleSignature: "bundle-manifest.sig.json", BundlePublicKey: "sync-public.json",
 			InputLock: filepath.Base(lockPath), OfflineRoot: "."}}}

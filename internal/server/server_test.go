@@ -14,6 +14,7 @@ import (
 	"github.com/slchris/portage-engine/internal/binpkg"
 	"github.com/slchris/portage-engine/internal/builder"
 	"github.com/slchris/portage-engine/internal/catalog"
+	"github.com/slchris/portage-engine/internal/iam"
 	"github.com/slchris/portage-engine/pkg/config"
 )
 
@@ -139,6 +140,153 @@ func TestRouter(t *testing.T) {
 
 	if router == nil {
 		t.Fatal("Router returned nil")
+	}
+}
+
+func TestIAMRouteClassification(t *testing.T) {
+	for _, path := range []string{
+		"/health",
+		"/api/v1/binhosts",
+		"/api/v1/iam/exchange",
+		"/api/v1/iam/providers/authentik/backchannel-logout",
+		"/binpkgs/releases/amd64/binpackages/23.0/Packages",
+	} {
+		if !publicControlPlanePath(path) {
+			t.Errorf("publicControlPlanePath(%q) = false", path)
+		}
+	}
+	for _, path := range []string{
+		"/api/v1/iam/exchange/extra",
+		"/api/v1/iam/providers/authentik/backchannel-logout/extra",
+		"/api/v1/iam/providers/authentik/other",
+		"/api/v1/iam/providers//backchannel-logout",
+	} {
+		if publicControlPlanePath(path) {
+			t.Errorf("near-match IAM lifecycle route %q was public", path)
+		}
+	}
+	for _, path := range []string{
+		"/api/v1/packages/request-build",
+		"/api/v1/builds/list",
+		"/api/v1/cluster/status",
+		"/api/v1/events/jobs",
+	} {
+		if publicControlPlanePath(path) || systemAdminPath(path) {
+			t.Errorf("project route %q was classified as public or system-admin", path)
+		}
+	}
+	for _, path := range []string{
+		"/api/v1/settings/cloud",
+		"/api/v1/instances",
+		"/api/v1/worker-gateway/status",
+	} {
+		if !systemAdminPath(path) {
+			t.Errorf("systemAdminPath(%q) = false", path)
+		}
+	}
+	for _, test := range []struct {
+		method string
+		path   string
+		want   bool
+	}{
+		{http.MethodGet, "/api/v1/settings/cloud", false},
+		{http.MethodPut, "/api/v1/settings/cloud", true},
+		{http.MethodPut, "/api/v1/projects/policy", true},
+		{http.MethodDelete, "/api/v1/projects/members", true},
+		{http.MethodPost, "/api/v1/heartbeat", false},
+		{http.MethodDelete, "/api/v1/iam/sessions", false},
+		{http.MethodPost, "/api/v1/iam/sessions/revoke-all", true},
+		{http.MethodPost, "/api/v1/worker-gateway/certificates/revoke", true},
+		{http.MethodPost, "/api/v1/worker-gateway/issuers/revoke", true},
+	} {
+		request := httptest.NewRequest(test.method, test.path, nil)
+		if got := stepUpRequired(request); got != test.want {
+			t.Errorf("stepUpRequired(%s %s)=%t, want %t",
+				test.method, test.path, got, test.want)
+		}
+	}
+}
+
+func TestLegacyHighRiskWriteRequiresIndependentStepUp(t *testing.T) {
+	cfg := &config.ServerConfig{
+		BinpkgPath: t.TempDir(), MaxWorkers: 1,
+		APIKey: "primary-key", StepUpAPIKey: "second-key",
+	}
+	router := New(cfg).Router()
+	request := func(stepUp string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(
+			http.MethodPut, "/api/v1/settings/cloud", strings.NewReader(`{}`),
+		)
+		req.Header.Set("X-API-Key", "primary-key")
+		req.Header.Set("Content-Type", "application/json")
+		if stepUp != "" {
+			req.Header.Set("X-Step-Up-Key", stepUp)
+		}
+		recorder := httptest.NewRecorder()
+		router.ServeHTTP(recorder, req)
+		return recorder
+	}
+	if result := request(""); result.Code != http.StatusPreconditionRequired ||
+		!strings.Contains(result.Body.String(), "step_up_required") {
+		t.Fatalf("missing step-up response=%d %s", result.Code, result.Body.String())
+	}
+	if result := request("primary-key"); result.Code != http.StatusPreconditionRequired {
+		t.Fatalf("reused primary credential status=%d", result.Code)
+	}
+	if result := request("second-key"); result.Code == http.StatusPreconditionRequired ||
+		result.Code == http.StatusUnauthorized {
+		t.Fatalf("independent step-up was not accepted: %d %s",
+			result.Code, result.Body.String())
+	}
+}
+
+func TestOIDCStepUpPolicyRequiresFreshAcceptedContext(t *testing.T) {
+	now := time.Now()
+	server := New(&config.ServerConfig{
+		BinpkgPath:          t.TempDir(),
+		OIDCStepUpMaxAgeMin: 10,
+		OIDCStepUpAMRValues: []string{"otp", "hwk"},
+		OIDCStepUpACRValues: []string{"urn:example:mfa"},
+	})
+	principal := iam.Principal{
+		Authentication:  "oidc",
+		AuthenticatedAt: now.Add(-time.Minute),
+		AMR:             []string{"pwd", "otp"},
+		ACR:             "urn:example:mfa",
+	}
+	if !server.oidcStepUpSatisfied(principal, now) {
+		t.Fatal("fresh OIDC MFA context did not satisfy step-up policy")
+	}
+
+	principal.AuthenticatedAt = now.Add(-11 * time.Minute)
+	if server.oidcStepUpSatisfied(principal, now) {
+		t.Fatal("stale OIDC authentication satisfied step-up policy")
+	}
+	principal.AuthenticatedAt = now.Add(-time.Minute)
+	principal.AMR = []string{"pwd"}
+	if server.oidcStepUpSatisfied(principal, now) {
+		t.Fatal("OIDC authentication without an accepted AMR satisfied step-up")
+	}
+	principal.AMR = []string{"otp"}
+	principal.ACR = "urn:example:password"
+	if server.oidcStepUpSatisfied(principal, now) {
+		t.Fatal("OIDC authentication without an accepted ACR satisfied step-up")
+	}
+}
+
+func TestProjectClusterStatusDoesNotCrossProjects(t *testing.T) {
+	now := time.Now()
+	status := projectClusterStatus([]*builder.BuildStatus{
+		{ProjectID: "alpha", Status: "building", InstanceID: "vm-alpha", CreatedAt: now},
+		{ProjectID: "alpha", Status: "completed", CreatedAt: now},
+		{ProjectID: "alpha", Status: "failed", CreatedAt: now},
+		{ProjectID: "beta", Status: "queued", InstanceID: "vm-beta", CreatedAt: now},
+	}, "alpha")
+	if status.TotalBuilds != 3 || status.ActiveBuilds != 1 ||
+		status.ActiveInstances != 1 || status.QueuedBuilds != 0 ||
+		status.CompletedBuilds != 1 || status.FailedBuilds != 1 ||
+		status.SuccessRate != 50 {
+		t.Fatalf("project-scoped cluster status = %+v", status)
 	}
 }
 

@@ -3,14 +3,12 @@ package server
 
 import (
 	"context"
-	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 
@@ -19,9 +17,11 @@ import (
 	"github.com/slchris/portage-engine/internal/binpkg"
 	"github.com/slchris/portage-engine/internal/builder"
 	"github.com/slchris/portage-engine/internal/catalog"
+	"github.com/slchris/portage-engine/internal/iam"
 	"github.com/slchris/portage-engine/internal/metrics"
 	"github.com/slchris/portage-engine/internal/persistence"
 	"github.com/slchris/portage-engine/internal/runtimecache"
+	"github.com/slchris/portage-engine/internal/workergateway"
 	"github.com/slchris/portage-engine/pkg/config"
 )
 
@@ -34,30 +34,37 @@ var (
 
 // Server represents the Portage Engine server.
 type Server struct {
-	config          *config.ServerConfig
-	binpkgRoot      string
-	binpkgStore     *binpkg.Store
-	binpkgMu        sync.RWMutex
-	binpkgStores    map[string]*binpkg.Store
-	binhostProfiles map[string]binhostProfile
-	defaultBinhost  string
-	builder         *builder.Manager
-	builderRegistry *builder.Registry
-	metrics         *metrics.Metrics
-	startTime       time.Time
-	store           *ServerStore
-	persister       *ServerPersister
-	database        *persistence.Database
-	jobLedger       *persistence.JobRepository
-	databaseInitErr string
-	cache           *runtimecache.Client
-	cacheInitErr    string
-	cacheStop       context.CancelFunc
-	cacheWG         sync.WaitGroup
-	ledgerStop      chan struct{}
-	ledgerWG        sync.WaitGroup
-	binhostStop     chan struct{}
-	settingsMu      sync.Mutex // serializes settings updates + persistence
+	config            *config.ServerConfig
+	binpkgRoot        string
+	binpkgStore       *binpkg.Store
+	binpkgMu          sync.RWMutex
+	binpkgStores      map[string]*binpkg.Store
+	binhostProfiles   map[string]binhostProfile
+	defaultBinhost    string
+	builder           *builder.Manager
+	builderRegistry   *builder.Registry
+	metrics           *metrics.Metrics
+	startTime         time.Time
+	store             *ServerStore
+	persister         *ServerPersister
+	database          *persistence.Database
+	jobLedger         *persistence.JobRepository
+	iamRepository     *persistence.IAMRepository
+	oidcVerifier      iam.Verifier
+	identityVerifiers map[string]iam.IdentityVerifier
+	oidcVerifiers     map[string]iam.Verifier
+	providerIssuers   map[string]string
+	providerConfigs   map[string]config.IdentityProviderConfig
+	identityAdmins    map[string]struct{}
+	databaseInitErr   string
+	cache             *runtimecache.Client
+	cacheInitErr      string
+	cacheStop         context.CancelFunc
+	cacheWG           sync.WaitGroup
+	ledgerStop        chan struct{}
+	ledgerWG          sync.WaitGroup
+	binhostStop       chan struct{}
+	settingsMu        sync.Mutex // serializes settings updates + persistence
 }
 
 // New creates a new Server instance.
@@ -79,6 +86,7 @@ func New(cfg *config.ServerConfig) *Server {
 		metrics:         metrics.New(metricsCfg),
 		startTime:       time.Now(),
 	}
+	s.metrics.SetSchedulerProvider(s.schedulerMetricsSnapshot)
 
 	// When a build's artifact lands in the binhost PKGDIR, refresh the
 	// Packages index right away so clients see the new package without
@@ -100,8 +108,122 @@ func New(cfg *config.ServerConfig) *Server {
 	return s
 }
 
+func metricInt64(value any) int64 {
+	switch typed := value.(type) {
+	case int:
+		return int64(typed)
+	case int64:
+		return typed
+	case float64:
+		return int64(typed)
+	default:
+		return 0
+	}
+}
+
+func metricMap(value any) map[string]any {
+	if result, ok := value.(map[string]any); ok {
+		return result
+	}
+	return nil
+}
+
+func capacityPoolMetricCounts(value any) (int64, int64) {
+	pools, ok := value.([]any)
+	if !ok {
+		return 0, 0
+	}
+	var blocked int64
+	for _, value := range pools {
+		pool := metricMap(value)
+		if metricInt64(pool["unschedulable_backlog"]) > 0 {
+			blocked++
+		}
+	}
+	return int64(len(pools)), blocked
+}
+
+func targetHistoryMetricCounts(value any) (
+	samples, successes, failures, breaches, reserved, charged int64,
+) {
+	history := metricMap(value)
+	targets, ok := history["targets"].([]any)
+	if !ok {
+		return
+	}
+	for _, targetValue := range targets {
+		target := metricMap(targetValue)
+		windows, windowsOK := target["windows"].([]any)
+		if !windowsOK {
+			continue
+		}
+		for _, windowValue := range windows {
+			window := metricMap(windowValue)
+			if name, _ := window["name"].(string); name != "30d" {
+				continue
+			}
+			samples += metricInt64(window["samples"])
+			successes += metricInt64(window["successes"])
+			failures += metricInt64(window["failures"])
+			reserved += metricInt64(window["reserved_cost_microunits"])
+			charged += metricInt64(window["charged_cost_microunits"])
+			insufficient, _ := window["insufficient_data"].(bool)
+			sloMet, _ := window["slo_met"].(bool)
+			if !insufficient && !sloMet {
+				breaches++
+			}
+		}
+	}
+	return
+}
+
+func (s *Server) schedulerMetricsSnapshot() metrics.SchedulerSnapshot {
+	status := s.builder.GetSchedulerStatus()
+	fairness := metricMap(status["fairness"])
+	workerScoring := metricMap(status["worker_scoring"])
+	autoscaler := metricMap(status["autoscaler"])
+	actuator := metricMap(autoscaler["actuator"])
+	pools, blockedPools := capacityPoolMetricCounts(autoscaler["pools"])
+	targetSamples, targetSuccesses, targetFailures, targetBreaches,
+		targetReserved, targetCharged := targetHistoryMetricCounts(
+		status["target_history"],
+	)
+	return metrics.SchedulerSnapshot{
+		QueuedTasks:           metricInt64(status["queued_tasks"]),
+		UnschedulableTasks:    metricInt64(status["unschedulable_tasks"]),
+		RunningTasks:          metricInt64(status["running_tasks"]),
+		EligibleProjects:      metricInt64(fairness["eligible_projects"]),
+		StarvedProjects:       metricInt64(fairness["starved_projects"]),
+		MaxQueueWaitSeconds:   metricInt64(fairness["max_queue_wait_seconds"]),
+		WorkerDecisions:       metricInt64(workerScoring["decisions_last_hour"]),
+		WorkerMultiCandidate:  metricInt64(workerScoring["multi_candidate_last_hour"]),
+		TargetSamples30d:      targetSamples,
+		TargetSuccesses30d:    targetSuccesses,
+		TargetFailures30d:     targetFailures,
+		TargetSLOBreaches30d:  targetBreaches,
+		TargetReservedCost30d: targetReserved,
+		TargetChargedCost30d:  targetCharged,
+		AutoscaleActiveSlots:  metricInt64(autoscaler["active_slots"]),
+		AutoscaleDesiredSlots: metricInt64(autoscaler["desired_slots"]),
+		AutoscaleBacklog:      metricInt64(autoscaler["backlog"]),
+		AutoscalePools:        pools,
+		AutoscaleBlockedPools: blockedPools,
+		CapacityOpenActions:   metricInt64(actuator["open_actions"]),
+		CapacityProvisioning:  metricInt64(actuator["provisioning_instances"]),
+		CapacityActive:        metricInt64(actuator["active_instances"]),
+		CapacityDraining:      metricInt64(actuator["draining_instances"]),
+		CapacityDeleting:      metricInt64(actuator["deleting_instances"]),
+	}
+}
+
+// SetWorkerIssuer installs the listener-trust-bound issuer during startup.
+func (s *Server) SetWorkerIssuer(issuer workergateway.Issuer) error {
+	return s.builder.SetWorkerIssuer(issuer)
+}
+
 // Initialize initializes the server, including GPG key setup and state persistence.
 func (s *Server) Initialize() error {
+	executorOnly := s.config.RuntimeRole == "executor"
 	// Validate an explicitly configured control-plane catalog before GPG,
 	// persistence, or any other side effect. Compatibility mode is loaded later
 	// because it must reflect dashboard-persisted cloud settings.
@@ -113,6 +235,11 @@ func (s *Server) Initialize() error {
 
 	if err := s.initDatabase(); err != nil {
 		return err
+	}
+	if !executorOnly {
+		if err := s.initIAM(); err != nil {
+			return err
+		}
 	}
 	if err := s.initCache(); err != nil {
 		return err
@@ -137,8 +264,10 @@ func (s *Server) Initialize() error {
 	if err := s.configureBinhostStores(); err != nil {
 		return err
 	}
-	if err := s.syncFactoryStatus(); err != nil {
-		log.Printf("Warning: image-factory status was not persisted: %v", err)
+	if !executorOnly {
+		if err := s.syncFactoryStatus(); err != nil {
+			log.Printf("Warning: image-factory status was not persisted: %v", err)
+		}
 	}
 
 	// Only the isolated signer's public key is exposed to verification and
@@ -148,13 +277,29 @@ func (s *Server) Initialize() error {
 	// Build the binhost Packages index from whatever is already on disk so
 	// clients can immediately consume this server as a binhost, then keep it
 	// fresh in the background as new packages appear in PKGDIR.
-	s.refreshBinhostIndexes("startup")
-	if err := s.reconcileArtifacts(); err != nil {
-		log.Printf("Warning: artifact metadata reconciliation failed: %v", err)
+	if !executorOnly {
+		s.refreshBinhostIndexes("startup")
+		if err := s.reconcileArtifacts(); err != nil {
+			log.Printf("Warning: artifact metadata reconciliation failed: %v", err)
+		}
+		s.startBinhostRefresher(5 * time.Minute)
+		s.builder.StartInfrastructureCleanup()
 	}
-	s.startBinhostRefresher(5 * time.Minute)
-	s.builder.StartInfrastructureCleanup()
+	if s.config.PhaseExecutorMode == "active" {
+		if s.jobLedger == nil || !s.config.Database.Required ||
+			!s.config.WorkerGatewayEnabled ||
+			len(s.config.RemoteBuilders) > 0 {
+			return fmt.Errorf(
+				"active phase executor requires the PostgreSQL authority, required database mode, outbound worker gateway, and no legacy remote builders",
+			)
+		}
+	}
 	s.builder.StartWorkers()
+	if executorOnly {
+		log.Printf(
+			"Persistent executor role started without control-plane or Worker Gateway listeners",
+		)
+	}
 
 	return nil
 }
@@ -572,11 +717,23 @@ func (s *Server) Router() http.Handler {
 	mux.HandleFunc("/api/v1/builds/logs", s.handleBuildLogs)
 	mux.HandleFunc("/api/v1/cluster/status", s.handleClusterStatus)
 	mux.HandleFunc("/api/v1/scheduler/status", s.handleSchedulerStatus)
+	mux.HandleFunc("/api/v1/worker-gateway/status", s.handleWorkerGatewayStatus)
+	mux.HandleFunc("/api/v1/worker-gateway/identities", s.handleWorkloadIdentityInventory)
+	mux.HandleFunc("/api/v1/worker-gateway/certificates/revoke", s.handleWorkloadCertificateRevoke)
+	mux.HandleFunc("/api/v1/worker-gateway/issuers/revoke", s.handleWorkloadIssuerRevoke)
 	mux.HandleFunc("/api/v1/ledger/status", s.handleLedgerStatus)
 	mux.HandleFunc("/api/v1/image-factory/status", s.handleImageFactoryStatus)
 	mux.HandleFunc("/api/v1/runtime-metadata/status", s.handleRuntimeMetadataStatus)
 	mux.HandleFunc("/api/v1/cache/status", s.handleCacheStatus)
 	mux.HandleFunc("/api/v1/events/jobs", s.handleJobEvents)
+	mux.HandleFunc("/api/v1/iam/exchange", s.handleIAMExchange)
+	mux.HandleFunc("/api/v1/iam/providers/", s.handleIAMProviderLifecycle)
+	mux.HandleFunc("/api/v1/iam/me", s.handleIAMMe)
+	mux.HandleFunc("/api/v1/projects", s.handleProjects)
+	mux.HandleFunc("/api/v1/projects/members", s.handleProjectMembers)
+	mux.HandleFunc("/api/v1/projects/policy", s.handleProjectPolicy)
+	mux.HandleFunc("/api/v1/iam/sessions", s.handleIAMSessions)
+	mux.HandleFunc("/api/v1/iam/sessions/revoke-all", s.handleIAMRevokeAllSessions)
 
 	// Builder endpoints
 	mux.HandleFunc("/api/v1/builders/register", s.handleBuilderRegister)
@@ -615,16 +772,73 @@ func (s *Server) Router() http.Handler {
 	mux.HandleFunc("/livez", s.handleLivez)
 
 	// Stack middleware (outermost first):
-	// requestID → enhancedLogging → CORS → maxBodySize → apiKey auth
+	// requestID → enhancedLogging → CORS → maxBodySize → authentication/RBAC
 	var handler http.Handler = mux
-	handler = s.apiKeyAuthMiddleware(handler)
 	handler = s.rateLimitMiddleware(handler)
+	handler = s.apiKeyAuthMiddleware(handler)
+	handler = s.authenticationRateLimitMiddleware(handler)
 	handler = s.maxBodySizeMiddleware(handler)
 	handler = s.corsMiddleware(handler)
 	handler = s.enhancedLoggingMiddleware(handler)
 	handler = s.requestIDMiddleware(handler)
 
 	return handler
+}
+
+// WorkerGatewayHandler exposes only the attempt-bound worker protocol. Callers
+// must mount it on the dedicated mutual-TLS listener, never the ordinary API
+// listener.
+func (s *Server) WorkerGatewayHandler() http.Handler {
+	return s.builder.WorkerGatewayHandler()
+}
+
+func (s *Server) handleWorkerGatewayStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	status := s.builder.WorkerGatewayStatus()
+	issuerRuntime := s.builder.WorkerIssuerStatus()
+	issuerObserved := status.ActiveIssuers + status.DrainingIssuers +
+		status.RevokedIssuers
+	issuerLifecycleHealthy := issuerObserved == 0 || status.ActiveIssuers > 0
+	issuerHealthy := issuerLifecycleHealthy && issuerRuntime.Healthy
+	response := map[string]any{
+		"enabled":               s.config.WorkerGatewayEnabled,
+		"authority":             status.Authority,
+		"listener_port":         s.config.WorkerGatewayPort,
+		"transport":             "mTLS",
+		"registered_sessions":   status.RegisteredSessions,
+		"connected_sessions":    status.ConnectedSessions,
+		"pending_tasks":         status.PendingTasks,
+		"pending_uploads":       status.PendingUploads,
+		"active_issuers":        status.ActiveIssuers,
+		"draining_issuers":      status.DrainingIssuers,
+		"revoked_issuers":       status.RevokedIssuers,
+		"active_certificates":   status.ActiveCertificates,
+		"revoked_certificates":  status.RevokedCertificates,
+		"expiring_certificates": status.ExpiringCertificates,
+		"issuer_id":             s.config.WorkerGatewayIssuerID,
+		"issuer_provider":       s.config.WorkerGatewayIssuerProvider,
+		"issuer_healthy":        issuerHealthy,
+		"issuer_runtime":        issuerRuntime,
+		"inbound_builder_api":   !s.config.WorkerGatewayEnabled,
+		"executor_protocol":     builder.ExecutorProtocolVersion,
+		"certificate_ttl_min":   s.config.WorkerCertificateTTLMin,
+		"phase_executor_mode":   s.config.PhaseExecutorMode,
+	}
+	if s.jobLedger != nil {
+		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		phaseWork, err := s.jobLedger.GlobalPhaseWorkStatus(ctx)
+		cancel()
+		if err != nil {
+			response["phase_work_error"] = err.Error()
+		} else {
+			response["phase_work"] = phaseWork
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(response)
 }
 
 // corsMiddleware adds CORS headers using the configured allowed origins.
@@ -644,7 +858,11 @@ func (s *Server) corsMiddleware(next http.Handler) http.Handler {
 		// the Allow-Origin header at all — the browser will block the request.
 
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key")
+		w.Header().Set(
+			"Access-Control-Allow-Headers",
+			"Content-Type, Authorization, X-API-Key, X-Step-Up-Key, "+
+				"X-Step-Up-Authorization, X-Project-ID, Idempotency-Key",
+		)
 
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusOK)
@@ -668,54 +886,62 @@ func (s *Server) isOriginAllowed(origin string) bool {
 	return false
 }
 
-// apiKeyAuthMiddleware protects API endpoints with a shared API key.
-// Public endpoints (/health, /readyz, /livez, /metrics) are excluded.
-// If APIKey is empty in config, the middleware is a no-op (backward compatible).
+// apiKeyAuthMiddleware is retained as the stack entry-point name for
+// compatibility, but now establishes a typed principal from either the legacy
+// administrator key or a verified Portage Engine federated session.
 func (s *Server) apiKeyAuthMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Skip auth if no API key is configured
-		if s.config.APIKey == "" {
+		if publicControlPlanePath(r.URL.Path) {
 			next.ServeHTTP(w, r)
 			return
 		}
-
-		// Public endpoints that never require auth. The binhost (/binpkgs/) is
-		// public because emerge cannot present the API key; it is read-only.
-		path := r.URL.Path
-		if path == "/health" || path == "/readyz" || path == "/livez" || path == "/metrics" || path == "/metrics/prometheus" ||
-			path == "/api/v1/binhosts" ||
-			strings.HasPrefix(path, "/binpkgs/") || strings.HasPrefix(path, "/verify-binhost/") {
-			next.ServeHTTP(w, r)
-			return
-		}
-
-		// CORS preflight must pass through
 		if r.Method == http.MethodOptions {
 			next.ServeHTTP(w, r)
 			return
 		}
-
-		// Check API key from X-API-Key header or Authorization: Bearer <key>
-		apiKey := r.Header.Get("X-API-Key")
-		if apiKey == "" {
-			auth := r.Header.Get("Authorization")
-			if strings.HasPrefix(auth, "Bearer ") {
-				apiKey = strings.TrimPrefix(auth, "Bearer ")
-			}
-		}
-
-		// Constant-time comparison to avoid leaking the key via timing.
-		if subtle.ConstantTimeCompare([]byte(apiKey), []byte(s.config.APIKey)) != 1 {
+		principal, err := s.authenticateRequest(r)
+		if err != nil {
 			s.metrics.IncHTTPRequestErrors()
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusUnauthorized)
-			_ = json.NewEncoder(w).Encode(map[string]string{
-				"error": "unauthorized: invalid or missing API key",
-			})
+			s.auditRequest(r, iam.Principal{Authentication: "unknown"},
+				"request.authenticate", "http_request", r.URL.Path, "", "denied",
+				map[string]any{"method": r.Method})
+			writeIAMError(w, http.StatusUnauthorized, "unauthorized: invalid or missing identity")
 			return
 		}
-
-		next.ServeHTTP(w, r)
+		if systemAdminPath(r.URL.Path) && !principal.SystemAdmin {
+			s.metrics.IncHTTPRequestErrors()
+			s.auditRequest(r, principal, "request.authorize", "http_request",
+				r.URL.Path, "", "denied", map[string]any{"required": "system-admin"})
+			writeIAMError(w, http.StatusForbidden, "system administrator role required")
+			return
+		}
+		if stepUpRequired(r) {
+			principal, err = s.authorizeStepUp(r, principal)
+			if err != nil {
+				s.metrics.IncHTTPRequestErrors()
+				s.auditRequest(r, principal, "request.step_up", "http_request",
+					r.URL.Path, "", "denied", map[string]any{
+						"method": r.Method, "reason": err.Error(),
+					})
+				w.Header().Set(
+					"WWW-Authenticate",
+					`Bearer error="insufficient_user_authentication"`,
+				)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusPreconditionRequired)
+				_ = json.NewEncoder(w).Encode(map[string]string{
+					"error": "fresh step-up authentication required",
+					"code":  "step_up_required",
+				})
+				return
+			}
+			s.auditRequest(r, principal, "request.step_up", "http_request",
+				r.URL.Path, "", "success", map[string]any{
+					"method": r.Method, "authentication": principal.Authentication,
+					"session_id": principal.SessionID,
+				})
+		}
+		next.ServeHTTP(w, r.WithContext(iam.WithPrincipal(r.Context(), principal)))
 	})
 }
 
@@ -747,6 +973,12 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	databaseHealth := s.checkDatabaseHealth()
 	ledgerOK, ledgerStatus := s.checkLedgerHealth()
 	cacheHealth := runtimecache.Health{Enabled: s.config.Cache.Enabled}
+	workerGateway := s.builder.WorkerGatewayStatus()
+	issuerRuntime := s.builder.WorkerIssuerStatus()
+	issuerObserved := workerGateway.ActiveIssuers +
+		workerGateway.DrainingIssuers + workerGateway.RevokedIssuers
+	issuerLifecycleHealthy := issuerObserved == 0 || workerGateway.ActiveIssuers > 0
+	issuerHealthy := issuerLifecycleHealthy && issuerRuntime.Healthy
 	metadataHealth := map[string]any{"enabled": false, "ok": true}
 	metadataOK := true
 	if s.jobLedger != nil {
@@ -783,6 +1015,9 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	if !metadataOK {
 		overallStatus = "degraded"
 	}
+	if s.config.WorkerGatewayEnabled && !issuerHealthy {
+		overallStatus = "degraded"
+	}
 	// On-demand VM builders are expected to disappear after every build. Their
 	// stale heartbeat history is useful observability data but is not a control
 	// plane dependency and must not make the load-balancer health endpoint 503.
@@ -804,6 +1039,16 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 			"builders": map[string]interface{}{
 				"online": buildersOnline,
 				"total":  buildersTotal,
+			},
+			"worker_gateway": map[string]interface{}{
+				"enabled":          s.config.WorkerGatewayEnabled,
+				"registered":       workerGateway.RegisteredSessions,
+				"connected":        workerGateway.ConnectedSessions,
+				"issuer_ok":        issuerHealthy,
+				"issuer_runtime":   issuerRuntime,
+				"active_issuers":   workerGateway.ActiveIssuers,
+				"draining_issuers": workerGateway.DrainingIssuers,
+				"revoked_issuers":  workerGateway.RevokedIssuers,
 			},
 			"database": map[string]interface{}{
 				"enabled":        s.config.Database.Enabled,

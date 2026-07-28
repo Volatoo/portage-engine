@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -75,11 +76,12 @@ func (r *JobRepository) RecordInfra(ctx context.Context, status *builder.BuildSt
 		ownerToken := fmt.Sprintf("%s:%d", attemptID, status.FenceToken)
 		tag, err := q.Exec(ctx, `
 			INSERT INTO infra_instances (
-				id, job_id, attempt_id, provider, provider_instance_id, state,
+				id, project_id, job_id, attempt_id, provider, provider_instance_id, state,
 				fence_token, owner_token, remote_state_ref, attributes,
 				failure_detail, cleanup_after, deleted_at, created_at, updated_at
 			) VALUES (
-				$1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb,
+				$1, (SELECT project_id FROM build_jobs WHERE id = $2),
+				$2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb,
 				$11, $12, $13, clock_timestamp(), clock_timestamp()
 			)
 			ON CONFLICT (provider, provider_instance_id)
@@ -138,11 +140,12 @@ func (r *JobRepository) RecordArtifacts(ctx context.Context, status *builder.Bui
 			}
 			tag, err := q.Exec(ctx, `
 				INSERT INTO artifacts (
-					id, job_id, attempt_id, kind, state, digest_algorithm,
+					id, project_id, job_id, attempt_id, kind, state, digest_algorithm,
 					digest, size_bytes, media_type, location, lineage,
 					retention_until, created_at, published_at, updated_at
 				) VALUES (
-					$1, $2, $3, $4, $5, 'sha256',
+					$1, (SELECT project_id FROM build_jobs WHERE id = $2),
+					$2, $3, $4, $5, 'sha256',
 					$6, $7, $8, $9, $10::jsonb,
 					$11, clock_timestamp(), $12, clock_timestamp()
 				)
@@ -164,6 +167,247 @@ func (r *JobRepository) RecordArtifacts(ctx context.Context, status *builder.Bui
 			if tag.RowsAffected() != 1 {
 				return fmt.Errorf("artifact %s is already owned by another attempt", record.Location)
 			}
+		}
+		return nil
+	})
+	r.recordWrite(err)
+	return err
+}
+
+func ensureArtifactBudget(
+	ctx context.Context,
+	q Querier,
+	jobID, attemptID uuid.UUID,
+) (builder.ArtifactBudget, error) {
+	if _, err := q.Exec(ctx, `
+		INSERT INTO project_artifact_budgets (
+			attempt_id, project_id, job_id, limit_bytes
+		)
+		SELECT a.id, j.project_id, j.id, pp.max_artifact_bytes_per_job
+		FROM build_attempts a
+		JOIN build_jobs j ON j.id = a.job_id
+		JOIN project_policies pp ON pp.project_id = j.project_id
+		WHERE a.id = $1 AND j.id = $2
+		ON CONFLICT (attempt_id) DO NOTHING
+	`, attemptID, jobID); err != nil {
+		return builder.ArtifactBudget{}, fmt.Errorf("initialize artifact budget: %w", err)
+	}
+	var budget builder.ArtifactBudget
+	var state string
+	err := q.QueryRow(ctx, `
+		SELECT limit_bytes, active_bytes, peak_bytes, state
+		FROM project_artifact_budgets
+		WHERE attempt_id = $1
+		FOR UPDATE
+	`, attemptID).Scan(
+		&budget.LimitBytes, &budget.ActiveBytes, &budget.PeakBytes, &state,
+	)
+	if err != nil {
+		return builder.ArtifactBudget{}, fmt.Errorf("read artifact budget: %w", err)
+	}
+	if state != "active" {
+		return builder.ArtifactBudget{}, fmt.Errorf("artifact budget is already released")
+	}
+	return budget, nil
+}
+
+// ArtifactBudget creates (on first use) and returns the immutable per-attempt
+// limit snapshot. The active durable claim is required even for a read so a
+// stale control-plane replica cannot use an old budget to authorize writes.
+func (r *JobRepository) ArtifactBudget(
+	ctx context.Context,
+	status *builder.BuildStatus,
+) (builder.ArtifactBudget, error) {
+	var budget builder.ArtifactBudget
+	err := r.db.WithTx(ctx, pgx.TxOptions{}, func(q Querier) error {
+		jobID, attemptID, err := validateMetadataFence(ctx, q, status, false)
+		if err != nil {
+			return err
+		}
+		budget, err = ensureArtifactBudget(ctx, q, jobID, attemptID)
+		return err
+	})
+	r.recordWrite(err)
+	return budget, err
+}
+
+// SetArtifactGenerationBytes atomically replaces one generation's accounted
+// size and rejects the update when all retained generations would exceed the
+// snapshotted limit. Repeating the same update is idempotent.
+func (r *JobRepository) SetArtifactGenerationBytes(
+	ctx context.Context,
+	status *builder.BuildStatus,
+	generation string,
+	sizeBytes int64,
+) (builder.ArtifactBudget, error) {
+	if strings.TrimSpace(generation) == "" || len(generation) > 160 || sizeBytes < 0 {
+		return builder.ArtifactBudget{}, fmt.Errorf("artifact generation and non-negative size are required")
+	}
+	var budget builder.ArtifactBudget
+	err := r.db.WithTx(ctx, pgx.TxOptions{}, func(q Querier) error {
+		jobID, attemptID, err := validateMetadataFence(ctx, q, status, false)
+		if err != nil {
+			return err
+		}
+		budget, err = ensureArtifactBudget(ctx, q, jobID, attemptID)
+		if err != nil {
+			return err
+		}
+		var oldSize int64
+		var oldState string
+		err = q.QueryRow(ctx, `
+			SELECT size_bytes, state
+			FROM artifact_generation_reservations
+			WHERE attempt_id = $1 AND generation = $2
+			FOR UPDATE
+		`, attemptID, generation).Scan(&oldSize, &oldState)
+		if errors.Is(err, pgx.ErrNoRows) {
+			oldSize, oldState, err = 0, "released", nil
+		}
+		if err != nil {
+			return fmt.Errorf("read artifact generation reservation: %w", err)
+		}
+		if oldState != "active" {
+			oldSize = 0
+		}
+		nextBytes := budget.ActiveBytes - oldSize + sizeBytes
+		if nextBytes < 0 || nextBytes > budget.LimitBytes {
+			return fmt.Errorf(
+				"artifact quarantine budget exceeded: requested=%d active=%d limit=%d",
+				sizeBytes, budget.ActiveBytes-oldSize, budget.LimitBytes,
+			)
+		}
+		if _, err := q.Exec(ctx, `
+			INSERT INTO artifact_generation_reservations (
+				attempt_id, generation, size_bytes
+			) VALUES ($1, $2, $3)
+			ON CONFLICT (attempt_id, generation)
+			DO UPDATE SET
+				size_bytes = EXCLUDED.size_bytes,
+				state = 'active',
+				updated_at = clock_timestamp(),
+				released_at = NULL,
+				release_reason = ''
+		`, attemptID, generation, sizeBytes); err != nil {
+			return fmt.Errorf("reserve artifact generation bytes: %w", err)
+		}
+		if err := q.QueryRow(ctx, `
+			UPDATE project_artifact_budgets
+			SET active_bytes = $2,
+			    peak_bytes = GREATEST(peak_bytes, $2),
+			    updated_at = clock_timestamp()
+			WHERE attempt_id = $1 AND state = 'active'
+			RETURNING limit_bytes, active_bytes, peak_bytes
+		`, attemptID, nextBytes).Scan(
+			&budget.LimitBytes, &budget.ActiveBytes, &budget.PeakBytes,
+		); err != nil {
+			return fmt.Errorf("update artifact budget: %w", err)
+		}
+		return nil
+	})
+	r.recordWrite(err)
+	return budget, err
+}
+
+// ReleaseArtifactGeneration drops one retained generation from current usage.
+func (r *JobRepository) ReleaseArtifactGeneration(
+	ctx context.Context,
+	status *builder.BuildStatus,
+	generation, reason string,
+) error {
+	err := r.db.WithTx(ctx, pgx.TxOptions{}, func(q Querier) error {
+		_, attemptID, err := validateMetadataFence(ctx, q, status, true)
+		if err != nil {
+			return err
+		}
+		var budgetState string
+		err = q.QueryRow(ctx, `
+			SELECT state
+			FROM project_artifact_budgets
+			WHERE attempt_id = $1
+			FOR UPDATE
+		`, attemptID).Scan(&budgetState)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("lock artifact budget for generation release: %w", err)
+		}
+		if budgetState != "active" {
+			return nil
+		}
+		var released int64
+		err = q.QueryRow(ctx, `
+			UPDATE artifact_generation_reservations
+			SET state = 'released', released_at = clock_timestamp(),
+			    updated_at = clock_timestamp(), release_reason = $3
+			WHERE attempt_id = $1 AND generation = $2 AND state = 'active'
+			RETURNING size_bytes
+		`, attemptID, generation, reason).Scan(&released)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("release artifact generation: %w", err)
+		}
+		if _, err := q.Exec(ctx, `
+			UPDATE project_artifact_budgets
+			SET active_bytes = GREATEST(active_bytes - $2, 0),
+			    updated_at = clock_timestamp()
+			WHERE attempt_id = $1 AND state = 'active'
+		`, attemptID, released); err != nil {
+			return fmt.Errorf("release artifact generation bytes: %w", err)
+		}
+		return nil
+	})
+	r.recordWrite(err)
+	return err
+}
+
+// ReleaseArtifactBudget closes every retained generation after promotion,
+// cleanup, cancellation, or failure.
+func (r *JobRepository) ReleaseArtifactBudget(
+	ctx context.Context,
+	status *builder.BuildStatus,
+	reason string,
+) error {
+	err := r.db.WithTx(ctx, pgx.TxOptions{}, func(q Querier) error {
+		_, attemptID, err := validateMetadataFence(ctx, q, status, true)
+		if err != nil {
+			return err
+		}
+		var budgetState string
+		err = q.QueryRow(ctx, `
+			SELECT state
+			FROM project_artifact_budgets
+			WHERE attempt_id = $1
+			FOR UPDATE
+		`, attemptID).Scan(&budgetState)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("lock artifact budget for release: %w", err)
+		}
+		if budgetState != "active" {
+			return nil
+		}
+		now := time.Now().UTC()
+		if _, err := q.Exec(ctx, `
+			UPDATE artifact_generation_reservations
+			SET state = 'released', released_at = $2, updated_at = $2,
+			    release_reason = $3
+			WHERE attempt_id = $1 AND state = 'active'
+		`, attemptID, now, reason); err != nil {
+			return fmt.Errorf("release artifact generations: %w", err)
+		}
+		if _, err := q.Exec(ctx, `
+			UPDATE project_artifact_budgets
+			SET state = 'released', active_bytes = 0, released_at = $2,
+			    updated_at = $2, release_reason = $3
+			WHERE attempt_id = $1 AND state = 'active'
+		`, attemptID, now, reason); err != nil {
+			return fmt.Errorf("release artifact budget: %w", err)
 		}
 		return nil
 	})
@@ -224,6 +468,12 @@ type ArtifactReconcileReport struct {
 	Orphaned  int `json:"orphaned"`
 }
 
+type durableArtifact struct {
+	ID                      uuid.UUID
+	Location, Digest, State string
+	Size                    int64
+}
+
 // ReconcileArtifacts compares external binpkg bytes with PostgreSQL metadata.
 // Unknown files are quarantined logically as "orphaned"; they are never
 // silently promoted into a job lineage.
@@ -234,132 +484,171 @@ func (r *JobRepository) ReconcileArtifacts(ctx context.Context, inventory []Arti
 		available[item.Location] = item
 	}
 	err := r.db.WithTx(ctx, pgx.TxOptions{}, func(q Querier) error {
-		rows, err := q.Query(ctx, `
+		return reconcileArtifactsTx(ctx, q, available, &report)
+	})
+	r.recordWrite(err)
+	return report, err
+}
+
+func reconcileArtifactsTx(
+	ctx context.Context,
+	q Querier,
+	available map[string]ArtifactInventory,
+	report *ArtifactReconcileReport,
+) error {
+	durable, err := loadReconcileArtifacts(ctx, q, false)
+	if err != nil {
+		return err
+	}
+	if err := reconcileExpectedArtifacts(ctx, q, durable, available, report); err != nil {
+		return err
+	}
+	knownOrphans, err := loadReconcileArtifacts(ctx, q, true)
+	if err != nil {
+		return err
+	}
+	if err := reconcileKnownOrphans(ctx, q, knownOrphans, available, report); err != nil {
+		return err
+	}
+	return recordNewOrphans(ctx, q, available, report)
+}
+
+func loadReconcileArtifacts(
+	ctx context.Context,
+	q Querier,
+	orphaned bool,
+) ([]durableArtifact, error) {
+	query := `
 			SELECT id, location, digest, size_bytes, state
 			FROM artifacts
 			WHERE state IN ('published','missing','corrupt','staged')
 			ORDER BY CASE WHEN state = 'staged' THEN 1 ELSE 0 END, created_at
 			FOR UPDATE
-		`)
-		if err != nil {
-			return err
-		}
-		type durableArtifact struct {
-			ID                      uuid.UUID
-			Location, Digest, State string
-			Size                    int64
-		}
-		var durable []durableArtifact
-		for rows.Next() {
-			var item durableArtifact
-			if err := rows.Scan(&item.ID, &item.Location, &item.Digest, &item.Size, &item.State); err != nil {
-				rows.Close()
-				return err
-			}
-			durable = append(durable, item)
-		}
-		if err := rows.Err(); err != nil {
-			rows.Close()
-			return err
-		}
-		rows.Close()
-		for _, expected := range durable {
-			actual, exists := available[expected.Location]
-			if expected.State == "staged" && !exists {
-				// The normal pre-promotion record points at the future public
-				// location. Absence is expected until the external atomic move.
-				continue
-			}
-			if expected.State != "staged" {
-				report.Published++
-			}
-			state := "published"
-			switch {
-			case !exists:
-				state = "missing"
-				report.Missing++
-			case actual.Digest != expected.Digest || actual.SizeBytes != expected.Size:
-				state = "corrupt"
-				report.Corrupt++
-			default:
-				report.Matched++
-				if expected.State == "staged" {
-					report.Published++
-				}
-			}
-			delete(available, expected.Location)
-			if _, err := q.Exec(ctx, `
-				UPDATE artifacts
-				SET state = $2,
-				    published_at = CASE
-				      WHEN $2 = 'published' THEN COALESCE(published_at, clock_timestamp())
-				      ELSE published_at
-				    END,
-				    updated_at = clock_timestamp()
-				WHERE id = $1
-			`, expected.ID, state); err != nil {
-				return err
-			}
-		}
-		orphanRows, err := q.Query(ctx, `
+		`
+	if orphaned {
+		query = `
 			SELECT id, location, digest, size_bytes, state
 			FROM artifacts
 			WHERE state = 'orphaned'
 			FOR UPDATE
-		`)
+		`
+	}
+	rows, err := q.Query(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var durable []durableArtifact
+	for rows.Next() {
+		var item durableArtifact
+		if err := rows.Scan(&item.ID, &item.Location, &item.Digest, &item.Size, &item.State); err != nil {
+			return nil, err
+		}
+		durable = append(durable, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return durable, nil
+}
+
+func reconcileExpectedArtifacts(
+	ctx context.Context,
+	q Querier,
+	durable []durableArtifact,
+	available map[string]ArtifactInventory,
+	report *ArtifactReconcileReport,
+) error {
+	for _, expected := range durable {
+		actual, exists := available[expected.Location]
+		if expected.State == "staged" && !exists {
+			// The normal pre-promotion record points at the future public
+			// location. Absence is expected until the external atomic move.
+			continue
+		}
+		if expected.State != "staged" {
+			report.Published++
+		}
+		state := "published"
+		switch {
+		case !exists:
+			state = "missing"
+			report.Missing++
+		case actual.Digest != expected.Digest || actual.SizeBytes != expected.Size:
+			state = "corrupt"
+			report.Corrupt++
+		default:
+			report.Matched++
+			if expected.State == "staged" {
+				report.Published++
+			}
+		}
+		delete(available, expected.Location)
+		if _, err := q.Exec(ctx, `
+			UPDATE artifacts
+			SET state = $2,
+			    published_at = CASE
+			      WHEN $2 = 'published' THEN COALESCE(published_at, clock_timestamp())
+			      ELSE published_at
+			    END,
+			    updated_at = clock_timestamp()
+			WHERE id = $1
+		`, expected.ID, state); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func reconcileKnownOrphans(
+	ctx context.Context,
+	q Querier,
+	knownOrphans []durableArtifact,
+	available map[string]ArtifactInventory,
+	report *ArtifactReconcileReport,
+) error {
+	for _, orphan := range knownOrphans {
+		actual, exists := available[orphan.Location]
+		if exists && actual.Digest == orphan.Digest && actual.SizeBytes == orphan.Size {
+			delete(available, orphan.Location)
+			report.Orphaned++
+			continue
+		}
+		// Orphan rows have no build lineage. Remove stale observations so
+		// a deleted or replaced file does not permanently poison status.
+		if _, err := q.Exec(ctx, `DELETE FROM artifacts WHERE id = $1`, orphan.ID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func recordNewOrphans(
+	ctx context.Context,
+	q Querier,
+	available map[string]ArtifactInventory,
+	report *ArtifactReconcileReport,
+) error {
+	for _, item := range available {
+		if item.Location == "" || item.Digest == "" || item.SizeBytes < 0 {
+			continue
+		}
+		tag, err := q.Exec(ctx, `
+			INSERT INTO artifacts (
+				id, kind, state, digest_algorithm, digest, size_bytes,
+				media_type, location, lineage, created_at, updated_at
+			) VALUES (
+				$1, 'gentoo-binpkg', 'orphaned', 'sha256', $2, $3,
+				'application/vnd.gentoo.gpkg', $4,
+				'{"reason":"discovered_without_job_lineage"}'::jsonb,
+				clock_timestamp(), clock_timestamp()
+			)
+			ON CONFLICT (digest_algorithm, digest, location) DO NOTHING
+		`, uuid.New(), item.Digest, item.SizeBytes, item.Location)
 		if err != nil {
 			return err
 		}
-		var knownOrphans []durableArtifact
-		for orphanRows.Next() {
-			var item durableArtifact
-			if err := orphanRows.Scan(&item.ID, &item.Location, &item.Digest, &item.Size, &item.State); err != nil {
-				orphanRows.Close()
-				return err
-			}
-			knownOrphans = append(knownOrphans, item)
-		}
-		if err := orphanRows.Err(); err != nil {
-			orphanRows.Close()
-			return err
-		}
-		orphanRows.Close()
-		for _, orphan := range knownOrphans {
-			actual, exists := available[orphan.Location]
-			if exists && actual.Digest == orphan.Digest && actual.SizeBytes == orphan.Size {
-				delete(available, orphan.Location)
-				report.Orphaned++
-				continue
-			}
-			// Orphan rows have no build lineage. Remove stale observations so
-			// a deleted or replaced file does not permanently poison status.
-			if _, err := q.Exec(ctx, `DELETE FROM artifacts WHERE id = $1`, orphan.ID); err != nil {
-				return err
-			}
-		}
-		for _, item := range available {
-			if item.Location == "" || item.Digest == "" || item.SizeBytes < 0 {
-				continue
-			}
-			tag, err := q.Exec(ctx, `
-				INSERT INTO artifacts (
-					id, kind, state, digest_algorithm, digest, size_bytes,
-					media_type, location, lineage, created_at, updated_at
-				) VALUES (
-					$1, 'gentoo-binpkg', 'orphaned', 'sha256', $2, $3,
-					'application/vnd.gentoo.gpkg', $4,
-					'{"reason":"discovered_without_job_lineage"}'::jsonb,
-					clock_timestamp(), clock_timestamp()
-				)
-				ON CONFLICT (digest_algorithm, digest, location) DO NOTHING
-			`, uuid.New(), item.Digest, item.SizeBytes, item.Location)
-			if err != nil {
-				return err
-			}
-			report.Orphaned += int(tag.RowsAffected())
-		}
-		return nil
-	})
-	r.recordWrite(err)
-	return report, err
+		report.Orphaned += int(tag.RowsAffected())
+	}
+	return nil
 }

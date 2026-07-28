@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -25,6 +26,10 @@ import (
 
 // LocalBuildRequest represents a local package build request.
 type LocalBuildRequest struct {
+	// ExecutionID is the durable Worker Gateway command ID. Re-delivery of the
+	// same command must return the original BuildJob instead of running emerge
+	// against the native root a second time.
+	ExecutionID   string            `json:"execution_id,omitempty"`
 	PackageName   string            `json:"package_name"`
 	Version       string            `json:"version"`
 	Arch          string            `json:"arch,omitempty"`
@@ -126,6 +131,7 @@ type LocalBuilder struct {
 	jobQueue         chan *BuildJob
 	jobs             map[string]*BuildJob
 	jobsMutex        sync.RWMutex
+	executionMu      sync.Mutex
 	storageUpload    *StorageUploader
 	workDir          string
 	artifactDir      string
@@ -242,7 +248,7 @@ func nativeReuseState(cfg *config.BuilderConfig) (policy, markerPath string, con
 		dataDir = cfg.DataDir
 	}
 	markerPath = filepath.Join(dataDir, "native-builder-tainted.json")
-	data, err := os.ReadFile(markerPath)
+	data, err := os.ReadFile(markerPath) // #nosec G304 -- dataDir is the operator-configured builder state directory and the marker name is fixed.
 	if os.IsNotExist(err) {
 		return policy, markerPath, false, ""
 	}
@@ -551,6 +557,26 @@ func (lb *LocalBuilder) SubmitBuild(req *LocalBuildRequest) (string, error) {
 		return "", fmt.Errorf("invalid build request: %w", err)
 	}
 
+	lb.executionMu.Lock()
+	defer lb.executionMu.Unlock()
+	if req.ExecutionID != "" {
+		lb.jobsMutex.RLock()
+		for id, existing := range lb.jobs {
+			if existing.Request != nil &&
+				existing.Request.ExecutionID == req.ExecutionID {
+				lb.jobsMutex.RUnlock()
+				if !reflect.DeepEqual(existing.Request, req) {
+					return "", fmt.Errorf(
+						"execution ID %q was reused with a different build request",
+						req.ExecutionID,
+					)
+				}
+				return id, nil
+			}
+		}
+		lb.jobsMutex.RUnlock()
+	}
+
 	jobID := uuid.New().String()
 	if err := lb.reserveNativeLifetime(jobID); err != nil {
 		return "", err
@@ -844,7 +870,7 @@ func (lb *LocalBuilder) collectAndUploadArtifact(job *BuildJob, outputDir string
 		if err := os.MkdirAll(filepath.Dir(dest), 0750); err != nil {
 			return fmt.Errorf("failed to create artifact dir: %w", err)
 		}
-		if err := exec.Command("cp", filepath.Join(outputDir, rel), dest).Run(); err != nil {
+		if err := exec.Command("cp", filepath.Join(outputDir, rel), dest).Run(); err != nil { // #nosec G204 -- fixed cp executable and allow-listed artifact path.
 			return fmt.Errorf("failed to copy artifact %s: %w", rel, err)
 		}
 	}
@@ -987,7 +1013,7 @@ func (lb *LocalBuilder) executeNativeBuild(job *BuildJob) error {
 	// Build into a per-job PKGDIR so artifact collection sees only this build's
 	// packages (the host /var/cache/binpkgs accumulates across jobs).
 	pkgDir := filepath.Join(jobWorkDir, "binpkgs")
-	if err := os.MkdirAll(pkgDir, 0o755); err != nil {
+	if err := os.MkdirAll(pkgDir, 0o755); err != nil { // #nosec G301 -- emerge writes as the portage user.
 		return err
 	}
 
@@ -1038,7 +1064,7 @@ func (lb *LocalBuilder) runNativeBuild(job *BuildJob, pkgAtom string, env []stri
 	defer cancel()
 
 	buildCmd := lb.pkgMgr.BuildCommand(pkgAtom, nil)
-	cmd := exec.CommandContext(ctx, buildCmd[0], buildCmd[1:]...)
+	cmd := exec.CommandContext(ctx, buildCmd[0], buildCmd[1:]...) // #nosec G204 -- package manager command is produced by the configured trusted backend.
 	cmd.Env = env
 	cmd.Dir = workDir
 
@@ -1191,7 +1217,7 @@ func (lb *LocalBuilder) verifyInstallNative(request VerifyInstallRequest) (strin
 	defer func() { _ = os.RemoveAll(root) }()
 
 	seed := nativeVerifySeedCommand(root, request.RequireSignature)
-	if out, err := exec.Command("bash", "-c", seed).CombinedOutput(); err != nil {
+	if out, err := exec.Command("bash", "-c", seed).CombinedOutput(); err != nil { // #nosec G204 -- seed is generated only from the internally-created temporary root and a boolean.
 		return string(out), fmt.Errorf("failed to seed verify root: %w: %s", err, strings.TrimSpace(string(out)))
 	}
 	if err := removeBuiltPackagesFromVDB(root, request.BuiltPackages); err != nil {
@@ -1199,7 +1225,7 @@ func (lb *LocalBuilder) verifyInstallNative(request VerifyInstallRequest) (strin
 	}
 
 	pkgDir := filepath.Join(root, "var", "cache", "binpkgs")
-	if err := os.MkdirAll(pkgDir, 0o755); err != nil {
+	if err := os.MkdirAll(pkgDir, 0o755); err != nil { // #nosec G301 -- the isolated verify root is consumed by Portage.
 		return "", err
 	}
 	if err := prefetchVerificationGeneration(request.BinhostURL, pkgDir, request.Artifacts); err != nil {
@@ -1251,7 +1277,7 @@ func (lb *LocalBuilder) verifyInstallNative(request VerifyInstallRequest) (strin
 		"--",
 		request.PackageName,
 	}
-	cmd := exec.CommandContext(ctx, "emerge", args...)
+	cmd := exec.CommandContext(ctx, "emerge", args...) // #nosec G204 -- fixed emerge executable with validated package atom and separate arguments.
 	feature := "-binpkg-request-signature"
 	if request.RequireSignature {
 		feature = "binpkg-request-signature"
@@ -1311,7 +1337,7 @@ func installVerifierPublicKey(gpgHome string, publicKey []byte) (string, error) 
 	if err := os.MkdirAll(gpgHome, 0o700); err != nil {
 		return "", err
 	}
-	if err := os.Chmod(gpgHome, 0o700); err != nil {
+	if err := os.Chmod(gpgHome, 0o700); err != nil { // #nosec G302 -- 0700 is the required secure mode for a GnuPG directory, not a regular file.
 		return "", err
 	}
 	keyFile, err := os.CreateTemp(filepath.Dir(gpgHome), ".signer-public-*.asc")
@@ -1332,7 +1358,7 @@ func installVerifierPublicKey(gpgHome string, publicKey []byte) (string, error) 
 		return "", err
 	}
 
-	show := exec.Command("gpg", "--homedir", gpgHome, "--batch", "--with-colons",
+	show := exec.Command("gpg", "--homedir", gpgHome, "--batch", "--with-colons", // #nosec G204 -- fixed gpg executable and internally-created paths.
 		"--import-options", "show-only", "--import", keyPath)
 	output, err := show.CombinedOutput()
 	if err != nil {
@@ -1343,11 +1369,11 @@ func installVerifierPublicKey(gpgHome string, publicKey []byte) (string, error) 
 		return "", fmt.Errorf("public key bundle must contain exactly one primary key, found %d", len(fingerprints))
 	}
 
-	importKey := exec.Command("gpg", "--homedir", gpgHome, "--batch", "--import", keyPath)
+	importKey := exec.Command("gpg", "--homedir", gpgHome, "--batch", "--import", keyPath) // #nosec G204 -- fixed gpg executable and internally-created paths.
 	if output, err := importKey.CombinedOutput(); err != nil {
 		return "", fmt.Errorf("import public key: %w: %s", err, strings.TrimSpace(string(output)))
 	}
-	ownerTrust := exec.Command("gpg", "--homedir", gpgHome, "--batch", "--import-ownertrust")
+	ownerTrust := exec.Command("gpg", "--homedir", gpgHome, "--batch", "--import-ownertrust") // #nosec G204 -- fixed gpg executable and internally-created keyring.
 	ownerTrust.Stdin = strings.NewReader(fingerprints[0] + ":6:\n")
 	if output, err := ownerTrust.CombinedOutput(); err != nil {
 		return "", fmt.Errorf("trust public key: %w: %s", err, strings.TrimSpace(string(output)))

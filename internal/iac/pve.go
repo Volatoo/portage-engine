@@ -11,29 +11,31 @@ import (
 
 // PVEInstanceSpec defines the specification for a Proxmox VE instance.
 type PVEInstanceSpec struct {
-	Node        string   `json:"node"`      // PVE node name
-	VMID        int      `json:"vmid"`      // VM ID (0 = auto-assign)
-	Name        string   `json:"name"`      // VM name
-	Cores       int      `json:"cores"`     // CPU cores
-	Sockets     int      `json:"sockets"`   // CPU sockets
-	MemoryMB    int      `json:"memory_mb"` // Memory in MB
-	DiskSizeGB  int      `json:"disk_size_gb"`
-	DiskType    string   `json:"disk_type"`  // scsi, virtio, ide
-	Storage     string   `json:"storage"`    // Storage pool name
-	Template    string   `json:"template"`   // Template/Clone source
-	OSType      string   `json:"os_type"`    // l26 (Linux 2.6+), win10, etc.
-	Network     string   `json:"network"`    // Network bridge (e.g., vmbr0)
-	VLAN        int      `json:"vlan"`       // VLAN tag (0 = no VLAN)
-	IPConfig    string   `json:"ip_config"`  // IP configuration (dhcp or static)
-	Gateway     string   `json:"gateway"`    // Gateway for static IP
-	Nameserver  string   `json:"nameserver"` // DNS server
-	SSHKeys     string   `json:"ssh_keys"`   // SSH public keys
-	CICustom    string   `json:"cicustom"`   // Custom cloud-init snippet ref (e.g. vendor=local:snippets/vendor.yaml)
-	Tags        []string `json:"tags"`       // PVE tags
-	Pool        string   `json:"pool"`       // PVE resource pool
-	StartOnBoot bool     `json:"start_onboot"`
-	Agent       bool     `json:"agent"`      // Enable QEMU guest agent
-	CloudInit   bool     `json:"cloud_init"` // Use cloud-init
+	Node         string   `json:"node"`      // PVE node name
+	VMID         int      `json:"vmid"`      // VM ID (0 = auto-assign)
+	Name         string   `json:"name"`      // VM name
+	Cores        int      `json:"cores"`     // CPU cores
+	Sockets      int      `json:"sockets"`   // CPU sockets
+	MemoryMB     int      `json:"memory_mb"` // Memory in MB
+	DiskSizeGB   int      `json:"disk_size_gb"`
+	DiskType     string   `json:"disk_type"`   // scsi, virtio, ide
+	Storage      string   `json:"storage"`     // Storage pool name
+	Template     string   `json:"template"`    // Template/Clone source
+	OSType       string   `json:"os_type"`     // l26 (Linux 2.6+), win10, etc.
+	Network      string   `json:"network"`     // Network bridge (e.g., vmbr0)
+	VLAN         int      `json:"vlan"`        // VLAN tag (0 = no VLAN)
+	IPConfig     string   `json:"ip_config"`   // IP configuration (dhcp or static)
+	Gateway      string   `json:"gateway"`     // Gateway for static IP
+	Nameserver   string   `json:"nameserver"`  // DNS server
+	SSHKeys      string   `json:"ssh_keys"`    // SSH public keys
+	CICustom     string   `json:"cicustom"`    // Custom cloud-init snippet ref (e.g. vendor=local:snippets/vendor.yaml)
+	SMBIOSUUID   string   `json:"smbios_uuid"` // Guest-readable, provider-owned identity
+	Tags         []string `json:"tags"`        // PVE tags
+	Pool         string   `json:"pool"`        // PVE resource pool
+	StartOnBoot  bool     `json:"start_onboot"`
+	StartStopped bool     `json:"start_stopped"`
+	Agent        bool     `json:"agent"`      // Enable QEMU guest agent
+	CloudInit    bool     `json:"cloud_init"` // Use cloud-init
 	// Bios/Machine select firmware. Empty defaults to SeaBIOS/i440fx (Debian
 	// cloud template). A Gentoo cloud-init QCOW2 needs "ovmf"/"q35" (UEFI); the
 	// efidisk is inherited from the template on clone.
@@ -136,9 +138,16 @@ func PVEInstanceSpecFromMap(m map[string]string) *PVEInstanceSpec {
 	setStringField("nameserver", &spec.Nameserver)
 	setStringField("ssh_keys", &spec.SSHKeys)
 	setStringField("cicustom", &spec.CICustom)
+	setStringField("smbios_uuid", &spec.SMBIOSUUID)
 	setStringField("pool", &spec.Pool)
+	if value := strings.TrimSpace(m["tags"]); value != "" {
+		spec.Tags = strings.FieldsFunc(value, func(r rune) bool {
+			return r == ',' || r == ';'
+		})
+	}
 	setBoolField("cloud_init", &spec.CloudInit)
 	setBoolField("agent", &spec.Agent)
+	setBoolField("start_stopped", &spec.StartStopped)
 
 	return spec
 }
@@ -215,6 +224,13 @@ func (p *PVEProvisioner) GenerateMainTF(spec *PVEInstanceSpec, instanceName stri
 	// Build cloud-init configuration
 	cloudInitConfig := ""
 	firmwareBlock := ""
+	smbiosBlock := ""
+	if spec.SMBIOSUUID != "" {
+		smbiosBlock = fmt.Sprintf(
+			"\n  smbios1     = \"uuid=%s\"",
+			strings.ToLower(spec.SMBIOSUUID),
+		)
+	}
 	if spec.Bios != "" {
 		firmwareBlock += fmt.Sprintf("\n  bios    = \"%s\"", spec.Bios)
 	}
@@ -254,6 +270,12 @@ EOF`, spec.SSHKeys)
 	if spec.VMID > 0 {
 		vmidBlock = fmt.Sprintf(`
   vmid = %d`, spec.VMID)
+	}
+	powerStateBlock := ""
+	if spec.StartStopped {
+		powerStateBlock = `
+  vm_state              = "stopped"
+  define_connection_info = false`
 	}
 
 	// Determine auth method
@@ -300,7 +322,7 @@ resource "proxmox_vm_qemu" "portage_builder" {
   }
   memory      = %d
   agent       = %d
-  onboot      = %t
+  onboot      = %t%s%s
   scsihw      = "virtio-scsi-pci"%s%s
 
   clone       = "%s"
@@ -354,6 +376,8 @@ output "node" {
 		spec.MemoryMB,
 		boolToInt(spec.Agent),
 		spec.StartOnBoot,
+		powerStateBlock,
+		smbiosBlock,
 		osTypeBlock,
 		firmwareBlock,
 		spec.Template,
@@ -476,7 +500,8 @@ func (p *PVEProvisioner) generateNetworkConfig(spec *PVEInstanceSpec) string {
 	return fmt.Sprintf(`  network {
     id     = 0
     model  = "virtio"
-    bridge = "%s"%s
+    bridge = "%s"
+    firewall = true%s
   }`, spec.Network, vlanTag)
 }
 

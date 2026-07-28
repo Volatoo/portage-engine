@@ -104,7 +104,7 @@ func (s *Signer) Initialize() error {
 		if err := os.MkdirAll(s.gnupgHome, 0700); err != nil {
 			return fmt.Errorf("create GNUPGHOME: %w", err)
 		}
-		if err := os.Chmod(s.gnupgHome, 0700); err != nil {
+		if err := os.Chmod(s.gnupgHome, 0700); err != nil { // #nosec G302 -- 0700 is the required secure mode for a GnuPG directory, not a regular file.
 			return fmt.Errorf("secure GNUPGHOME: %w", err)
 		}
 		lock, err := os.OpenFile(filepath.Join(s.gnupgHome, ".portage-engine-key-init.lock"), os.O_CREATE|os.O_RDWR, 0600)
@@ -129,7 +129,7 @@ func (s *Signer) Initialize() error {
 
 func (s *Signer) initializeAutoKey() error {
 	markerPath := filepath.Join(s.gnupgHome, activeKeyFile)
-	if marker, err := os.ReadFile(markerPath); err == nil {
+	if marker, err := os.ReadFile(markerPath); err == nil { // #nosec G304 -- GNUPGHOME is operator-configured and the marker file name is fixed.
 		keyID := strings.TrimSpace(string(marker))
 		if keyID == "" || !s.keyExists(keyID) {
 			return fmt.Errorf("active GPG key marker %s references a missing key; restore the key or configure GPG_KEY_ID explicitly", markerPath)
@@ -201,7 +201,7 @@ func (s *Signer) keyExists(keyID string) bool {
 	args := s.buildBaseArgs()
 	args = append(args, "--list-secret-keys", keyID)
 
-	cmd := exec.Command("gpg", args...)
+	cmd := exec.Command("gpg", args...) // #nosec G204 -- fixed gpg executable with an argument vector, not a shell.
 	if s.gnupgHome != "" {
 		cmd.Env = append(os.Environ(), "GNUPGHOME="+s.gnupgHome)
 	}
@@ -242,7 +242,7 @@ Expire-Date: 0
 	args := s.buildBaseArgs()
 	args = append(args, "--batch", "--gen-key")
 
-	cmd := exec.Command("gpg", args...)
+	cmd := exec.Command("gpg", args...) // #nosec G204 -- fixed gpg executable with an argument vector, not a shell.
 	cmd.Stdin = strings.NewReader(batchConfig)
 	if s.gnupgHome != "" {
 		cmd.Env = append(os.Environ(), "GNUPGHOME="+s.gnupgHome)
@@ -275,7 +275,7 @@ func (s *Signer) findSecretKeyIDs(identity string) ([]string, error) {
 	args := s.buildBaseArgs()
 	args = append(args, "--batch", "--with-colons", "--list-secret-keys")
 
-	cmd := exec.Command("gpg", args...)
+	cmd := exec.Command("gpg", args...) // #nosec G204 -- fixed gpg executable with an argument vector, not a shell.
 	if s.gnupgHome != "" {
 		cmd.Env = append(os.Environ(), "GNUPGHOME="+s.gnupgHome)
 	}
@@ -346,7 +346,7 @@ func (s *Signer) GetPublicKey() (string, error) {
 	args := s.buildBaseArgs()
 	args = append(args, "--armor", "--export", s.keyID)
 
-	cmd := exec.Command("gpg", args...)
+	cmd := exec.Command("gpg", args...) // #nosec G204 -- fixed gpg executable with an argument vector, not a shell.
 	if s.gnupgHome != "" {
 		cmd.Env = append(os.Environ(), "GNUPGHOME="+s.gnupgHome)
 	}
@@ -387,7 +387,7 @@ func (s *Signer) GetSecretKey() (string, error) {
 	args := s.buildBaseArgs()
 	args = append(args, "--armor", "--export-secret-keys", s.keyID)
 
-	cmd := exec.Command("gpg", args...)
+	cmd := exec.Command("gpg", args...) // #nosec G204 -- fixed gpg executable with an argument vector, not a shell.
 	if s.gnupgHome != "" {
 		cmd.Env = append(os.Environ(), "GNUPGHOME="+s.gnupgHome)
 	}
@@ -466,7 +466,7 @@ func (s *Signer) SignPackage(packagePath string) error {
 		packagePath,
 	)
 
-	cmd := exec.Command("gpg", args...)
+	cmd := exec.Command("gpg", args...) // #nosec G204 -- fixed gpg executable with an argument vector, not a shell.
 	if s.gnupgHome != "" {
 		cmd.Env = append(os.Environ(), "GNUPGHOME="+s.gnupgHome)
 	}
@@ -495,7 +495,7 @@ func (s *Signer) VerifyPackage(packagePath string) error {
 	args := s.buildBaseArgs()
 	args = append(args, "--verify", signaturePath, packagePath)
 
-	cmd := exec.Command("gpg", args...)
+	cmd := exec.Command("gpg", args...) // #nosec G204 -- fixed gpg executable with an argument vector, not a shell.
 	if s.gnupgHome != "" {
 		cmd.Env = append(os.Environ(), "GNUPGHOME="+s.gnupgHome)
 	}

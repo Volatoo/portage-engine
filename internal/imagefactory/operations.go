@@ -391,41 +391,12 @@ func VerifyOperationsDetached(payloadType string, value any, signature *Detached
 }
 
 func PlanGenerationCleanup(state *OperationsState, now time.Time) (*CleanupPlan, error) {
-	if state == nil || state.SchemaVersion != 1 || state.RetainNewest < 1 || state.RetainNewest > 32 || state.MinRetiredAgeHours < 1 || state.MinRetiredAgeHours > 24*365 {
-		return nil, fmt.Errorf("invalid operations cleanup state")
+	if err := validateCleanupState(state, now); err != nil {
+		return nil, err
 	}
-	if state.CapturedAt.IsZero() || state.ValidUntil.IsZero() || state.ValidUntil.Sub(state.CapturedAt) <= 0 || state.ValidUntil.Sub(state.CapturedAt) > time.Hour {
-		return nil, fmt.Errorf("operations cleanup state must have a validity window of at most one hour")
-	}
-	if state.CapturedAt.After(now) {
-		return nil, fmt.Errorf("operations cleanup state was captured in the future")
-	}
-	if !now.Before(state.ValidUntil) {
-		return nil, fmt.Errorf("operations cleanup state has expired")
-	}
-	protected := map[string]string{}
-	aliasReleases := map[string]struct{}{}
-	for _, alias := range state.Aliases {
-		if !validOperationsID(alias.ReleaseID) || !validOperationsID(alias.Alias) {
-			return nil, fmt.Errorf("invalid release alias")
-		}
-		protected[alias.ReleaseID] = "selected by alias " + alias.Alias
-		aliasReleases[alias.ReleaseID] = struct{}{}
-	}
-	leaseIDs := map[string]struct{}{}
-	leaseReleases := map[string]struct{}{}
-	for _, lease := range state.Leases {
-		if !validOperationsID(lease.LeaseID) || !validOperationsID(lease.ReleaseID) || lease.ExpiresAt.IsZero() || (lease.State != "active" && lease.State != "released") {
-			return nil, fmt.Errorf("invalid generation lease")
-		}
-		if _, duplicate := leaseIDs[lease.LeaseID]; duplicate {
-			return nil, fmt.Errorf("duplicate generation lease %q", lease.LeaseID)
-		}
-		leaseIDs[lease.LeaseID] = struct{}{}
-		leaseReleases[lease.ReleaseID] = struct{}{}
-		if lease.State == "active" && now.Before(lease.ExpiresAt) {
-			protected[lease.ReleaseID] = "active lease " + lease.LeaseID
-		}
+	protected, aliasReleases, leaseReleases, err := cleanupProtections(state, now)
+	if err != nil {
+		return nil, err
 	}
 	generations := append([]GenerationRecord(nil), state.Generations...)
 	sort.Slice(generations, func(i, j int) bool { return generations[i].CreatedAt.After(generations[j].CreatedAt) })
@@ -470,6 +441,60 @@ func PlanGenerationCleanup(state *OperationsState, now time.Time) (*CleanupPlan,
 		}
 	}
 	return plan, nil
+}
+
+func validateCleanupState(state *OperationsState, now time.Time) error {
+	if state == nil || state.SchemaVersion != 1 ||
+		state.RetainNewest < 1 || state.RetainNewest > 32 ||
+		state.MinRetiredAgeHours < 1 || state.MinRetiredAgeHours > 24*365 {
+		return fmt.Errorf("invalid operations cleanup state")
+	}
+	validity := state.ValidUntil.Sub(state.CapturedAt)
+	if state.CapturedAt.IsZero() || state.ValidUntil.IsZero() ||
+		validity <= 0 || validity > time.Hour {
+		return fmt.Errorf("operations cleanup state must have a validity window of at most one hour")
+	}
+	if state.CapturedAt.After(now) {
+		return fmt.Errorf("operations cleanup state was captured in the future")
+	}
+	if !now.Before(state.ValidUntil) {
+		return fmt.Errorf("operations cleanup state has expired")
+	}
+	return nil
+}
+
+func cleanupProtections(
+	state *OperationsState,
+	now time.Time,
+) (map[string]string, map[string]struct{}, map[string]struct{}, error) {
+	protected := map[string]string{}
+	aliasReleases := map[string]struct{}{}
+	for _, alias := range state.Aliases {
+		if !validOperationsID(alias.ReleaseID) || !validOperationsID(alias.Alias) {
+			return nil, nil, nil, fmt.Errorf("invalid release alias")
+		}
+		protected[alias.ReleaseID] = "selected by alias " + alias.Alias
+		aliasReleases[alias.ReleaseID] = struct{}{}
+	}
+	leaseIDs := map[string]struct{}{}
+	leaseReleases := map[string]struct{}{}
+	for _, lease := range state.Leases {
+		if !validOperationsID(lease.LeaseID) ||
+			!validOperationsID(lease.ReleaseID) ||
+			lease.ExpiresAt.IsZero() ||
+			(lease.State != "active" && lease.State != "released") {
+			return nil, nil, nil, fmt.Errorf("invalid generation lease")
+		}
+		if _, duplicate := leaseIDs[lease.LeaseID]; duplicate {
+			return nil, nil, nil, fmt.Errorf("duplicate generation lease %q", lease.LeaseID)
+		}
+		leaseIDs[lease.LeaseID] = struct{}{}
+		leaseReleases[lease.ReleaseID] = struct{}{}
+		if lease.State == "active" && now.Before(lease.ExpiresAt) {
+			protected[lease.ReleaseID] = "active lease " + lease.LeaseID
+		}
+	}
+	return protected, aliasReleases, leaseReleases, nil
 }
 
 func PlanRebuild(policy *RebuildPolicy, bundle *BundleManifest, now time.Time) (*RebuildPlan, error) {

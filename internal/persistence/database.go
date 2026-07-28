@@ -23,8 +23,8 @@ import (
 const (
 	// MinSchemaVersion and MaxSchemaVersion define the migration range this
 	// server binary can safely use. A newer schema fails closed.
-	MinSchemaVersion int64 = 7
-	MaxSchemaVersion int64 = 7
+	MinSchemaVersion int64 = 26
+	MaxSchemaVersion int64 = 26
 )
 
 // Querier is the narrow database surface repositories may use. Keeping
@@ -122,7 +122,7 @@ func Open(ctx context.Context, cfg config.DatabaseConfig) (*Database, error) {
 }
 
 func checkedPoolSize(name string, value int) (int32, error) {
-	if value < 0 || int64(value) > math.MaxInt32 {
+	if value < 0 || value > math.MaxInt32 {
 		return 0, fmt.Errorf("PostgreSQL %s pool size %d is outside the supported range", name, value)
 	}
 	return int32(value), nil

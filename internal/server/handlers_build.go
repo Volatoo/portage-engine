@@ -12,6 +12,7 @@ import (
 
 	"github.com/slchris/portage-engine/internal/binpkg"
 	"github.com/slchris/portage-engine/internal/builder"
+	"github.com/slchris/portage-engine/internal/iam"
 )
 
 // handlePackageQuery handles package availability queries.
@@ -24,7 +25,6 @@ func (s *Server) handlePackageQuery(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-
 	var req binpkg.QueryRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.metrics.IncHTTPRequestErrors()
@@ -69,6 +69,11 @@ func (s *Server) handleBuildRequest(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	principal, project, err := s.authorizeProject(r, iam.RoleDeveloper)
+	if err != nil {
+		writeIAMError(w, http.StatusForbidden, err.Error())
+		return
+	}
 
 	// Support both formats: {"package_name":"cat/pkg"} and {"category":"cat","package":"pkg"}
 	var rawReq map[string]interface{}
@@ -78,54 +83,9 @@ func (s *Server) handleBuildRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req builder.BuildRequest
-
-	// Convert to BuildRequest format
-	if packageName, ok := rawReq["package_name"].(string); ok {
-		req.PackageName = packageName
-	} else if category, okCat := rawReq["category"].(string); okCat {
-		if pkg, okPkg := rawReq["package"].(string); okPkg {
-			req.PackageName = category + "/" + pkg
-		}
-	}
-
-	if version, ok := rawReq["version"].(string); ok {
-		req.Version = version
-	}
-
-	if arch, ok := rawReq["arch"].(string); ok {
-		req.Arch = arch
-	}
-	if req.Arch == "" {
-		req.Arch = "amd64"
-	}
+	req := buildRequestFromRaw(rawReq)
+	req.ProjectID, req.RequestedBy = project.ProjectID, principal.SubjectID
 	req.IdempotencyKey = r.Header.Get("Idempotency-Key")
-
-	if provider, ok := rawReq["cloud_provider"].(string); ok {
-		req.CloudProvider = provider
-	}
-	if profileID, ok := rawReq["profile_id"].(string); ok {
-		req.ProfileID = profileID
-	}
-	if resourceClass, ok := rawReq["resource_class"].(string); ok {
-		req.ResourceClass = resourceClass
-	}
-	if repositoryIDs, ok := rawReq["repository_ids"].([]interface{}); ok {
-		for _, value := range repositoryIDs {
-			if id, ok := value.(string); ok {
-				req.RepositoryIDs = append(req.RepositoryIDs, id)
-			}
-		}
-	}
-
-	if useFlags, ok := rawReq["use_flags"].([]interface{}); ok {
-		req.UseFlags = make([]string, len(useFlags))
-		for i, flag := range useFlags {
-			if flagStr, ok := flag.(string); ok {
-				req.UseFlags[i] = flagStr
-			}
-		}
-	}
 
 	// Reject requests with no package rather than creating an empty queued job.
 	if strings.TrimSpace(req.PackageName) == "" {
@@ -139,18 +99,14 @@ func (s *Server) handleBuildRequest(w http.ResponseWriter, r *http.Request) {
 	jobID, err := s.builder.SubmitBuild(&req)
 	if err != nil {
 		s.metrics.IncHTTPRequestErrors()
-		status := http.StatusInternalServerError
-		switch {
-		case builder.IsIdempotencyConflict(err):
-			status = http.StatusConflict
-		case builder.IsRequestError(err):
-			status = http.StatusBadRequest
-		case builder.IsLedgerError(err):
-			status = http.StatusServiceUnavailable
-		}
-		http.Error(w, err.Error(), status)
+		s.writeBuildSubmissionError(
+			w, r, principal, project.ProjectID, req.PackageName, err,
+			http.StatusInternalServerError,
+		)
 		return
 	}
+	s.auditRequest(r, principal, "build.submit", "build_job", jobID,
+		project.ProjectID, "success", map[string]any{"package": req.PackageName})
 
 	s.metrics.RecordHTTPLatency("/api/v1/packages/request-build", time.Since(start))
 
@@ -165,6 +121,69 @@ func (s *Server) handleBuildRequest(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
 	_ = json.NewEncoder(w).Encode(response)
+}
+
+func buildRequestFromRaw(raw map[string]interface{}) builder.BuildRequest {
+	var req builder.BuildRequest
+	if packageName, ok := raw["package_name"].(string); ok {
+		req.PackageName = packageName
+	} else if category, ok := raw["category"].(string); ok {
+		if pkg, ok := raw["package"].(string); ok {
+			req.PackageName = category + "/" + pkg
+		}
+	}
+	req.Version, _ = raw["version"].(string)
+	req.Arch, _ = raw["arch"].(string)
+	if req.Arch == "" {
+		req.Arch = "amd64"
+	}
+	req.CloudProvider, _ = raw["cloud_provider"].(string)
+	req.ProfileID, _ = raw["profile_id"].(string)
+	req.ResourceClass, _ = raw["resource_class"].(string)
+	if values, ok := raw["repository_ids"].([]interface{}); ok {
+		for _, value := range values {
+			if id, ok := value.(string); ok {
+				req.RepositoryIDs = append(req.RepositoryIDs, id)
+			}
+		}
+	}
+	if values, ok := raw["use_flags"].([]interface{}); ok {
+		for _, value := range values {
+			if flag, ok := value.(string); ok {
+				req.UseFlags = append(req.UseFlags, flag)
+			}
+		}
+	}
+	return req
+}
+
+func (s *Server) writeBuildSubmissionError(
+	w http.ResponseWriter,
+	r *http.Request,
+	principal iam.Principal,
+	projectID, packageName string,
+	err error,
+	fallbackStatus int,
+) {
+	if admission, ok := builder.AsAdmissionError(err); ok {
+		s.auditRequest(r, principal, "build.submit", "project", projectID,
+			projectID, "denied", map[string]any{
+				"reason_code": admission.Code, "limit": admission.Limit,
+				"used": admission.Used, "package": packageName,
+			})
+		writeAdmissionError(w, admission)
+		return
+	}
+	status := fallbackStatus
+	switch {
+	case builder.IsIdempotencyConflict(err):
+		status = http.StatusConflict
+	case builder.IsRequestError(err):
+		status = http.StatusBadRequest
+	case builder.IsLedgerError(err):
+		status = http.StatusServiceUnavailable
+	}
+	http.Error(w, err.Error(), status)
 }
 
 // handleBuildStatus handles build status queries.
@@ -189,6 +208,13 @@ func (s *Server) handleBuildStatus(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
+	principal, err := s.authorizeJob(r, status.ProjectID, iam.RoleViewer)
+	if err != nil {
+		s.auditRequest(r, principal, "build.read", "build_job", jobID,
+			status.ProjectID, "denied", nil)
+		writeIAMError(w, http.StatusForbidden, "job is not authorized")
+		return
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(status)
@@ -198,6 +224,11 @@ func (s *Server) handleBuildStatus(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleSubmitBuildWithConfig(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	principal, project, err := s.authorizeProject(r, iam.RoleDeveloper)
+	if err != nil {
+		writeIAMError(w, http.StatusForbidden, err.Error())
 		return
 	}
 
@@ -221,6 +252,8 @@ func (s *Server) handleSubmitBuildWithConfig(w http.ResponseWriter, r *http.Requ
 	// Translate to a Manager BuildRequest carrying the full bundle, which is
 	// forwarded verbatim to a remote builder so the exact configuration is used.
 	buildReq := &builder.BuildRequest{
+		ProjectID:      project.ProjectID,
+		RequestedBy:    principal.SubjectID,
 		PackageName:    req.PackageName,
 		Version:        req.Version,
 		Arch:           req.Arch,
@@ -238,15 +271,14 @@ func (s *Server) handleSubmitBuildWithConfig(w http.ResponseWriter, r *http.Requ
 	jobID, err := s.builder.SubmitBuild(buildReq)
 	if err != nil {
 		s.metrics.IncHTTPRequestErrors()
-		status := http.StatusServiceUnavailable
-		if builder.IsIdempotencyConflict(err) {
-			status = http.StatusConflict
-		} else if builder.IsRequestError(err) {
-			status = http.StatusBadRequest
-		}
-		http.Error(w, err.Error(), status)
+		s.writeBuildSubmissionError(
+			w, r, principal, project.ProjectID, buildReq.PackageName, err,
+			http.StatusServiceUnavailable,
+		)
 		return
 	}
+	s.auditRequest(r, principal, "build.submit", "build_job", jobID,
+		project.ProjectID, "success", map[string]any{"package": buildReq.PackageName})
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
@@ -293,6 +325,11 @@ func (s *Server) handleBuildsList(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	_, project, err := s.authorizeProject(r, iam.RoleViewer)
+	if err != nil {
+		writeIAMError(w, http.StatusForbidden, err.Error())
+		return
+	}
 
 	// Get limit parameter (default 0 = all, max 200)
 	limitStr := r.URL.Query().Get("limit")
@@ -307,6 +344,15 @@ func (s *Server) handleBuildsList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	builds := s.builder.ListAllBuilds()
+	if project.ProjectID != "" {
+		filtered := builds[:0]
+		for _, build := range builds {
+			if build.ProjectID == project.ProjectID {
+				filtered = append(filtered, build)
+			}
+		}
+		builds = filtered
+	}
 
 	// Sort by created_at descending (newest first) for stable ordering
 	sort.Slice(builds, func(i, j int) bool {
@@ -328,10 +374,43 @@ func (s *Server) handleClusterStatus(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-
-	status := s.builder.GetClusterStatus()
+	_, project, err := s.authorizeProject(r, iam.RoleViewer)
+	if err != nil {
+		writeIAMError(w, http.StatusForbidden, err.Error())
+		return
+	}
+	status := projectClusterStatus(s.builder.ListAllBuilds(), project.ProjectID)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(status)
+}
+
+func projectClusterStatus(builds []*builder.BuildStatus, projectID string) *builder.ClusterStatus {
+	status := &builder.ClusterStatus{LastUpdated: time.Now()}
+	activeInstances := make(map[string]struct{})
+	for _, build := range builds {
+		if build == nil || (projectID != "" && build.ProjectID != projectID) {
+			continue
+		}
+		status.TotalBuilds++
+		switch build.Status {
+		case "claimed", "building", "provisioning", "forwarding":
+			status.ActiveBuilds++
+			if build.InstanceID != "" {
+				activeInstances[build.InstanceID] = struct{}{}
+			}
+		case "queued":
+			status.QueuedBuilds++
+		case "completed", "success":
+			status.CompletedBuilds++
+		case "failed":
+			status.FailedBuilds++
+		}
+	}
+	status.ActiveInstances = len(activeInstances)
+	if terminal := status.CompletedBuilds + status.FailedBuilds; terminal > 0 {
+		status.SuccessRate = float64(status.CompletedBuilds) / float64(terminal) * 100
+	}
+	return status
 }
 
 // handleBuildLogs returns logs for a specific build job.
@@ -352,6 +431,18 @@ func (s *Server) handleBuildLogs(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
+	status, err := s.builder.GetStatus(jobID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	principal, err := s.authorizeJob(r, status.ProjectID, iam.RoleViewer)
+	if err != nil {
+		s.auditRequest(r, principal, "build.logs.read", "build_job", jobID,
+			status.ProjectID, "denied", nil)
+		writeIAMError(w, http.StatusForbidden, "job is not authorized")
+		return
+	}
 
 	response := map[string]interface{}{
 		"job_id":       jobID,
@@ -364,6 +455,26 @@ func (s *Server) handleBuildLogs(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(response)
+}
+
+func writeAdmissionError(w http.ResponseWriter, admission *builder.AdmissionError) {
+	retryAfterSeconds := 0
+	if admission.RetryAfter > 0 {
+		retryAfterSeconds = int((admission.RetryAfter + time.Second - 1) / time.Second)
+		w.Header().Set("Retry-After", strconv.Itoa(retryAfterSeconds))
+	}
+	status := http.StatusTooManyRequests
+	if admission.Code == "project_suspended" ||
+		admission.Code == "project_abuse_suspended" {
+		status = http.StatusLocked
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"error": admission.Error(), "code": admission.Code,
+		"limit": admission.Limit, "used": admission.Used,
+		"retry_after_seconds": retryAfterSeconds,
+	})
 }
 
 type buildLogStageSummary struct {
@@ -447,10 +558,22 @@ func (s *Server) handleBuildDelete(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Missing job_id parameter", http.StatusBadRequest)
 		return
 	}
+	status, err := s.builder.GetStatus(jobID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	principal, err := s.authorizeJob(r, status.ProjectID, iam.RoleMaintainer)
+	if err != nil {
+		writeIAMError(w, http.StatusForbidden, "maintainer role required for this job")
+		return
+	}
 	if err := s.builder.DeleteJob(jobID); err != nil {
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	}
+	s.auditRequest(r, principal, "build.delete", "build_job", jobID,
+		status.ProjectID, "success", nil)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]string{"deleted": jobID})
 }
@@ -465,6 +588,16 @@ func (s *Server) handleBuildCancel(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Missing job_id parameter", http.StatusBadRequest)
 		return
 	}
+	status, err := s.builder.GetStatus(jobID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	principal, err := s.authorizeJob(r, status.ProjectID, iam.RoleMaintainer)
+	if err != nil {
+		writeIAMError(w, http.StatusForbidden, "maintainer role required for this job")
+		return
+	}
 	reason := strings.TrimSpace(r.URL.Query().Get("reason"))
 	if len(reason) > 512 {
 		http.Error(w, "cancel reason is too long", http.StatusBadRequest)
@@ -474,6 +607,8 @@ func (s *Server) handleBuildCancel(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	}
+	s.auditRequest(r, principal, "build.cancel", "build_job", jobID,
+		status.ProjectID, "success", map[string]any{"reason": reason})
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]string{"job_id": jobID, "status": "canceled"})
 }
@@ -488,10 +623,31 @@ func (s *Server) handleBuildRetry(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Missing job_id parameter", http.StatusBadRequest)
 		return
 	}
+	status, err := s.builder.GetStatus(jobID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	principal, err := s.authorizeJob(r, status.ProjectID, iam.RoleMaintainer)
+	if err != nil {
+		writeIAMError(w, http.StatusForbidden, "maintainer role required for this job")
+		return
+	}
 	if err := s.builder.RetryJob(jobID); err != nil {
+		if admission, ok := builder.AsAdmissionError(err); ok {
+			s.auditRequest(r, principal, "build.retry", "build_job", jobID,
+				status.ProjectID, "denied", map[string]any{
+					"reason_code": admission.Code, "limit": admission.Limit,
+					"used": admission.Used,
+				})
+			writeAdmissionError(w, admission)
+			return
+		}
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	}
+	s.auditRequest(r, principal, "build.retry", "build_job", jobID,
+		status.ProjectID, "success", nil)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]string{"job_id": jobID, "status": "queued"})
 }

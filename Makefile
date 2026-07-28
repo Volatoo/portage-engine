@@ -1,4 +1,4 @@
-.PHONY: all build clean test run-server run-dashboard run-builder run-client build-image-factory build-desktop-runner build-migrate build-signer lint lint-security lint-complexity
+.PHONY: all build clean test run-server run-dashboard run-builder run-client build-image-factory build-desktop-runner build-migrate build-signer build-capacity-actuator lint lint-security lint-complexity
 
 # Variables
 BINARY_SERVER=bin/portage-server
@@ -9,8 +9,11 @@ BINARY_IMAGE_FACTORY=bin/portage-image-factory
 BINARY_DESKTOP_RUNNER=bin/portage-desktop-runner
 BINARY_MIGRATE=bin/portage-migrate
 BINARY_SIGNER=bin/portage-signer
+BINARY_CAPACITY_ACTUATOR=bin/portage-capacity-actuator
 GO=go
 GOFLAGS=-v
+GOLANGCI_LINT_VERSION ?= v2.7.2
+GOLANGCI_LINT = $(GO) run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 BUILD_TIME ?= $(shell date -u '+%Y-%m-%dT%H:%M:%SZ')
@@ -19,7 +22,7 @@ LDFLAGS=-ldflags "-X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.bu
 all: build
 
 # Build all binaries
-build: build-server build-dashboard build-builder build-client build-image-factory build-desktop-runner build-migrate build-signer
+build: build-server build-dashboard build-builder build-client build-image-factory build-desktop-runner build-migrate build-signer build-capacity-actuator
 
 # Build server
 build-server:
@@ -68,6 +71,11 @@ build-signer:
 	@mkdir -p bin
 	$(GO) build $(GOFLAGS) $(LDFLAGS) -o $(BINARY_SIGNER) cmd/signer/main.go
 
+build-capacity-actuator:
+	@echo "Building fenced capacity actuator..."
+	@mkdir -p bin
+	$(GO) build $(GOFLAGS) -o $(BINARY_CAPACITY_ACTUATOR) cmd/capacity-actuator/main.go
+
 # Clean build artifacts
 clean:
 	@echo "Cleaning..."
@@ -113,15 +121,15 @@ fmt:
 # Lint code
 lint:
 	@echo "Linting code..."
-	golangci-lint run ./...
+	$(GOLANGCI_LINT) run --timeout=10m ./...
 
 lint-security:
 	@echo "Running gosec security checks..."
-	golangci-lint run --enable-only=gosec ./...
+	$(GOLANGCI_LINT) run --enable-only=gosec --timeout=10m ./...
 
 lint-complexity:
 	@echo "Checking function complexity..."
-	golangci-lint run --enable-only=cyclop,gocyclo ./...
+	$(GOLANGCI_LINT) run --enable-only=cyclop,gocyclo --timeout=10m ./...
 
 # Install binaries
 install: build
@@ -132,6 +140,7 @@ install: build
 	@cp $(BINARY_BUILDER) /usr/local/bin/
 	@cp $(BINARY_CLIENT) /usr/local/bin/
 	@cp $(BINARY_MIGRATE) /usr/local/bin/
+	@cp $(BINARY_CAPACITY_ACTUATOR) /usr/local/bin/
 	@echo "Installation complete"
 
 # Build for multiple architectures

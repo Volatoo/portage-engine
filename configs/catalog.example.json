@@ -18,6 +18,7 @@
       "image_id": "pe/amd64/base-g1",
       "mirror_bundle_id": "mirror/candidate-2026-07-22",
       "default_resource_class": "medium",
+      "egress_policy_id": "egress/candidate-internal",
       "default": true,
       "channel": "candidate"
     },
@@ -37,6 +38,7 @@
       "image_id": "pe/amd64/desktop-verifier-g1",
       "mirror_bundle_id": "mirror/candidate-2026-07-22",
       "default_resource_class": "medium",
+      "egress_policy_id": "egress/candidate-internal",
       "channel": "candidate"
     }
   ],
@@ -67,6 +69,7 @@
       "profile_id": "pe/amd64/glibc/systemd/base-v1",
       "generation": "g1",
       "provider": "pve",
+      "execution_zone": "default",
       "arch": "amd64",
       "build_mode": "native-gentoo",
       "template": "pe-gentoo-amd64-systemd-base-g1",
@@ -83,6 +86,7 @@
       "profile_id": "pe/amd64/glibc/systemd/desktop-verifier-v1",
       "generation": "desktop-g1",
       "provider": "pve",
+      "execution_zone": "default",
       "arch": "amd64",
       "build_mode": "native-gentoo",
       "template": "pe-gentoo-amd64-desktop-verifier-g1",
@@ -108,6 +112,8 @@
   "resource_classes": [
     {
       "id": "small",
+      "max_runtime_minutes": 60,
+      "cloud_cost_microunits_per_minute": 1000,
       "machine_spec": {
         "cores": "2",
         "memory": "4096",
@@ -116,11 +122,37 @@
     },
     {
       "id": "medium",
+      "max_runtime_minutes": 90,
+      "cloud_cost_microunits_per_minute": 2000,
       "machine_spec": {
         "cores": "4",
         "memory": "8192",
         "disk_size": "50"
       }
+    }
+  ],
+  "egress_policies": [
+    {
+      "id": "egress/candidate-internal",
+      "mode": "enforce",
+      "dns_resolvers": ["10.31.0.1"],
+      "rules": [
+        {
+          "id": "git-mirror",
+          "hosts": ["git-mirror.example.internal"],
+          "cidrs": ["10.31.0.2/32"],
+          "protocol": "tcp",
+          "ports": [443]
+        },
+        {
+          "id": "worker-gateway",
+          "hosts": ["worker-gateway.example.internal"],
+          "cidrs": ["10.31.0.10/32"],
+          "protocol": "tcp",
+          "ports": [9443]
+        }
+      ],
+      "channel": "candidate"
     }
   ]
 }

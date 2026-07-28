@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/slchris/portage-engine/internal/iam"
 )
 
 func (s *Server) rateLimitMiddleware(next http.Handler) http.Handler {
@@ -22,7 +24,20 @@ func (s *Server) rateLimitMiddleware(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		identity := stripPort(r.RemoteAddr) + "|" + r.URL.Path
+		identity := stripPort(r.RemoteAddr)
+		principal, authenticated := iam.PrincipalFromContext(r.Context())
+		projectSelector := strings.TrimSpace(r.Header.Get("X-Project-ID"))
+		if authenticated {
+			identity = principal.SubjectID
+			if identity == "" {
+				identity = principal.Issuer + "#" + principal.Subject
+			}
+		}
+		// Do not include the raw project selector in the bucket key: it has
+		// not been authorized yet, so a caller could rotate fake selectors to
+		// manufacture unbounded buckets. Durable per-project caps are enforced
+		// later by PostgreSQL after project authorization.
+		identity += "|" + r.URL.Path
 		ctx, cancel := context.WithTimeout(r.Context(), 750*time.Millisecond)
 		allowed, err := s.cache.Allow(ctx, identity,
 			s.config.Cache.RateLimitPerMinute, s.config.Cache.RateLimitBurst)
@@ -35,11 +50,62 @@ func (s *Server) rateLimitMiddleware(next http.Handler) http.Handler {
 		}
 		if !allowed {
 			w.Header().Set("Retry-After", "1")
-			http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
+			if authenticated {
+				s.auditRequest(r, principal, "request.rate_limit", "http_request",
+					r.URL.Path, "", "denied", map[string]any{
+						"project_selector": projectSelector,
+						"limit_per_minute": s.config.Cache.RateLimitPerMinute,
+						"burst":            s.config.Cache.RateLimitBurst,
+					})
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"error":"rate limit exceeded","code":"request_rate_limit"}`))
 			return
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// authenticationRateLimitMiddleware bounds work performed before an identity
+// has been authenticated. It uses a separate source-IP bucket from the
+// authenticated subject bucket above, so invalid credentials cannot bypass
+// protection while valid identities still receive their own write budget.
+func (s *Server) authenticationRateLimitMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.cache == nil || !authenticationRateLimitedRequest(r) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		identity := "preauth|" + stripPort(r.RemoteAddr) + "|" + r.URL.Path
+		ctx, cancel := context.WithTimeout(r.Context(), 750*time.Millisecond)
+		allowed, err := s.cache.Allow(ctx, identity,
+			s.config.Cache.RateLimitPerMinute, s.config.Cache.RateLimitBurst)
+		cancel()
+		if err != nil {
+			// This layer mitigates abuse but is not an authorization or
+			// correctness boundary. Preserve availability if Redis is down.
+			next.ServeHTTP(w, r)
+			return
+		}
+		if !allowed {
+			w.Header().Set("Retry-After", "1")
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(
+				`{"error":"authentication rate limit exceeded","code":"authentication_rate_limit"}`,
+			))
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func authenticationRateLimitedRequest(r *http.Request) bool {
+	return r != nil &&
+		r.Method != http.MethodOptions &&
+		strings.HasPrefix(r.URL.Path, "/api/v1/") &&
+		!publicControlPlanePath(r.URL.Path)
 }
 
 // responseWriter wraps http.ResponseWriter to capture the status code and bytes written.

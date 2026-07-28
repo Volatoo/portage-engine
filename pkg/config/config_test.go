@@ -68,6 +68,99 @@ func TestLoadServerRedisConfig(t *testing.T) {
 	}
 }
 
+func TestLoadServerIAMSessionAndStepUpPolicy(t *testing.T) {
+	t.Setenv("STEP_UP_API_KEY", "independent-key")
+	t.Setenv("OIDC_SESSION_IDLE_MINUTES", "45")
+	t.Setenv("OIDC_SESSION_MAX_MINUTES", "480")
+	t.Setenv("OIDC_STEP_UP_MAX_AGE_MINUTES", "7")
+	t.Setenv("OIDC_STEP_UP_AMR_VALUES", "otp,hwk")
+	t.Setenv("OIDC_STEP_UP_ACR_VALUES", "urn:example:mfa")
+	cfg, err := LoadServerConfig(filepath.Join(t.TempDir(), "missing.conf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.StepUpAPIKey != "independent-key" ||
+		cfg.OIDCSessionIdleMinutes != 45 || cfg.OIDCSessionMaxMinutes != 480 ||
+		cfg.OIDCStepUpMaxAgeMin != 7 ||
+		len(cfg.OIDCStepUpAMRValues) != 2 ||
+		len(cfg.OIDCStepUpACRValues) != 1 {
+		t.Fatalf("unexpected IAM lifecycle config: %+v", cfg)
+	}
+}
+
+func TestLoadServerSchedulerAutoscalePolicy(t *testing.T) {
+	t.Setenv("SCHEDULER_AUTOSCALE_MODE", "actuate")
+	t.Setenv("SCHEDULER_AUTOSCALE_MIN_SLOTS", "2")
+	t.Setenv("SCHEDULER_AUTOSCALE_MAX_SLOTS", "48")
+	t.Setenv("SCHEDULER_AUTOSCALE_TARGET_READY_PER_SLOT", "3")
+	t.Setenv("SCHEDULER_AUTOSCALE_COOLDOWN_SECONDS", "90")
+	t.Setenv("SCHEDULER_AUTOSCALE_SCALE_DOWN_SECONDS", "900")
+	t.Setenv("SCHEDULER_AUTOSCALE_INTERVAL_SECONDS", "20")
+	t.Setenv("SCHEDULER_AUTOSCALE_PROVIDER_MAX_SLOTS", "pve:32,gcp:16")
+	cfg, err := LoadServerConfig(filepath.Join(t.TempDir(), "missing.conf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.SchedulerAutoscaleMode != "actuate" ||
+		cfg.SchedulerAutoscaleMinSlots != 2 ||
+		cfg.SchedulerAutoscaleMaxSlots != 48 ||
+		cfg.SchedulerAutoscaleTargetReady != 3 ||
+		cfg.SchedulerAutoscaleCooldownSeconds != 90 ||
+		cfg.SchedulerAutoscaleScaleDownSeconds != 900 ||
+		cfg.SchedulerAutoscaleIntervalSeconds != 20 ||
+		!cfg.SchedulerAutoscaleProviderLimitsOK ||
+		cfg.SchedulerAutoscaleProviderMaxSlots["pve"] != 32 ||
+		cfg.SchedulerAutoscaleProviderMaxSlots["gcp"] != 16 {
+		t.Fatalf("unexpected scheduler autoscale config: %+v", cfg)
+	}
+}
+
+func TestLoadAndValidatePersistentExecutorRole(t *testing.T) {
+	instanceID := "123e4567-e89b-12d3-a456-426614174000"
+	t.Setenv("SERVER_RUNTIME_ROLE", "executor")
+	t.Setenv("CONTROL_PLANE_ID", "executor-"+instanceID)
+	t.Setenv("EXECUTOR_CAPACITY_INSTANCE_ID", instanceID)
+	t.Setenv("PHASE_EXECUTOR_MODE", "active")
+	t.Setenv("DATABASE_ENABLED", "true")
+	t.Setenv("DATABASE_REQUIRED", "true")
+	t.Setenv("WORKER_GATEWAY_ENABLED", "true")
+	t.Setenv(
+		"EXECUTOR_CAPABILITIES",
+		"capacity-pool:pve-default-amd64-test,provider:pve,zone:default,arch:amd64,build-mode:native-gentoo,profile:test/profile,image:test/image@g1,phase:provision,phase:build,phase:verify,phase:publish",
+	)
+	cfg, err := LoadServerConfig(filepath.Join(t.TempDir(), "missing.conf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.RuntimeRole != "executor" ||
+		cfg.ExecutorCapacityInstanceID != instanceID {
+		t.Fatalf("executor identity was not loaded: %+v", cfg)
+	}
+	for _, warning := range cfg.Validate() {
+		if strings.Contains(warning, "executor role requires") ||
+			strings.Contains(warning, "EXECUTOR_CAPACITY_INSTANCE_ID") {
+			t.Fatalf("valid executor role was rejected: %s", warning)
+		}
+	}
+}
+
+func TestValidatePersistentExecutorRejectsUnboundIdentity(t *testing.T) {
+	cfg := &ServerConfig{
+		RuntimeRole:                "executor",
+		ControlPlaneID:             "executor-a",
+		ExecutorCapacityInstanceID: "NOT-A-UUID",
+		PhaseExecutorMode:          "active",
+		Database: DatabaseConfig{
+			Enabled: true, Required: true,
+		},
+		WorkerGatewayEnabled: true,
+	}
+	warnings := strings.Join(cfg.Validate(), "\n")
+	if !strings.Contains(warnings, "lowercase UUID") {
+		t.Fatalf("invalid capacity identity was accepted: %s", warnings)
+	}
+}
+
 // TestLoadServerConfig tests loading server configuration.
 func TestLoadServerConfig(t *testing.T) {
 	tmpFile := "/tmp/test-server.conf"
@@ -206,6 +299,199 @@ func TestDashboardConfigValidatesBackendOrigin(t *testing.T) {
 	}
 }
 
+func TestServerConfigActivePhaseExecutorFailsClosedWithoutDurablePullMode(t *testing.T) {
+	cfg := &ServerConfig{PhaseExecutorMode: "active"}
+	warnings := strings.Join(cfg.Validate(), "\n")
+	for _, expected := range []string{
+		"active phase executor requires DATABASE_ENABLED=true",
+		"active phase executor requires WORKER_GATEWAY_ENABLED=true",
+	} {
+		if !strings.Contains(warnings, expected) {
+			t.Fatalf("warnings %q do not contain %q", warnings, expected)
+		}
+	}
+	cfg.Database.Enabled, cfg.Database.Required = true, true
+	cfg.WorkerGatewayEnabled = true
+	cfg.WorkerGatewayPort, cfg.Port = 9443, 8080
+	cfg.WorkerGatewayAdvertiseURL = "https://gateway.internal:9443"
+	cfg.WorkerGatewayTLSCert = "server.crt"
+	cfg.WorkerGatewayTLSKey = "server.key"
+	cfg.WorkerGatewayServerCA = "ca.crt"
+	cfg.WorkerGatewayClientCA = "ca.crt"
+	cfg.WorkerGatewayIssuerCert = "issuer.crt"
+	cfg.WorkerGatewayIssuerKey = "issuer.key"
+	cfg.WorkerCertificateTTLMin = 180
+	cfg.RemoteBuilders = []string{"legacy-builder:9090"}
+	warnings = strings.Join(cfg.Validate(), "\n")
+	if !strings.Contains(warnings,
+		"active phase executor does not support legacy REMOTE_BUILDERS") {
+		t.Fatalf("legacy dual-run warning missing: %q", warnings)
+	}
+}
+
+func TestLoadServerExecutorCapabilityRouting(t *testing.T) {
+	t.Setenv("EXECUTOR_ZONES", "lan-a,lan-b")
+	t.Setenv(
+		"EXECUTOR_CAPABILITIES",
+		"phase:build,provider:pve,zone:lan-a,image:pe/base-g6@g6",
+	)
+	cfg, err := LoadServerConfig(filepath.Join(t.TempDir(), "missing.conf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(cfg.ExecutorZones, ",") != "lan-a,lan-b" ||
+		strings.Join(cfg.ExecutorCapabilities, ",") !=
+			"phase:build,provider:pve,zone:lan-a,image:pe/base-g6@g6" {
+		t.Fatalf(
+			"unexpected executor routing config: zones=%v capabilities=%v",
+			cfg.ExecutorZones, cfg.ExecutorCapabilities,
+		)
+	}
+	cfg.PhaseExecutorMode = "active"
+	cfg.Database.Enabled, cfg.Database.Required = true, true
+	cfg.WorkerGatewayEnabled = true
+	cfg.WorkerGatewayPort, cfg.Port = 9443, 8080
+	cfg.WorkerGatewayAdvertiseURL = "https://gateway.internal:9443"
+	cfg.WorkerGatewayTLSCert, cfg.WorkerGatewayTLSKey = "server.crt", "server.key"
+	cfg.WorkerGatewayServerCA, cfg.WorkerGatewayClientCA = "ca.crt", "ca.crt"
+	cfg.WorkerGatewayIssuerCert, cfg.WorkerGatewayIssuerKey = "issuer.crt", "issuer.key"
+	cfg.WorkerCertificateTTLMin = 180
+	if warnings := strings.Join(cfg.Validate(), "\n"); strings.Contains(
+		warnings, "EXECUTOR_",
+	) {
+		t.Fatalf("valid executor routing config produced routing warnings: %s", warnings)
+	}
+
+	cfg.ExecutorCapabilities = []string{"provider:pve"}
+	if warnings := strings.Join(cfg.Validate(), "\n"); !strings.Contains(
+		warnings, "requires at least one phase label",
+	) {
+		t.Fatalf("phase-less capability override was accepted: %q", warnings)
+	}
+}
+
+func TestLoadServerVaultWorkerIssuer(t *testing.T) {
+	t.Setenv("WORKER_GATEWAY_ENABLED", "true")
+	t.Setenv("DATABASE_ENABLED", "true")
+	t.Setenv("DATABASE_REQUIRED", "true")
+	t.Setenv("WORKER_GATEWAY_ADVERTISE_URL", "https://gateway.internal:9443")
+	t.Setenv("WORKER_GATEWAY_TLS_CERT", "server.crt")
+	t.Setenv("WORKER_GATEWAY_TLS_KEY", "server.key")
+	t.Setenv("WORKER_GATEWAY_SERVER_CA", "server-ca.crt")
+	t.Setenv("WORKER_GATEWAY_CLIENT_CA", "worker-roots.pem")
+	t.Setenv("WORKER_GATEWAY_ISSUER_PROVIDER", "vault")
+	t.Setenv("WORKER_GATEWAY_ISSUER_ID", "community-vault")
+	t.Setenv("WORKER_GATEWAY_VAULT_ADDRESS", "https://vault.internal:8200")
+	t.Setenv("WORKER_GATEWAY_VAULT_MOUNT", "pki_workers")
+	t.Setenv("WORKER_GATEWAY_VAULT_ROLE", "portage-worker")
+	t.Setenv("WORKER_GATEWAY_VAULT_TOKEN_FILE", "/run/secrets/vault-token")
+	t.Setenv("WORKER_GATEWAY_VAULT_NAMESPACE", "community")
+	t.Setenv("WORKER_GATEWAY_VAULT_SERVER_CA", "/run/secrets/vault-ca.pem")
+	t.Setenv("WORKER_GATEWAY_VAULT_TIMEOUT_SECONDS", "20")
+	cfg, err := LoadServerConfig(filepath.Join(t.TempDir(), "missing.conf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.WorkerGatewayIssuerProvider != "vault" ||
+		cfg.WorkerGatewayVaultMount != "pki_workers" ||
+		cfg.WorkerGatewayVaultRole != "portage-worker" ||
+		cfg.WorkerGatewayVaultTimeout != 20 {
+		t.Fatalf("unexpected Vault worker issuer config: %+v", cfg)
+	}
+	warnings := strings.Join(cfg.Validate(), "\n")
+	if strings.Contains(warnings, "Vault worker issuer requires") ||
+		strings.Contains(warnings, "must be file or vault") {
+		t.Fatalf("valid Vault worker issuer was rejected: %s", warnings)
+	}
+}
+
+func TestDashboardConfigValidatesOIDCTransport(t *testing.T) {
+	base := DashboardConfig{
+		ServerURL:       "http://server.internal:8080",
+		AuthEnabled:     true,
+		JWTSecret:       "test-secret-that-is-at-least-32-chars-long",
+		OIDCEnabled:     true,
+		OIDCIssuerURL:   "http://idp.internal/realms/portage",
+		OIDCClientID:    "portage-dashboard",
+		OIDCRedirectURL: "http://dashboard.internal/auth/oidc/callback",
+	}
+	if err := base.Validate(); err == nil {
+		t.Fatal("trusted-LAN HTTP OIDC succeeded without explicit opt-in")
+	}
+	base.OIDCAllowInsecureHTTP = true
+	if err := base.Validate(); err != nil {
+		t.Fatalf("explicit trusted-LAN HTTP OIDC opt-in failed: %v", err)
+	}
+
+	base.OIDCAllowInsecureHTTP = false
+	base.OIDCIssuerURL = "https://idp.example.test/realms/portage"
+	base.OIDCRedirectURL = "https://dashboard.example.test/auth/oidc/callback"
+	if err := base.Validate(); err == nil {
+		t.Fatal("HTTPS OIDC callback succeeded without Secure cookies")
+	}
+	base.CookieSecure = true
+	if err := base.Validate(); err != nil {
+		t.Fatalf("HTTPS OIDC config failed: %v", err)
+	}
+
+	base.AuthEnabled = false
+	if err := base.Validate(); err == nil {
+		t.Fatal("OIDC succeeded while dashboard authentication was disabled")
+	}
+}
+
+func TestIdentityProviderConfigLoadsMultipleProviderTypes(t *testing.T) {
+	dir := t.TempDir()
+	providersPath := filepath.Join(dir, "providers.json")
+	configPath := filepath.Join(dir, "server.conf")
+	t.Setenv("TEST_GITHUB_OAUTH_SECRET", "github-test-secret")
+	providers := `{
+		"providers": [
+			{
+				"id": "google",
+				"type": "oidc",
+				"display_name": "Google",
+				"issuer_url": "https://accounts.google.com",
+				"audience": "google-client",
+				"client_id": "google-client",
+				"redirect_url": "https://dashboard.example.test/auth/provider/google/callback"
+			},
+			{
+				"id": "github",
+				"type": "github",
+				"display_name": "GitHub",
+				"client_id": "github-client",
+				"client_secret_env": "TEST_GITHUB_OAUTH_SECRET",
+				"redirect_url": "https://dashboard.example.test/auth/provider/github/callback"
+			}
+		]
+	}`
+	if err := os.WriteFile(providersPath, []byte(providers), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, []byte(
+		"AUTH_MODE=hybrid\nDATABASE_ENABLED=true\nDATABASE_REQUIRED=true\n"+
+			"AUTH_PROVIDERS_PATH=providers.json\n",
+	), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadServerConfig(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.IdentityProviders) != 2 ||
+		cfg.IdentityProviders[0].ID != "google" ||
+		cfg.IdentityProviders[1].ClientSecret != "github-test-secret" ||
+		cfg.IdentityProviders[1].APIBaseURL != "https://api.github.com" {
+		t.Fatalf("identity providers = %+v", cfg.IdentityProviders)
+	}
+	if warnings := strings.Join(cfg.Validate(), "\n"); strings.Contains(
+		warnings, "identity provider",
+	) {
+		t.Fatalf("valid provider config warnings = %s", warnings)
+	}
+}
+
 // TestLoadBuilderConfig tests loading builder configuration.
 func TestLoadBuilderConfig(t *testing.T) {
 	tmpFile := "/tmp/test-builder.conf"
@@ -276,6 +562,11 @@ func TestLoadConfigDefaults(t *testing.T) {
 
 	if cfg.MaxWorkers != 5 {
 		t.Errorf("Expected default MaxWorkers=5, got %d", cfg.MaxWorkers)
+	}
+	if cfg.SchedulerAutoscaleMode != "observe" ||
+		cfg.SchedulerAutoscaleMinSlots != 1 ||
+		cfg.SchedulerAutoscaleMaxSlots != 64 {
+		t.Fatalf("unexpected default autoscale policy: %+v", cfg)
 	}
 }
 

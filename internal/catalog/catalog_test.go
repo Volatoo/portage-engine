@@ -22,7 +22,8 @@ func validCatalog() *Catalog {
 			LegacyProfiles:      []string{"default/linux/amd64/23.0"},
 			RepositoryIDs:       []string{"gentoo", "pe-profiles"}, ImageID: "image/base-g1",
 			MirrorBundleID: "mirror/2026-07-22", DefaultResourceClass: "small",
-			Default: true, Channel: "stable",
+			EgressPolicyID: "egress/internal",
+			Default:        true, Channel: "stable",
 		}},
 		Repositories: []RepositoryDefinition{{
 			ID: "gentoo", Name: "gentoo", Location: "/var/db/repos/gentoo",
@@ -42,7 +43,14 @@ func validCatalog() *Catalog {
 		}},
 		MirrorBundles: []MirrorBundle{{ID: "mirror/2026-07-22", Digest: testDigest, CreatedAt: time.Now().UTC().Add(-time.Hour),
 			FreshUntil: time.Now().UTC().Add(24 * time.Hour), AdvisoryWatermark: "2026-07-22T00:00:00Z", Channel: "stable"}},
-		ResourceClasses: []ResourceClass{{ID: "small", MachineSpec: map[string]string{"cores": "2", "memory": "4096"}}},
+		ResourceClasses: []ResourceClass{{
+			ID: "small", MachineSpec: map[string]string{"cores": "2", "memory": "4096", "disk_size": "40"},
+			MaxRuntimeMinutes: 60, CloudCostMicrounitsPerMinute: 1000,
+		}},
+		EgressPolicies: []EgressPolicy{{
+			ID: "egress/internal", Mode: EgressModeEnforce, Channel: "stable",
+			Rules: []EgressRule{{ID: "git", Hosts: []string{"git.internal"}, CIDRs: []string{"10.31.0.2/32"}, Protocol: "tcp", Ports: []int{443}}},
+		}},
 	}
 }
 
@@ -59,6 +67,9 @@ func TestCatalogResolve(t *testing.T) {
 	if ctx.ProfileID != "pe/amd64/base-v1" || ctx.Template != "pe-base-g1" || ctx.Provider != "pve" {
 		t.Fatalf("unexpected context: %+v", ctx)
 	}
+	if ctx.ExecutionZone != "default" {
+		t.Fatalf("unexpected default execution zone: %q", ctx.ExecutionZone)
+	}
 	if ctx.BinhostPath != "releases/amd64/binpackages/23.0/x86-64_pe-base-v1" {
 		t.Fatalf("unexpected binhost path: %q", ctx.BinhostPath)
 	}
@@ -68,8 +79,15 @@ func TestCatalogResolve(t *testing.T) {
 	if ctx.MachineSpec["cores"] != "2" {
 		t.Fatalf("resource class not resolved: %+v", ctx.MachineSpec)
 	}
+	if ctx.MaxRuntimeMinutes != 60 ||
+		ctx.CloudCostMicrounitsPerMinute != 1000 {
+		t.Fatalf("runtime/cost accounting contract not resolved: %+v", ctx)
+	}
 	if len(ctx.PackageSetIDs) != 2 || ctx.PackageSetCatalogDigest != testDigest {
 		t.Fatalf("package sets not resolved: %+v", ctx)
+	}
+	if ctx.EgressPolicy.ID != "egress/internal" || !strings.HasPrefix(ctx.EgressPolicyDigest, "sha256:") {
+		t.Fatalf("egress policy not resolved: %+v", ctx)
 	}
 }
 
@@ -126,6 +144,9 @@ func TestCatalogAllowsIntegrityProtectedHTTPArtifactPlane(t *testing.T) {
 		c.Repositories[index].SyncURI = "http://10.31.0.2/git/" + c.Repositories[index].Name + ".bundle"
 		c.Repositories[index].Digest = testDigest
 	}
+	c.EgressPolicies[0].Rules = []EgressRule{{
+		ID: "git", Hosts: []string{"10.31.0.2"}, CIDRs: []string{"10.31.0.2/32"}, Protocol: "tcp", Ports: []int{80},
+	}}
 	if err := c.Validate(); err != nil {
 		t.Fatalf("integrity-protected HTTP mirror was rejected: %v", err)
 	}
@@ -152,8 +173,11 @@ func TestCatalogRejectsUnsafeExecutionMetadata(t *testing.T) {
 		mutate func(*Catalog)
 	}{
 		{name: "unsupported provider", mutate: func(c *Catalog) { c.Images[0].Provider = "unknown" }},
+		{name: "unsafe execution zone", mutate: func(c *Catalog) { c.Images[0].ExecutionZone = "LAN/A" }},
 		{name: "removed docker build mode", mutate: func(c *Catalog) { c.Images[0].BuildMode = "docker" }},
 		{name: "oversized resource", mutate: func(c *Catalog) { c.ResourceClasses[0].MachineSpec["cores"] = "9999" }},
+		{name: "missing runtime budget", mutate: func(c *Catalog) { c.ResourceClasses[0].MaxRuntimeMinutes = 0 }},
+		{name: "missing cloud cost rate", mutate: func(c *Catalog) { c.ResourceClasses[0].CloudCostMicrounitsPerMinute = 0 }},
 		{name: "abbreviated stable commit", mutate: func(c *Catalog) { c.Repositories[0].Revision = "0123456" }},
 		{name: "stable rsync unsupported", mutate: func(c *Catalog) {
 			c.Repositories[0].SyncType = "rsync"
@@ -211,6 +235,7 @@ func TestResolveRejectsCandidateChannel(t *testing.T) {
 	c.Repositories[1].Channel = "candidate"
 	c.Images[0].Channel = "candidate"
 	c.MirrorBundles[0].Channel = "candidate"
+	c.EgressPolicies[0].Channel = "candidate"
 	if err := c.Validate(); err != nil {
 		t.Fatal(err)
 	}

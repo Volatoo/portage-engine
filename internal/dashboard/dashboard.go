@@ -2,8 +2,11 @@
 package dashboard
 
 import (
+	"context"
+	"crypto/sha256"
 	"crypto/subtle"
 	"embed"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"html/template"
@@ -29,6 +32,8 @@ type Dashboard struct {
 	config     *config.DashboardConfig
 	templates  *template.Template
 	httpClient *http.Client
+	oidc       *oidcRuntime
+	providers  map[string]*oidcRuntime
 }
 
 // ClusterStatus represents the overall cluster status.
@@ -64,8 +69,30 @@ func New(cfg *config.DashboardConfig) *Dashboard {
 
 // pageData is the payload every page template receives.
 func (d *Dashboard) pageData(extra map[string]interface{}) map[string]interface{} {
+	providers := make([]identityProviderView, 0, len(d.providers))
+	stepUp, _ := extra["StepUp"].(bool)
+	for _, provider := range d.config.IdentityProviders {
+		if stepUp && provider.Type == "github" {
+			continue
+		}
+		if d.providers[provider.ID] != nil {
+			providers = append(providers, identityProviderView{
+				ID: provider.ID, DisplayName: provider.DisplayName,
+				LoginURL: "/auth/provider/" + provider.ID + "/start",
+			})
+		}
+	}
+	if len(providers) == 0 && (d.oidc != nil || d.config.OIDCEnabled) {
+		providers = append(providers, identityProviderView{
+			ID: "oidc", DisplayName: "Identity provider",
+			LoginURL: "/auth/oidc/start",
+		})
+	}
 	data := map[string]interface{}{
-		"AuthEnabled": d.config.AuthEnabled,
+		"AuthEnabled":       d.config.AuthEnabled,
+		"OIDCEnabled":       len(providers) > 0,
+		"IdentityProviders": providers,
+		"LocalLoginEnabled": d.config.AdminUser != "" && d.config.AdminPassword != "",
 	}
 	for k, v := range extra {
 		data[k] = v
@@ -89,6 +116,10 @@ func (d *Dashboard) Router() http.Handler {
 	mux.HandleFunc("/", d.handleLanding)
 	mux.HandleFunc("/login", d.handleLoginRoute)
 	mux.HandleFunc("/logout", d.handleLogout)
+	mux.HandleFunc("/auth/oidc/start", d.handleOIDCStart)
+	mux.HandleFunc("/auth/oidc/callback", d.handleOIDCCallback)
+	mux.HandleFunc("/auth/provider/", d.handleIdentityProviderRoute)
+	mux.HandleFunc("/auth/step-up", d.handleLocalStepUp)
 	mux.HandleFunc("/overview", d.handleOverview)
 	mux.HandleFunc("/builds", d.handleBuildsPage)
 	mux.HandleFunc("/build/", d.handleBuildDetail)
@@ -112,12 +143,18 @@ func (d *Dashboard) Router() http.Handler {
 	mux.HandleFunc("/api/builds/logs", d.handleBuildLogsAPI)
 	mux.HandleFunc("/api/instances", d.handleInstances)
 	mux.HandleFunc("/api/scheduler/status", d.handleSchedulerStatus)
+	mux.HandleFunc("/api/worker-gateway/status", d.handleWorkerGatewayStatus)
+	mux.HandleFunc("/api/worker-gateway/identities", d.handleWorkloadIdentityInventory)
 	mux.HandleFunc("/api/builders/status", d.handleBuildersStatusAPI)
 	mux.HandleFunc("/api/ledger/status", d.handleLedgerStatusAPI)
 	mux.HandleFunc("/api/runtime-metadata/status", d.handleRuntimeMetadataStatusAPI)
 	mux.HandleFunc("/api/cache/status", d.handleCacheStatusAPI)
 	mux.HandleFunc("/api/events/jobs", d.handleJobEventsProxy)
 	mux.HandleFunc("/api/image-factory/status", d.handleImageFactoryStatusProxy)
+	mux.HandleFunc("/api/iam/me", d.handleIAMMeProxy)
+	mux.HandleFunc("/api/iam/sessions", d.handleIAMSessionsProxy)
+	mux.HandleFunc("/api/iam/sessions/revoke-all", d.handleIAMRevokeAllProxy)
+	mux.HandleFunc("/api/projects/policy", d.handleProjectPolicyProxy)
 
 	// Key management endpoints
 	mux.HandleFunc("/api/gpg/status", d.handleGPGStatusProxy)
@@ -170,7 +207,15 @@ func (d *Dashboard) Router() http.Handler {
 // sessionCookie carries the signed JWT so plain page navigations (which never
 // send an Authorization header) authenticate too. HttpOnly keeps it away from
 // page scripts; API fetches send it automatically (same-origin).
-const sessionCookie = "pe_session"
+const (
+	sessionCookie = "pe_session"
+	stepUpCookie  = "pe_step_up"
+)
+
+type localStepUpSession struct {
+	SessionDigest string `json:"session_digest"`
+	Expires       int64  `json:"expires"`
+}
 
 // handleLanding serves the public landing page.
 func (d *Dashboard) handleLanding(w http.ResponseWriter, r *http.Request) {
@@ -190,7 +235,9 @@ func (d *Dashboard) handleLoginRoute(w http.ResponseWriter, r *http.Request) {
 			http.Redirect(w, r, "/overview", http.StatusFound)
 			return
 		}
-		d.renderPage(w, "login", nil)
+		d.renderPage(w, "login", map[string]interface{}{
+			"StepUp": r.URL.Query().Get("step_up") == "1",
+		})
 	case http.MethodPost:
 		d.handleLoginSubmit(w, r)
 	default:
@@ -235,15 +282,15 @@ func (d *Dashboard) handleLoginSubmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// #nosec G124 -- Secure follows the actual transport so deployments on the
-	// explicitly supported trusted-LAN HTTP mode can still authenticate.
+	// #nosec G124 -- Secure follows direct TLS or the explicit reverse-proxy
+	// COOKIE_SECURE setting; trusted-LAN HTTP remains an operator opt-in.
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookie,
 		Value:    token,
 		Path:     "/",
 		MaxAge:   int(ttl.Seconds()),
 		HttpOnly: true,
-		Secure:   r.TLS != nil,
+		Secure:   d.secureCookie(r),
 		SameSite: http.SameSiteLaxMode,
 	})
 
@@ -256,17 +303,128 @@ func (d *Dashboard) handleLoginSubmit(w http.ResponseWriter, r *http.Request) {
 
 // handleLogout clears the session cookie and returns to the landing page.
 func (d *Dashboard) handleLogout(w http.ResponseWriter, r *http.Request) {
-	// #nosec G124 -- Secure follows the actual transport for trusted-LAN HTTP.
+	d.revokeBackendOIDCSession(r)
+	// #nosec G124 -- Secure follows direct TLS or COOKIE_SECURE.
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookie,
 		Value:    "",
 		Path:     "/",
 		MaxAge:   -1,
 		HttpOnly: true,
-		Secure:   r.TLS != nil,
+		Secure:   d.secureCookie(r),
 		SameSite: http.SameSiteLaxMode,
 	})
+	// #nosec G124 -- HTTP is an explicit trusted-LAN mode; HttpOnly and SameSite remain enforced.
+	http.SetCookie(w, &http.Cookie{
+		Name: stepUpCookie, Value: "", Path: "/",
+		MaxAge: -1, HttpOnly: true, Secure: d.secureCookie(r),
+		SameSite: http.SameSiteStrictMode,
+	})
 	http.Redirect(w, r, "/", http.StatusFound)
+}
+
+func (d *Dashboard) handleLocalStepUp(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost || d.config.ServerStepUpAPIKey == "" {
+		http.Error(w, "local step-up is unavailable", http.StatusNotFound)
+		return
+	}
+	session, err := r.Cookie(sessionCookie)
+	if err != nil || strings.HasPrefix(session.Value, "oidc.") ||
+		strings.HasPrefix(session.Value, "federated.") {
+		http.Error(w, "local administrator session required", http.StatusUnauthorized)
+		return
+	}
+	var credentials struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&credentials); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	userOK := subtle.ConstantTimeCompare(
+		[]byte(credentials.Username), []byte(d.config.AdminUser),
+	) == 1
+	passOK := subtle.ConstantTimeCompare(
+		[]byte(credentials.Password), []byte(d.config.AdminPassword),
+	) == 1
+	if d.config.AdminUser == "" || d.config.AdminPassword == "" ||
+		!userOK || !passOK {
+		http.Error(w, "invalid credentials", http.StatusUnauthorized)
+		return
+	}
+	expires := time.Now().Add(10 * time.Minute)
+	digest := sha256.Sum256([]byte(session.Value))
+	value, err := d.seal("local-step-up", localStepUpSession{
+		SessionDigest: hex.EncodeToString(digest[:]), Expires: expires.Unix(),
+	})
+	if err != nil {
+		http.Error(w, "failed to establish step-up session", http.StatusInternalServerError)
+		return
+	}
+	// #nosec G124 -- HTTP is an explicit trusted-LAN mode; HttpOnly and SameSite remain enforced.
+	http.SetCookie(w, &http.Cookie{
+		Name: stepUpCookie, Value: value, Path: "/",
+		MaxAge: 600, HttpOnly: true, Secure: d.secureCookie(r),
+		SameSite: http.SameSiteStrictMode,
+	})
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"step_up": true, "expires_at": expires.UTC(),
+	})
+}
+
+func (d *Dashboard) validLocalStepUp(r *http.Request, sessionValue string) bool {
+	if d.config.ServerStepUpAPIKey == "" {
+		return false
+	}
+	cookie, err := r.Cookie(stepUpCookie)
+	if err != nil {
+		return false
+	}
+	var elevated localStepUpSession
+	if err := d.unseal("local-step-up", cookie.Value, &elevated); err != nil ||
+		time.Now().Unix() >= elevated.Expires {
+		return false
+	}
+	digest := sha256.Sum256([]byte(sessionValue))
+	return subtle.ConstantTimeCompare(
+		[]byte(elevated.SessionDigest),
+		[]byte(hex.EncodeToString(digest[:])),
+	) == 1
+}
+
+func (d *Dashboard) revokeBackendOIDCSession(r *http.Request) {
+	cookie, err := r.Cookie(sessionCookie)
+	if err != nil || (!strings.HasPrefix(cookie.Value, "oidc.") &&
+		!strings.HasPrefix(cookie.Value, "federated.")) {
+		return
+	}
+	token, err := d.oidcTokenFromSession(r.Context(), cookie.Value)
+	if err != nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	request, err := http.NewRequestWithContext(
+		ctx, http.MethodDelete,
+		strings.TrimRight(d.config.ServerURL, "/")+"/api/v1/iam/sessions",
+		nil,
+	)
+	if err != nil {
+		return
+	}
+	request.Header.Set("Authorization", "Bearer "+token)
+	response, err := d.httpClient.Do(request)
+	if err == nil {
+		_ = response.Body.Close()
+	}
+}
+
+func (d *Dashboard) secureCookie(r *http.Request) bool {
+	return d.config.CookieSecure || r.TLS != nil
 }
 
 // handleOverview serves the authed overview page.
@@ -403,7 +561,12 @@ func (d *Dashboard) handleShellProxy(w http.ResponseWriter, r *http.Request) {
 	serverWS := strings.Replace(d.config.ServerURL, "http://", "ws://", 1)
 	serverWS = strings.Replace(serverWS, "https://", "wss://", 1)
 	hdr := http.Header{}
-	if d.config.ServerAPIKey != "" {
+	if cookie, err := r.Cookie(sessionCookie); err == nil {
+		if token, tokenErr := d.oidcTokenFromSession(r.Context(), cookie.Value); tokenErr == nil {
+			hdr.Set("Authorization", "Bearer "+token)
+		}
+	}
+	if hdr.Get("Authorization") == "" && d.config.ServerAPIKey != "" {
 		hdr.Set("X-API-Key", d.config.ServerAPIKey)
 	}
 	upstream, resp, err := websocket.DefaultDialer.Dial(serverWS+"/api/v1/instances/shell?id="+url.QueryEscape(instanceID), hdr)
@@ -475,8 +638,9 @@ func (d *Dashboard) proxyServer(w http.ResponseWriter, r *http.Request, method, 
 	if ct := r.Header.Get("Content-Type"); ct != "" {
 		req.Header.Set("Content-Type", ct)
 	}
-	if d.config.ServerAPIKey != "" {
-		req.Header.Set("X-API-Key", d.config.ServerAPIKey)
+	d.applyBackendAuth(r, req)
+	if projectID := strings.TrimSpace(r.Header.Get("X-Project-ID")); projectID != "" {
+		req.Header.Set("X-Project-ID", projectID)
 	}
 	// #nosec G704 -- the request target is the validated backend origin above.
 	resp, err := d.httpClient.Do(req)
@@ -510,9 +674,9 @@ func (w flushingWriter) Write(data []byte) (int, error) {
 }
 
 // handleStatus returns the cluster status.
-func (d *Dashboard) handleStatus(w http.ResponseWriter, _ *http.Request) {
+func (d *Dashboard) handleStatus(w http.ResponseWriter, r *http.Request) {
 	// Query the server for current status
-	status, err := d.fetchClusterStatus()
+	status, err := d.fetchClusterStatus(r)
 	if err != nil {
 		writeBackendError(w, err)
 		return
@@ -539,7 +703,7 @@ func (d *Dashboard) handleBuilds(w http.ResponseWriter, r *http.Request) {
 	// Query the server for build list. On failure, report the outage honestly
 	// rather than fabricating sample builds (which would hide a real outage).
 	url := fmt.Sprintf("%s/api/v1/builds/list?limit=%d", d.config.ServerURL, limit)
-	resp, err := d.serverGet(url)
+	resp, err := d.serverGet(url, r)
 	if err != nil {
 		log.Printf("Failed to query builds: %v", err)
 		writeBackendError(w, err)
@@ -551,12 +715,13 @@ func (d *Dashboard) handleBuilds(w http.ResponseWriter, r *http.Request) {
 
 	// Forward the response from server
 	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(resp.StatusCode)
 	_, _ = io.Copy(w, resp.Body)
 }
 
 // handleInstances returns the list of active instances.
-func (d *Dashboard) handleInstances(w http.ResponseWriter, _ *http.Request) {
-	resp, err := d.serverGet(d.config.ServerURL + "/api/v1/instances")
+func (d *Dashboard) handleInstances(w http.ResponseWriter, r *http.Request) {
+	resp, err := d.serverGet(d.config.ServerURL+"/api/v1/instances", r)
 	if err != nil {
 		writeBackendError(w, err)
 		return
@@ -595,7 +760,7 @@ func (d *Dashboard) handleBuildDetailAPI(w http.ResponseWriter, r *http.Request)
 	}
 
 	url := fmt.Sprintf("%s/api/v1/builds/status?job_id=%s", d.config.ServerURL, jobID)
-	resp, err := d.serverGet(url)
+	resp, err := d.serverGet(url, r)
 	if err != nil {
 		log.Printf("Failed to query build detail: %v", err)
 		writeBackendError(w, err)
@@ -604,6 +769,7 @@ func (d *Dashboard) handleBuildDetailAPI(w http.ResponseWriter, r *http.Request)
 	defer func() { _ = resp.Body.Close() }()
 
 	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(resp.StatusCode)
 	_, _ = io.Copy(w, resp.Body)
 }
 
@@ -616,7 +782,7 @@ func (d *Dashboard) handleBuildLogsAPI(w http.ResponseWriter, r *http.Request) {
 	}
 
 	url := fmt.Sprintf("%s/api/v1/builds/logs?job_id=%s", d.config.ServerURL, jobID)
-	resp, err := d.serverGet(url)
+	resp, err := d.serverGet(url, r)
 	if err != nil {
 		log.Printf("Failed to query build logs: %v", err)
 		writeBackendError(w, err)
@@ -625,6 +791,7 @@ func (d *Dashboard) handleBuildLogsAPI(w http.ResponseWriter, r *http.Request) {
 	defer func() { _ = resp.Body.Close() }()
 
 	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(resp.StatusCode)
 	_, _ = io.Copy(w, resp.Body)
 }
 
@@ -639,8 +806,8 @@ func (d *Dashboard) handleDocs(w http.ResponseWriter, _ *http.Request) {
 }
 
 // fetchServerPublicKey retrieves the server's real GPG public key (armored).
-func (d *Dashboard) fetchServerPublicKey() (string, error) {
-	resp, err := d.serverGet(d.config.ServerURL + "/api/v1/gpg/public-key")
+func (d *Dashboard) fetchServerPublicKey(r *http.Request) (string, error) {
+	resp, err := d.serverGet(d.config.ServerURL+"/api/v1/gpg/public-key", r)
 	if err != nil {
 		return "", err
 	}
@@ -657,8 +824,8 @@ func (d *Dashboard) fetchServerPublicKey() (string, error) {
 }
 
 // handlePublicKeyAPI returns the server's real GPG public key.
-func (d *Dashboard) handlePublicKeyAPI(w http.ResponseWriter, _ *http.Request) {
-	key, err := d.fetchServerPublicKey()
+func (d *Dashboard) handlePublicKeyAPI(w http.ResponseWriter, r *http.Request) {
+	key, err := d.fetchServerPublicKey(r)
 	if err != nil {
 		writeBackendError(w, err)
 		return
@@ -668,8 +835,8 @@ func (d *Dashboard) handlePublicKeyAPI(w http.ResponseWriter, _ *http.Request) {
 }
 
 // handleDownloadKeyAPI serves the server's real GPG public key as a download.
-func (d *Dashboard) handleDownloadKeyAPI(w http.ResponseWriter, _ *http.Request) {
-	key, err := d.fetchServerPublicKey()
+func (d *Dashboard) handleDownloadKeyAPI(w http.ResponseWriter, r *http.Request) {
+	key, err := d.fetchServerPublicKey(r)
 	if err != nil {
 		writeBackendError(w, err)
 		return
@@ -682,8 +849,8 @@ func (d *Dashboard) handleDownloadKeyAPI(w http.ResponseWriter, _ *http.Request)
 
 // handleKeyInfoAPI returns whether a signing key is available on the server.
 // It reports the real key's presence rather than fabricated metadata.
-func (d *Dashboard) handleKeyInfoAPI(w http.ResponseWriter, _ *http.Request) {
-	key, err := d.fetchServerPublicKey()
+func (d *Dashboard) handleKeyInfoAPI(w http.ResponseWriter, r *http.Request) {
+	key, err := d.fetchServerPublicKey(r)
 	if err != nil {
 		writeBackendError(w, err)
 		return
@@ -698,9 +865,9 @@ func (d *Dashboard) handleKeyInfoAPI(w http.ResponseWriter, _ *http.Request) {
 }
 
 // handleBuildersStatusAPI returns builders status from the server.
-func (d *Dashboard) handleBuildersStatusAPI(w http.ResponseWriter, _ *http.Request) {
+func (d *Dashboard) handleBuildersStatusAPI(w http.ResponseWriter, r *http.Request) {
 	url := fmt.Sprintf("%s/api/v1/builders/status", d.config.ServerURL)
-	resp, err := d.serverGet(url)
+	resp, err := d.serverGet(url, r)
 	if err != nil {
 		log.Printf("Failed to query builders status: %v", err)
 		writeBackendError(w, err)
@@ -709,13 +876,14 @@ func (d *Dashboard) handleBuildersStatusAPI(w http.ResponseWriter, _ *http.Reque
 	defer func() { _ = resp.Body.Close() }()
 
 	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(resp.StatusCode)
 	_, _ = io.Copy(w, resp.Body)
 }
 
 // handleSchedulerStatus returns scheduler and task assignment status.
-func (d *Dashboard) handleSchedulerStatus(w http.ResponseWriter, _ *http.Request) {
+func (d *Dashboard) handleSchedulerStatus(w http.ResponseWriter, r *http.Request) {
 	url := fmt.Sprintf("%s/api/v1/scheduler/status", d.config.ServerURL)
-	resp, err := d.serverGet(url)
+	resp, err := d.serverGet(url, r)
 	if err != nil {
 		log.Printf("Failed to query scheduler status: %v", err)
 		writeBackendError(w, err)
@@ -724,7 +892,27 @@ func (d *Dashboard) handleSchedulerStatus(w http.ResponseWriter, _ *http.Request
 	defer func() { _ = resp.Body.Close() }()
 
 	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(resp.StatusCode)
 	_, _ = io.Copy(w, resp.Body)
+}
+
+func (d *Dashboard) handleWorkerGatewayStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	d.proxyServer(w, r, http.MethodGet, d.config.ServerURL+"/api/v1/worker-gateway/status")
+}
+
+func (d *Dashboard) handleWorkloadIdentityInventory(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	d.proxyServer(
+		w, r, http.MethodGet,
+		d.config.ServerURL+"/api/v1/worker-gateway/identities",
+	)
 }
 
 // handleLedgerStatusAPI exposes the server's low-cardinality DB-1 ledger
@@ -734,7 +922,7 @@ func (d *Dashboard) handleLedgerStatusAPI(w http.ResponseWriter, r *http.Request
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	resp, err := d.serverGet(d.config.ServerURL + "/api/v1/ledger/status")
+	resp, err := d.serverGet(d.config.ServerURL+"/api/v1/ledger/status", r)
 	if err != nil {
 		log.Printf("Failed to query job ledger status: %v", err)
 		writeBackendError(w, err)
@@ -752,7 +940,7 @@ func (d *Dashboard) handleRuntimeMetadataStatusAPI(w http.ResponseWriter, r *htt
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	resp, err := d.serverGet(d.config.ServerURL + "/api/v1/runtime-metadata/status")
+	resp, err := d.serverGet(d.config.ServerURL+"/api/v1/runtime-metadata/status", r)
 	if err != nil {
 		log.Printf("Failed to query runtime metadata status: %v", err)
 		writeBackendError(w, err)
@@ -777,7 +965,11 @@ func (d *Dashboard) handleJobEventsProxy(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	d.proxyServer(w, r, http.MethodGet, d.config.ServerURL+"/api/v1/events/jobs")
+	target := d.config.ServerURL + "/api/v1/events/jobs"
+	if projectID := strings.TrimSpace(r.URL.Query().Get("project_id")); projectID != "" {
+		target += "?project_id=" + url.QueryEscape(projectID)
+	}
+	d.proxyServer(w, r, http.MethodGet, target)
 }
 
 // handleStatic serves static files.
@@ -844,7 +1036,7 @@ func (d *Dashboard) handleArtifactInfo(w http.ResponseWriter, r *http.Request) {
 
 	// Proxy request to server
 	infoURL := fmt.Sprintf("%s/api/v1/artifacts/info/%s", d.config.ServerURL, jobID)
-	resp, err := d.serverGet(infoURL)
+	resp, err := d.serverGet(infoURL, r)
 	if err != nil {
 		log.Printf("Failed to get artifact info: %v", err)
 		http.Error(w, fmt.Sprintf("Failed to contact server: %v", err), http.StatusBadGateway)
@@ -879,7 +1071,7 @@ func (d *Dashboard) handleArtifactDownload(w http.ResponseWriter, r *http.Reques
 
 	// Proxy request to server
 	downloadURL := fmt.Sprintf("%s/api/v1/artifacts/download/%s", d.config.ServerURL, jobID)
-	resp, err := d.serverGet(downloadURL)
+	resp, err := d.serverGet(downloadURL, r)
 	if err != nil {
 		log.Printf("Failed to download artifact: %v", err)
 		http.Error(w, fmt.Sprintf("Failed to contact server: %v", err), http.StatusBadGateway)
@@ -905,8 +1097,8 @@ func (d *Dashboard) handleArtifactDownload(w http.ResponseWriter, r *http.Reques
 }
 
 // fetchClusterStatus fetches cluster status from the server.
-func (d *Dashboard) fetchClusterStatus() (*ClusterStatus, error) {
-	resp, err := d.serverGet(fmt.Sprintf("%s/api/v1/cluster/status", d.config.ServerURL))
+func (d *Dashboard) fetchClusterStatus(r *http.Request) (*ClusterStatus, error) {
+	resp, err := d.serverGet(fmt.Sprintf("%s/api/v1/cluster/status", d.config.ServerURL), r)
 	if err != nil {
 		// Surface the outage to the caller instead of returning fabricated
 		// "healthy" numbers that would mask a backend outage.
@@ -916,6 +1108,11 @@ func (d *Dashboard) fetchClusterStatus() (*ClusterStatus, error) {
 	defer func() {
 		_ = resp.Body.Close()
 	}()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return nil, fmt.Errorf("server returned %d: %s",
+			resp.StatusCode, strings.TrimSpace(string(body)))
+	}
 
 	var status ClusterStatus
 	if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
@@ -934,6 +1131,8 @@ func (d *Dashboard) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Public: landing, login, logout, and static assets.
 		if r.URL.Path == "/" || r.URL.Path == "/login" || r.URL.Path == "/logout" ||
+			r.URL.Path == "/auth/oidc/start" || r.URL.Path == "/auth/oidc/callback" ||
+			strings.HasPrefix(r.URL.Path, "/auth/provider/") ||
 			strings.HasPrefix(r.URL.Path, "/static/") {
 			next.ServeHTTP(w, r)
 			return
@@ -952,7 +1151,7 @@ func (d *Dashboard) authMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		if token == "" || verifyToken(d.config.JWTSecret, token, time.Now()) != nil {
+		if token == "" || d.verifyDashboardSession(r.Context(), token) != nil {
 			if isPageRequest(r) {
 				http.Redirect(w, r, "/login", http.StatusFound)
 				return
@@ -987,18 +1186,68 @@ func writeBackendError(w http.ResponseWriter, err error) {
 
 // serverGet issues a GET to the backend server, attaching the configured
 // server API key so the dashboard works against a secured server.
-func (d *Dashboard) serverGet(url string) (*http.Response, error) {
-	// #nosec G704 -- callers build this URL from the startup-validated
+func (d *Dashboard) serverGet(url string, incoming ...*http.Request) (*http.Response, error) {
+	ctx := context.Background()
+	if len(incoming) > 0 && incoming[0] != nil {
+		ctx = incoming[0].Context()
+	}
+	// #nosec G704 -- callers build this URL from the startup-validated,
 	// operator-controlled SERVER_URL and fixed API paths.
-	req, err := http.NewRequest(http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
 	}
-	if d.config.ServerAPIKey != "" {
+	if len(incoming) > 0 && incoming[0] != nil {
+		d.applyBackendAuth(incoming[0], req)
+	} else if d.config.ServerAPIKey != "" {
 		req.Header.Set("X-API-Key", d.config.ServerAPIKey)
+	}
+	if len(incoming) > 0 && incoming[0] != nil {
+		if projectID := strings.TrimSpace(incoming[0].Header.Get("X-Project-ID")); projectID != "" {
+			req.Header.Set("X-Project-ID", projectID)
+		}
 	}
 	// #nosec G704 -- the request target is the validated backend origin above.
 	return d.httpClient.Do(req)
+}
+
+func (d *Dashboard) handleIAMMeProxy(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	d.proxyServer(w, r, http.MethodGet, d.config.ServerURL+"/api/v1/iam/me")
+}
+
+func (d *Dashboard) handleProjectPolicyProxy(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodPut {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	d.proxyServer(w, r, r.Method, d.config.ServerURL+"/api/v1/projects/policy")
+}
+
+func (d *Dashboard) handleIAMSessionsProxy(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodDelete {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	target := d.config.ServerURL + "/api/v1/iam/sessions"
+	if r.URL.RawQuery != "" {
+		target += "?" + r.URL.RawQuery
+	}
+	d.proxyServer(w, r, r.Method, target)
+}
+
+func (d *Dashboard) handleIAMRevokeAllProxy(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	d.proxyServer(
+		w, r, r.Method,
+		d.config.ServerURL+"/api/v1/iam/sessions/revoke-all",
+	)
 }
 
 // extractBearer returns the token from an "Authorization: Bearer <token>"

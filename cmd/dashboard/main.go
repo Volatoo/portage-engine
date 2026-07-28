@@ -51,6 +51,12 @@ func main() {
 
 	// Create dashboard instance
 	dash := dashboard.New(cfg)
+	initCtx, initCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	if err := dash.Initialize(initCtx); err != nil {
+		initCancel()
+		log.Fatalf("Failed to initialize dashboard identity provider: %v", err)
+	}
+	initCancel()
 
 	// HTTP server configuration
 	httpServer := &http.Server{

@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/slchris/portage-engine/pkg/config"
 )
 
@@ -160,6 +162,78 @@ func TestLocalBuilderSubmitBuild(t *testing.T) {
 
 	if job.Request.PackageName != req.PackageName {
 		t.Errorf("Expected package %s, got %s", req.PackageName, job.Request.PackageName)
+	}
+}
+
+func TestLocalBuilderSubmitBuildIsIdempotentByExecutionID(t *testing.T) {
+	local := NewLocalBuilder(0, testReusableBuilderConfig(t))
+	t.Cleanup(local.Shutdown)
+	executionID := uuid.NewString()
+	request := &LocalBuildRequest{
+		ExecutionID: executionID,
+		PackageName: "app-misc/jq",
+	}
+	first, err := local.SubmitBuild(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := local.SubmitBuild(&LocalBuildRequest{
+		ExecutionID: executionID,
+		PackageName: "app-misc/jq",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second != first {
+		t.Fatalf("duplicate execution created job %q; want original %q", second, first)
+	}
+	if got := len(local.ListJobs()); got != 1 {
+		t.Fatalf("duplicate execution created %d jobs; want 1", got)
+	}
+	if _, err := local.SubmitBuild(&LocalBuildRequest{
+		ExecutionID: executionID,
+		PackageName: "app-misc/hello",
+	}); err == nil || !strings.Contains(err.Error(), "different build request") {
+		t.Fatalf("execution ID request conflict was not rejected: %v", err)
+	}
+}
+
+func TestLocalBuilderExecutionIDSurvivesRestart(t *testing.T) {
+	cfg := testReusableBuilderConfig(t)
+	cfg.PersistenceEnabled = true
+	executionID := uuid.NewString()
+	first := NewLocalBuilder(0, cfg)
+	jobID, err := first.SubmitBuild(&LocalBuildRequest{
+		ExecutionID: executionID,
+		PackageName: "app-misc/jq",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first.Shutdown()
+
+	restarted := NewLocalBuilder(0, cfg)
+	t.Cleanup(restarted.Shutdown)
+	replayedID, err := restarted.SubmitBuild(&LocalBuildRequest{
+		ExecutionID: executionID,
+		PackageName: "app-misc/jq",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replayedID != jobID {
+		t.Fatalf("restart replay created job %q; want original %q", replayedID, jobID)
+	}
+	job, err := restarted.GetJobStatus(jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.Status != "failed" ||
+		!strings.Contains(job.Error, "interrupted by builder restart") {
+		t.Fatalf("interrupted durable job was not reconciled: %+v", job)
+	}
+	if got := len(restarted.ListJobs()); got != 1 {
+		t.Fatalf("restart replay created %d jobs; want 1", got)
 	}
 }
 

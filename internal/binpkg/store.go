@@ -2,7 +2,9 @@
 package binpkg
 
 import (
+	"crypto/sha256"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -204,11 +206,10 @@ func (s *Store) regenerateIndexLocked(arch string) (int, error) {
 	return len(entries), nil
 }
 
-// PromoteStaged atomically publishes a verified set of package files from a
-// staging directory on the same filesystem. The public Packages index is
-// regenerated while indexMu is held, so the periodic refresher cannot observe
-// a partially promoted set. Existing files are backed up and restored if any
-// rename or index generation fails.
+// PromoteStaged atomically copies a verified set of package files from a
+// staging directory. Keeping the source until the durable publish-phase commit
+// makes crash replay possible. Exact existing destinations are idempotent;
+// different content at an immutable location is rejected.
 func (s *Store) PromoteStaged(stagingRoot string, rels []string, arch string) ([]string, error) {
 	if stagingRoot == "" || len(rels) == 0 {
 		return nil, fmt.Errorf("staging root and artifacts are required")
@@ -236,26 +237,17 @@ func (s *Store) PromoteStaged(stagingRoot string, rels []string, arch string) ([
 	s.indexMu.Lock()
 	defer s.indexMu.Unlock()
 
-	rollbackRoot, err := os.MkdirTemp(stagingRoot, ".promotion-rollback-")
-	if err != nil {
-		return nil, fmt.Errorf("create promotion rollback directory: %w", err)
-	}
-	defer func() { _ = os.RemoveAll(rollbackRoot) }()
-
 	type movedArtifact struct {
-		rel       string
-		dest      string
-		backup    string
-		hadBackup bool
+		rel     string
+		dest    string
+		created bool
 	}
 	moved := make([]movedArtifact, 0, len(cleanRels))
 	rollback := func() {
 		for i := len(moved) - 1; i >= 0; i-- {
 			item := moved[i]
-			_ = os.Remove(item.dest)
-			if item.hadBackup {
-				_ = os.MkdirAll(filepath.Dir(item.dest), 0o750)
-				_ = os.Rename(item.backup, item.dest)
+			if item.created {
+				_ = os.Remove(item.dest)
 			}
 		}
 	}
@@ -270,20 +262,30 @@ func (s *Store) PromoteStaged(stagingRoot string, rels []string, arch string) ([
 
 		item := movedArtifact{rel: rel, dest: dest}
 		if _, err := os.Lstat(dest); err == nil {
-			rollback()
-			return nil, fmt.Errorf("published artifact %q already exists; binpkg locations are immutable", rel)
+			equal, compareErr := sameRegularFileContent(src, dest)
+			if compareErr != nil {
+				rollback()
+				return nil, fmt.Errorf("verify replayed artifact %q: %w", rel, compareErr)
+			}
+			if !equal {
+				rollback()
+				return nil, fmt.Errorf("published artifact %q already exists with different content", rel)
+			}
+			// Exact immutable destination means a prior publish reached the
+			// filesystem before its database phase commit. Treat it as the
+			// same idempotent publication generation.
+			moved = append(moved, item)
+			continue
 		} else if !os.IsNotExist(err) {
 			rollback()
 			return nil, fmt.Errorf("inspect publish destination %q: %w", rel, err)
 		}
 
-		if err := os.Rename(src, dest); err != nil {
-			if item.hadBackup {
-				_ = os.Rename(item.backup, dest)
-			}
+		if err := copyFileAtomic(src, dest); err != nil {
 			rollback()
 			return nil, fmt.Errorf("promote artifact %q: %w", rel, err)
 		}
+		item.created = true
 		moved = append(moved, item)
 	}
 
@@ -297,6 +299,82 @@ func (s *Store) PromoteStaged(stagingRoot string, rels []string, arch string) ([
 		paths = append(paths, item.dest)
 	}
 	return paths, nil
+}
+
+func sameRegularFileContent(left, right string) (bool, error) {
+	leftInfo, err := os.Lstat(left)
+	if err != nil || !leftInfo.Mode().IsRegular() {
+		return false, fmt.Errorf("staged source is unavailable or not regular")
+	}
+	rightInfo, err := os.Lstat(right)
+	if err != nil || !rightInfo.Mode().IsRegular() {
+		return false, fmt.Errorf("published destination is unavailable or not regular")
+	}
+	if leftInfo.Size() != rightInfo.Size() {
+		return false, nil
+	}
+	leftDigest, err := fileSHA256(left)
+	if err != nil {
+		return false, err
+	}
+	rightDigest, err := fileSHA256(right)
+	if err != nil {
+		return false, err
+	}
+	return leftDigest == rightDigest, nil
+}
+
+func copyFileAtomic(source, destination string) error {
+	input, err := os.Open(source) // #nosec G304 -- trusted staged path was confined and lstat-validated by PromoteStaged.
+	if err != nil {
+		return err
+	}
+	defer func() { _ = input.Close() }()
+	tmp, err := os.CreateTemp(filepath.Dir(destination), ".publish-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	success := false
+	defer func() {
+		_ = tmp.Close()
+		if !success {
+			_ = os.Remove(tmpName)
+		}
+	}()
+	if err := tmp.Chmod(0o644); err != nil {
+		return err
+	}
+	if _, err := io.Copy(tmp, input); err != nil {
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpName, destination); err != nil {
+		return err
+	}
+	success = true
+	return nil
+}
+
+func fileSHA256(name string) ([sha256.Size]byte, error) {
+	var empty [sha256.Size]byte
+	file, err := os.Open(name) // #nosec G304 -- caller passes confined, lstat-validated artifact paths.
+	if err != nil {
+		return empty, err
+	}
+	defer func() { _ = file.Close() }()
+	hash := sha256.New()
+	if _, err := io.Copy(hash, file); err != nil {
+		return empty, err
+	}
+	var result [sha256.Size]byte
+	copy(result[:], hash.Sum(nil))
+	return result, nil
 }
 
 // packageFromEntry converts a scanned index entry into a queryable Package.

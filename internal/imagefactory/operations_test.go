@@ -178,14 +178,18 @@ func TestPromotionAndRollbackBindAllEvidence(t *testing.T) {
 	candidate := &catalog.Catalog{Version: 1,
 		Profiles: []catalog.ProfileDefinition{{ID: profileID, Arch: "amd64", ProfilePath: image.ProfilePath, BinhostPath: "releases/amd64/binpackages/23.0/x86-64_test", ProfileRepositoryID: "pe-profiles/rev-" + image.Repositories["pe-profiles"],
 			Parents: []catalog.ProfileParentDefinition{{RepositoryID: "gentoo/rev-" + image.Repositories["gentoo"], ProfilePath: catalystOfficialProfile}}, RepositoryIDs: []string{"gentoo/rev-" + image.Repositories["gentoo"], "pe-profiles/rev-" + image.Repositories["pe-profiles"]},
-			ImageID: imageID, MirrorBundleID: bundle.BundleID, Default: true, Channel: "candidate"}},
+			ImageID: imageID, MirrorBundleID: bundle.BundleID, EgressPolicyID: "egress/candidate", Default: true, Channel: "candidate"}},
 		Repositories: []catalog.RepositoryDefinition{
 			{ID: "gentoo/rev-" + image.Repositories["gentoo"], Name: "gentoo", Location: "/var/db/repos/gentoo", SyncType: "git", SyncURI: "https://git.internal/gentoo.git", Revision: image.Repositories["gentoo"], Channel: "candidate"},
 			{ID: "pe-profiles/rev-" + image.Repositories["pe-profiles"], Name: "pe-profiles", Location: "/var/db/repos/pe-profiles", SyncType: "git", SyncURI: "https://git.internal/pe-profiles.git", Revision: image.Repositories["pe-profiles"], Channel: "candidate"}},
 		Images: []catalog.ImageManifest{{ID: imageID, ProfileID: profileID, Generation: image.Generation, Provider: image.Provider, Arch: image.Arch,
 			BuildMode: image.BuildMode, Template: image.Template, Digest: image.ImageDigest, RootfsSource: image.RootfsSource, RootfsManifestDigest: image.RootfsManifestDigest,
 			PackageSetIDs: append([]string(nil), image.PackageSets...), PackageSetCatalogDigest: image.PackageSetCatalogDigest, Channel: "candidate"}},
-		MirrorBundles: []catalog.MirrorBundle{{ID: bundle.BundleID, Digest: bundleDigest, CreatedAt: bundle.CreatedAt, FreshUntil: bundle.FreshUntil, AdvisoryWatermark: bundle.AdvisoryWatermark, Channel: "candidate"}}}
+		MirrorBundles: []catalog.MirrorBundle{{ID: bundle.BundleID, Digest: bundleDigest, CreatedAt: bundle.CreatedAt, FreshUntil: bundle.FreshUntil, AdvisoryWatermark: bundle.AdvisoryWatermark, Channel: "candidate"}},
+		EgressPolicies: []catalog.EgressPolicy{{
+			ID: "egress/candidate", Mode: catalog.EgressModeEnforce, Channel: "candidate",
+			Rules: []catalog.EgressRule{{ID: "git", Hosts: []string{"git.internal"}, CIDRs: []string{"10.31.0.2/32"}, Protocol: "tcp", Ports: []int{443}}},
+		}}}
 	if err := candidate.Validate(); err != nil {
 		t.Fatal(err)
 	}

@@ -102,7 +102,7 @@ func NewNotifier(config *Config) *Notifier {
 
 // LoadConfig loads notification configuration from a file.
 func LoadConfig(path string) (*Config, error) {
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) // #nosec G304 -- path is an operator-selected notification config file.
 	if err != nil {
 		return nil, fmt.Errorf("read config file: %w", err)
 	}

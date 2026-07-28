@@ -3,14 +3,41 @@
   "catalog_version": 1,
   "default_profile_id": "pe/amd64/no-multilib/systemd/base-v2",
   "default_resource_class": "medium",
+  "default_egress_policy_id": "egress/candidate-internal",
   "resource_classes": [
     {
       "id": "medium",
+      "max_runtime_minutes": 90,
+      "cloud_cost_microunits_per_minute": 2000,
       "machine_spec": {
         "cores": "4",
         "memory": "8192",
         "disk_size": "50"
       }
+    }
+  ],
+  "egress_policies": [
+    {
+      "id": "egress/candidate-internal",
+      "mode": "enforce",
+      "dns_resolvers": ["10.31.0.1"],
+      "rules": [
+        {
+          "id": "artifact-and-git-mirror",
+          "hosts": ["git-mirror.example.internal", "nas.example.internal"],
+          "cidrs": ["10.31.0.2/32"],
+          "protocol": "tcp",
+          "ports": [80, 443]
+        },
+        {
+          "id": "worker-gateway",
+          "hosts": ["worker-gateway.example.internal"],
+          "cidrs": ["10.31.0.10/32"],
+          "protocol": "tcp",
+          "ports": [9443]
+        }
+      ],
+      "channel": "candidate"
     }
   ],
   "artifacts": [

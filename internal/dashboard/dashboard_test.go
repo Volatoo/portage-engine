@@ -135,6 +135,81 @@ func TestHandleLogin(t *testing.T) {
 	}
 }
 
+func TestLocalLoginHonorsSecureCookieBehindProxy(t *testing.T) {
+	cfg := &config.DashboardConfig{
+		ServerURL:       "http://localhost:8080",
+		AuthEnabled:     true,
+		JWTSecret:       "test-secret-that-is-at-least-32-chars-long",
+		AdminUser:       "testuser",
+		AdminPassword:   "testpass",
+		TokenTTLMinutes: 60,
+		CookieSecure:    true,
+	}
+	body := bytes.NewBufferString(`{"username":"testuser","password":"testpass"}`)
+	w := httptest.NewRecorder()
+	New(cfg).handleLoginRoute(w, httptest.NewRequest(http.MethodPost, "/login", body))
+	cookies := w.Result().Cookies()
+	if len(cookies) != 1 || cookies[0].Name != sessionCookie ||
+		!cookies[0].Secure || !cookies[0].HttpOnly {
+		t.Fatalf("secure proxy session cookie = %#v", cookies)
+	}
+}
+
+func TestLocalStepUpIsBoundToDashboardSession(t *testing.T) {
+	cfg := &config.DashboardConfig{
+		ServerURL: "http://localhost:8080", AuthEnabled: true,
+		JWTSecret: "test-secret-that-is-at-least-32-chars-long",
+		AdminUser: "admin", AdminPassword: "password",
+		ServerAPIKey: "primary-key", ServerStepUpAPIKey: "second-key",
+	}
+	dashboard := New(cfg)
+	session, err := signToken(cfg.JWTSecret, "admin", time.Now(), time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(
+		http.MethodPost, "/auth/step-up",
+		bytes.NewBufferString(`{"username":"admin","password":"password"}`),
+	)
+	request.AddCookie(&http.Cookie{Name: sessionCookie, Value: session})
+	recorder := httptest.NewRecorder()
+	dashboard.handleLocalStepUp(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("step-up status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var stepCookie *http.Cookie
+	for _, cookie := range recorder.Result().Cookies() {
+		if cookie.Name == stepUpCookie {
+			stepCookie = cookie
+		}
+	}
+	if stepCookie == nil || !stepCookie.HttpOnly ||
+		stepCookie.SameSite != http.SameSiteStrictMode {
+		t.Fatalf("step-up cookie=%#v", stepCookie)
+	}
+	incoming := httptest.NewRequest(http.MethodPut, "/api/settings/cloud", nil)
+	incoming.AddCookie(&http.Cookie{Name: sessionCookie, Value: session})
+	incoming.AddCookie(stepCookie)
+	outgoing := httptest.NewRequest(http.MethodPut, "http://localhost:8080/api/v1/settings/cloud", nil)
+	dashboard.applyBackendAuth(incoming, outgoing)
+	if outgoing.Header.Get("X-API-Key") != "primary-key" ||
+		outgoing.Header.Get("X-Step-Up-Key") != "second-key" {
+		t.Fatalf("backend auth headers=%v", outgoing.Header)
+	}
+	otherSession, err := signToken(cfg.JWTSecret, "admin", time.Now().Add(time.Second), time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	incoming = httptest.NewRequest(http.MethodPut, "/api/settings/cloud", nil)
+	incoming.AddCookie(&http.Cookie{Name: sessionCookie, Value: otherSession})
+	incoming.AddCookie(stepCookie)
+	outgoing = httptest.NewRequest(http.MethodPut, "http://localhost:8080/api/v1/settings/cloud", nil)
+	dashboard.applyBackendAuth(incoming, outgoing)
+	if outgoing.Header.Get("X-Step-Up-Key") != "" {
+		t.Fatal("step-up cookie was accepted with a different dashboard session")
+	}
+}
+
 // TestHandleLoginRejectsBadCredentials ensures wrong credentials are refused.
 func TestHandleLoginRejectsBadCredentials(t *testing.T) {
 	cfg := &config.DashboardConfig{
@@ -153,6 +228,66 @@ func TestHandleLoginRejectsBadCredentials(t *testing.T) {
 
 	if got := w.Result().StatusCode; got != http.StatusUnauthorized {
 		t.Errorf("Expected status 401 for bad credentials, got %d", got)
+	}
+}
+
+func TestLoginPageRendersConfiguredIdentityMethods(t *testing.T) {
+	base := &config.DashboardConfig{
+		ServerURL:   "http://localhost:8080",
+		AuthEnabled: true,
+		JWTSecret:   "test-secret-that-is-at-least-32-chars-long",
+	}
+
+	oidcOnly := *base
+	oidcOnly.OIDCEnabled = true
+	dashboard := New(&oidcOnly)
+	w := httptest.NewRecorder()
+	dashboard.handleLoginRoute(w, httptest.NewRequest(http.MethodGet, "/login", nil))
+	if body := w.Body.String(); !strings.Contains(body, "/auth/oidc/start") ||
+		strings.Contains(body, `id="login-form"`) {
+		t.Fatalf("OIDC-only login rendered the wrong methods: %s", body)
+	}
+
+	hybrid := *base
+	hybrid.OIDCEnabled = true
+	hybrid.AdminUser = "admin"
+	hybrid.AdminPassword = "break-glass"
+	dashboard = New(&hybrid)
+	w = httptest.NewRecorder()
+	dashboard.handleLoginRoute(w, httptest.NewRequest(http.MethodGet, "/login", nil))
+	if body := w.Body.String(); !strings.Contains(body, "/auth/oidc/start") ||
+		!strings.Contains(body, `id="login-form"`) {
+		t.Fatalf("hybrid login did not render both methods: %s", body)
+	}
+}
+
+func TestLoginPageRendersEachConfiguredProvider(t *testing.T) {
+	cfg := &config.DashboardConfig{
+		ServerURL:   "http://localhost:8080",
+		AuthEnabled: true,
+		JWTSecret:   "test-secret-that-is-at-least-32-chars-long",
+	}
+	cfg.IdentityProviders = []config.IdentityProviderConfig{
+		{ID: "authentik", DisplayName: "Authentik"},
+		{ID: "google", DisplayName: "Google"},
+		{ID: "github", DisplayName: "GitHub"},
+	}
+	dashboard := New(cfg)
+	dashboard.providers = map[string]*oidcRuntime{
+		"authentik": {}, "google": {}, "github": {},
+	}
+	w := httptest.NewRecorder()
+	dashboard.handleLoginRoute(w, httptest.NewRequest(http.MethodGet, "/login", nil))
+	body := w.Body.String()
+	for _, expected := range []string{
+		"/auth/provider/authentik/start",
+		"/auth/provider/google/start",
+		"/auth/provider/github/start",
+		"Sign in with Authentik", "Sign in with Google", "Sign in with GitHub",
+	} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("multi-provider login does not contain %q", expected)
+		}
 	}
 }
 
@@ -455,6 +590,62 @@ func TestImageFactoryPageAndStatusProxy(t *testing.T) {
 	}
 }
 
+func TestDashboardProxyForwardsProjectContext(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Project-ID") != "project-alpha" {
+			http.Error(w, "missing project context", http.StatusBadRequest)
+			return
+		}
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer backend.Close()
+
+	dashboard := New(&config.DashboardConfig{
+		ServerURL:      backend.URL,
+		ServerAPIKey:   "break-glass",
+		AllowAnonymous: true,
+	})
+	req := httptest.NewRequest(http.MethodGet, "/api/instances", nil)
+	req.Header.Set("X-Project-ID", "project-alpha")
+	w := httptest.NewRecorder()
+	dashboard.handleInstances(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("project-aware proxy status=%d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestDashboardProjectPolicyProxy(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/projects/policy" ||
+			r.Header.Get("X-Project-ID") != "project-alpha" {
+			http.Error(w, "wrong project policy request", http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"project_id":"project-alpha","max_active_jobs":2}`))
+	}))
+	defer backend.Close()
+
+	dashboard := New(&config.DashboardConfig{
+		ServerURL: backend.URL, ServerAPIKey: "break-glass", AllowAnonymous: true,
+	})
+	req := httptest.NewRequest(http.MethodGet, "/api/projects/policy", nil)
+	req.Header.Set("X-Project-ID", "project-alpha")
+	w := httptest.NewRecorder()
+	dashboard.handleProjectPolicyProxy(w, req)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"max_active_jobs":2`) {
+		t.Fatalf("policy proxy status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	wrongMethod := httptest.NewRecorder()
+	dashboard.handleProjectPolicyProxy(
+		wrongMethod, httptest.NewRequest(http.MethodDelete, "/api/projects/policy", nil),
+	)
+	if wrongMethod.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("policy proxy accepted delete: %d", wrongMethod.Code)
+	}
+}
+
 func TestBuildPagesRenderStructuredLogDetails(t *testing.T) {
 	dashboard := New(&config.DashboardConfig{ServerURL: "http://localhost:8080", AllowAnonymous: true})
 
@@ -522,6 +713,41 @@ func TestLedgerStatusProxyPreservesDegradedState(t *testing.T) {
 	dashboard.handleLedgerStatusAPI(wrongMethod, httptest.NewRequest(http.MethodPost, "/api/ledger/status", nil))
 	if wrongMethod.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("ledger proxy accepted mutation: %d", wrongMethod.Code)
+	}
+}
+
+func TestWorkloadIdentityInventoryProxy(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/worker-gateway/identities" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"issuers":[],"certificates":[],"certificate_limit":100}`))
+	}))
+	defer backend.Close()
+
+	dashboard := New(&config.DashboardConfig{
+		ServerURL: backend.URL, AllowAnonymous: true,
+	})
+	w := httptest.NewRecorder()
+	dashboard.handleWorkloadIdentityInventory(
+		w, httptest.NewRequest(
+			http.MethodGet, "/api/worker-gateway/identities", nil,
+		),
+	)
+	if w.Code != http.StatusOK ||
+		!strings.Contains(w.Body.String(), `"certificate_limit":100`) {
+		t.Fatalf("workload identity proxy status=%d body=%s", w.Code, w.Body.String())
+	}
+	wrongMethod := httptest.NewRecorder()
+	dashboard.handleWorkloadIdentityInventory(
+		wrongMethod, httptest.NewRequest(
+			http.MethodPost, "/api/worker-gateway/identities", nil,
+		),
+	)
+	if wrongMethod.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("workload identity proxy accepted mutation: %d", wrongMethod.Code)
 	}
 }
 

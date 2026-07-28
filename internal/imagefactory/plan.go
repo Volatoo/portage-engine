@@ -283,6 +283,24 @@ func (p *BuildPlan) validateRepositories() error {
 	if (len(p.Repositories) != 1 && len(p.Repositories) != 2) || len(p.RepositoryObjectIDs) != len(p.Repositories) || len(p.RepositoryURIs) != len(p.Repositories) || !fullRevisionPattern.MatchString(p.Repositories["gentoo"]) {
 		return fmt.Errorf("build plan requires one or two fully pinned repositories")
 	}
+	if err := p.validateSourceRepositories(); err != nil {
+		return err
+	}
+	if err := p.validateProfileRepository(); err != nil {
+		return err
+	}
+	if err := p.validateProfileParents(); err != nil {
+		return err
+	}
+	for name, revision := range p.Repositories {
+		if !repoComponentPattern.MatchString(name) || !fullRevisionPattern.MatchString(revision) || !objectIDPattern.MatchString(p.RepositoryObjectIDs[name]) || p.RepositoryURIs[name] == "" {
+			return fmt.Errorf("repository %q lacks a full revision, locked object, or URI", name)
+		}
+	}
+	return nil
+}
+
+func (p *BuildPlan) validateSourceRepositories() error {
 	imageSource := p.Target == "desktop-verifier" || p.RootfsSource == "packer-base-image"
 	if imageSource {
 		if len(p.SourceRepositories) != len(p.Repositories) || !fullRevisionPattern.MatchString(p.SourceRepositories["gentoo"]) {
@@ -299,6 +317,10 @@ func (p *BuildPlan) validateRepositories() error {
 	} else if len(p.SourceRepositories) != 0 || p.SourceDisplayModel != "" {
 		return fmt.Errorf("non-image build plan contains unexpected source image contract")
 	}
+	return nil
+}
+
+func (p *BuildPlan) validateProfileRepository() error {
 	if !repoComponentPattern.MatchString(p.ProfileRepository) {
 		return fmt.Errorf("build plan profile repository is invalid")
 	}
@@ -324,6 +346,10 @@ func (p *BuildPlan) validateRepositories() error {
 	if p.ProfileRepository == "gentoo" && p.ProfileRepositoryKeyObjectID != "" {
 		return fmt.Errorf("official profile plan contains an unexpected external verification key")
 	}
+	return nil
+}
+
+func (p *BuildPlan) validateProfileParents() error {
 	seenParents := map[string]struct{}{}
 	for _, parent := range p.ProfileParents {
 		if !repoComponentPattern.MatchString(parent.Repository) || !validProfilePath(parent.ProfilePath) {
@@ -337,11 +363,6 @@ func (p *BuildPlan) validateRepositories() error {
 			return fmt.Errorf("duplicate profile parent %q", line)
 		}
 		seenParents[line] = struct{}{}
-	}
-	for name, revision := range p.Repositories {
-		if !repoComponentPattern.MatchString(name) || !fullRevisionPattern.MatchString(revision) || !objectIDPattern.MatchString(p.RepositoryObjectIDs[name]) || p.RepositoryURIs[name] == "" {
-			return fmt.Errorf("repository %q lacks a full revision, locked object, or URI", name)
-		}
 	}
 	return nil
 }
@@ -370,142 +391,30 @@ func (p *BuildPlan) validatePackageSelection() error {
 
 // PreparePlan validates every duplicated boundary before Packer can mutate PVE.
 func PreparePlan(commonPath, planPath, lockPath, offlineRoot, packerManifestPath string) (*PackerVars, *PlanEvidence, error) {
-	common, err := LoadCommonConfig(commonPath)
-	if err != nil {
-		return nil, nil, fmt.Errorf("load common config: %w", err)
-	}
-	plan, err := LoadBuildPlan(planPath)
-	if err != nil {
-		return nil, nil, fmt.Errorf("load build plan: %w", err)
-	}
-	lock, err := LoadInputLock(lockPath)
-	if err != nil {
-		return nil, nil, fmt.Errorf("load input lock: %w", err)
-	}
-	if lock.BundleID != plan.MirrorBundleID {
-		return nil, nil, fmt.Errorf("input lock bundle %q does not match plan %q", lock.BundleID, plan.MirrorBundleID)
-	}
-	hosts, err := validatePlanEndpoints(common, plan, lock)
+	inputs, err := collectPreparedPlanInputs(commonPath, planPath, lockPath, offlineRoot)
 	if err != nil {
 		return nil, nil, err
 	}
-	if info, err := os.Stat(common.SSHPrivateKeyFile); err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 {
-		return nil, nil, fmt.Errorf("ssh_private_key_file must be a regular owner-only file")
-	}
-	sourceObject, err := requiredObject(lock, plan.SourceProvenanceObjectID, plan.Target)
-	if err != nil {
-		return nil, nil, err
-	}
-	repositoryNames, repositoryObjects, err := collectPlanRepositoryObjects(plan, lock)
-	if err != nil {
-		return nil, nil, err
-	}
-	manifestObject, err := uniqueObjectByKind(lock, "distfile-manifest", plan.Target)
-	if err != nil {
-		return nil, nil, err
-	}
-	packageSetObject, err := uniqueObjectByKind(lock, "package-set-catalog", plan.Target)
-	if err != nil {
-		return nil, nil, err
-	}
-	offlineRoot, err = filepath.Abs(offlineRoot)
-	if err != nil {
-		return nil, nil, err
-	}
-	preflight, err := Preflight(offlineRoot, lock, plan.Target)
-	if err != nil {
-		return nil, nil, fmt.Errorf("preflight locked inputs: %w", err)
-	}
-	if len(preflight.Missing) != 0 {
-		return nil, nil, fmt.Errorf("preflight locked inputs: %d object(s) missing or invalid", len(preflight.Missing))
-	}
-	if err := requirePackerExecutionSurface(lock, plan.Target); err != nil {
-		return nil, nil, err
-	}
-	if err := validateTerraformCLIConfig(offlineRoot, lock, plan.Target); err != nil {
-		return nil, nil, err
-	}
-	repositoryBundlePaths := make([]string, 0, len(repositoryNames))
-	repositoryBundleNames := make([]string, 0, len(repositoryNames))
-	repositoryURIs := make([]string, 0, len(repositoryNames))
-	repositoryRevisions := make([]string, 0, len(repositoryNames))
-	repositoryBundleIDs := make(map[string]string, len(repositoryNames))
-	lockedRepositoryInputPaths := make([]string, 0, len(repositoryNames)+1)
-	seenBundleNames := map[string]struct{}{}
-	for _, name := range repositoryNames {
-		object := repositoryObjects[name]
-		bundleName := filepath.Base(object.Path)
-		if _, duplicate := seenBundleNames[bundleName]; duplicate {
-			return nil, nil, fmt.Errorf("repository bundles have duplicate basename %q", bundleName)
-		}
-		seenBundleNames[bundleName] = struct{}{}
-		repositoryBundlePaths = append(repositoryBundlePaths, filepath.Join(offlineRoot, object.Path))
-		lockedRepositoryInputPaths = append(lockedRepositoryInputPaths, filepath.Join(offlineRoot, object.Path))
-		repositoryBundleNames = append(repositoryBundleNames, bundleName)
-		repositoryURIs = append(repositoryURIs, plan.RepositoryURIs[name])
-		repositoryRevisions = append(repositoryRevisions, plan.Repositories[name])
-		repositoryBundleIDs[name] = object.ID
-	}
-	profileRepositoryKeyName := ""
-	repositoryKeyIDs := map[string]string{}
-	gentooKeyObject, err := requiredObject(lock, plan.GentooRepositoryKeyObjectID, plan.Target)
-	if err != nil {
-		return nil, nil, err
-	}
-	if gentooKeyObject.Kind != "release-key" {
-		return nil, nil, fmt.Errorf("Gentoo repository key object %q must have kind release-key", gentooKeyObject.ID)
-	}
-	gentooRepositoryKeyName := filepath.Base(gentooKeyObject.Path)
-	if _, duplicate := seenBundleNames[gentooRepositoryKeyName]; duplicate {
-		return nil, nil, fmt.Errorf("Gentoo key and repository bundle have duplicate basename %q", gentooRepositoryKeyName)
-	}
-	seenBundleNames[gentooRepositoryKeyName] = struct{}{}
-	lockedRepositoryInputPaths = append(lockedRepositoryInputPaths, filepath.Join(offlineRoot, gentooKeyObject.Path))
-	repositoryKeyIDs["gentoo"] = gentooKeyObject.ID
-	trustedCAName := ""
-	if plan.TrustedCAObjectID != "" {
-		caObject, err := requiredObject(lock, plan.TrustedCAObjectID, plan.Target)
-		if err != nil {
-			return nil, nil, err
-		}
-		if caObject.Kind != "ca-bundle" {
-			return nil, nil, fmt.Errorf("trusted CA object %q must have kind ca-bundle", caObject.ID)
-		}
-		trustedCAName = filepath.Base(caObject.Path)
-		if _, duplicate := seenBundleNames[trustedCAName]; duplicate {
-			return nil, nil, fmt.Errorf("trusted CA and repository inputs have duplicate basename %q", trustedCAName)
-		}
-		seenBundleNames[trustedCAName] = struct{}{}
-		lockedRepositoryInputPaths = append(lockedRepositoryInputPaths, filepath.Join(offlineRoot, caObject.Path))
-	}
-	if plan.ProfileRepository != "gentoo" {
-		keyObject, err := requiredObject(lock, plan.ProfileRepositoryKeyObjectID, plan.Target)
-		if err != nil {
-			return nil, nil, err
-		}
-		if keyObject.Kind != "release-key" {
-			return nil, nil, fmt.Errorf("profile repository key object %q must have kind release-key", keyObject.ID)
-		}
-		profileRepositoryKeyName = filepath.Base(keyObject.Path)
-		if _, duplicate := seenBundleNames[profileRepositoryKeyName]; duplicate {
-			return nil, nil, fmt.Errorf("profile key and repository bundle have duplicate basename %q", profileRepositoryKeyName)
-		}
-		lockedRepositoryInputPaths = append(lockedRepositoryInputPaths, filepath.Join(offlineRoot, keyObject.Path))
-		repositoryKeyIDs[plan.ProfileRepository] = keyObject.ID
-	}
-	distfileManifestPath := filepath.Join(offlineRoot, manifestObject.Path)
-	packageSetCatalogPath := filepath.Join(offlineRoot, packageSetObject.Path)
-	packageSetCatalog, err := LoadPackageSetCatalog(packageSetCatalogPath)
-	if err != nil {
-		return nil, nil, fmt.Errorf("load package-set catalog: %w", err)
-	}
-	effectivePackages, err := packageSetCatalog.Resolve(plan.PackageSets, plan.Packages)
-	if err != nil {
-		return nil, nil, fmt.Errorf("resolve package sets: %w", err)
-	}
-	if err := validateDistfileClosure(distfileManifestPath, plan, lock); err != nil {
-		return nil, nil, err
-	}
+	common, plan, lock := inputs.common, inputs.plan, inputs.lock
+	sourceObject := inputs.sourceObject
+	offlineRoot = inputs.offlineRoot
+	hosts := inputs.hosts
+	repositoryNames := inputs.repositoryNames
+	repositoryBundlePaths := inputs.repositoryBundlePaths
+	repositoryBundleNames := inputs.repositoryBundleNames
+	repositoryURIs := inputs.repositoryURIs
+	repositoryRevisions := inputs.repositoryRevisions
+	repositoryBundleIDs := inputs.repositoryBundleIDs
+	lockedRepositoryInputPaths := inputs.lockedRepositoryInputPaths
+	profileRepositoryKeyName := inputs.profileRepositoryKeyName
+	repositoryKeyIDs := inputs.repositoryKeyIDs
+	gentooRepositoryKeyName := inputs.gentooRepositoryKeyName
+	trustedCAName := inputs.trustedCAName
+	manifestObject := inputs.manifestObject
+	packageSetObject := inputs.packageSetObject
+	effectivePackages := inputs.effectivePackages
+	distfileManifestPath := inputs.distfileManifestPath
+
 	planPath, err = filepath.Abs(planPath)
 	if err != nil {
 		return nil, nil, err
@@ -573,6 +482,186 @@ func PreparePlan(commonPath, planPath, lockPath, offlineRoot, packerManifestPath
 		PackageSetCatalogID: packageSetObject.ID, PackageSetCatalogDigest: "sha256:" + packageSetObject.SHA256,
 		PackageSets: append([]string(nil), plan.PackageSets...)}
 	return vars, evidence, nil
+}
+
+type preparedPlanInputs struct {
+	common                     *CommonConfig
+	plan                       *BuildPlan
+	lock                       *InputLock
+	sourceObject               *InputObject
+	manifestObject             *InputObject
+	packageSetObject           *InputObject
+	offlineRoot                string
+	hosts                      []string
+	repositoryNames            []string
+	repositoryBundlePaths      []string
+	repositoryBundleNames      []string
+	repositoryURIs             []string
+	repositoryRevisions        []string
+	repositoryBundleIDs        map[string]string
+	lockedRepositoryInputPaths []string
+	profileRepositoryKeyName   string
+	repositoryKeyIDs           map[string]string
+	gentooRepositoryKeyName    string
+	trustedCAName              string
+	effectivePackages          []string
+	distfileManifestPath       string
+}
+
+func collectPreparedPlanInputs(
+	commonPath, planPath, lockPath, offlineRoot string,
+) (*preparedPlanInputs, error) {
+	common, err := LoadCommonConfig(commonPath)
+	if err != nil {
+		return nil, fmt.Errorf("load common config: %w", err)
+	}
+	plan, err := LoadBuildPlan(planPath)
+	if err != nil {
+		return nil, fmt.Errorf("load build plan: %w", err)
+	}
+	lock, err := LoadInputLock(lockPath)
+	if err != nil {
+		return nil, fmt.Errorf("load input lock: %w", err)
+	}
+	if lock.BundleID != plan.MirrorBundleID {
+		return nil, fmt.Errorf("input lock bundle %q does not match plan %q", lock.BundleID, plan.MirrorBundleID)
+	}
+	hosts, err := validatePlanEndpoints(common, plan, lock)
+	if err != nil {
+		return nil, err
+	}
+	if info, err := os.Stat(common.SSHPrivateKeyFile); err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 {
+		return nil, fmt.Errorf("ssh_private_key_file must be a regular owner-only file")
+	}
+	sourceObject, err := requiredObject(lock, plan.SourceProvenanceObjectID, plan.Target)
+	if err != nil {
+		return nil, err
+	}
+	repositoryNames, repositoryObjects, err := collectPlanRepositoryObjects(plan, lock)
+	if err != nil {
+		return nil, err
+	}
+	manifestObject, err := uniqueObjectByKind(lock, "distfile-manifest", plan.Target)
+	if err != nil {
+		return nil, err
+	}
+	packageSetObject, err := uniqueObjectByKind(lock, "package-set-catalog", plan.Target)
+	if err != nil {
+		return nil, err
+	}
+	offlineRoot, err = filepath.Abs(offlineRoot)
+	if err != nil {
+		return nil, err
+	}
+	preflight, err := Preflight(offlineRoot, lock, plan.Target)
+	if err != nil {
+		return nil, fmt.Errorf("preflight locked inputs: %w", err)
+	}
+	if len(preflight.Missing) != 0 {
+		return nil, fmt.Errorf("preflight locked inputs: %d object(s) missing or invalid", len(preflight.Missing))
+	}
+	if err := requirePackerExecutionSurface(lock, plan.Target); err != nil {
+		return nil, err
+	}
+	if err := validateTerraformCLIConfig(offlineRoot, lock, plan.Target); err != nil {
+		return nil, err
+	}
+	repositoryBundlePaths := make([]string, 0, len(repositoryNames))
+	repositoryBundleNames := make([]string, 0, len(repositoryNames))
+	repositoryURIs := make([]string, 0, len(repositoryNames))
+	repositoryRevisions := make([]string, 0, len(repositoryNames))
+	repositoryBundleIDs := make(map[string]string, len(repositoryNames))
+	lockedRepositoryInputPaths := make([]string, 0, len(repositoryNames)+1)
+	seenBundleNames := map[string]struct{}{}
+	for _, name := range repositoryNames {
+		object := repositoryObjects[name]
+		bundleName := filepath.Base(object.Path)
+		if _, duplicate := seenBundleNames[bundleName]; duplicate {
+			return nil, fmt.Errorf("repository bundles have duplicate basename %q", bundleName)
+		}
+		seenBundleNames[bundleName] = struct{}{}
+		repositoryBundlePaths = append(repositoryBundlePaths, filepath.Join(offlineRoot, object.Path))
+		lockedRepositoryInputPaths = append(lockedRepositoryInputPaths, filepath.Join(offlineRoot, object.Path))
+		repositoryBundleNames = append(repositoryBundleNames, bundleName)
+		repositoryURIs = append(repositoryURIs, plan.RepositoryURIs[name])
+		repositoryRevisions = append(repositoryRevisions, plan.Repositories[name])
+		repositoryBundleIDs[name] = object.ID
+	}
+	profileRepositoryKeyName := ""
+	repositoryKeyIDs := map[string]string{}
+	gentooKeyObject, err := requiredObject(lock, plan.GentooRepositoryKeyObjectID, plan.Target)
+	if err != nil {
+		return nil, err
+	}
+	if gentooKeyObject.Kind != "release-key" {
+		return nil, fmt.Errorf("gentoo repository key object %q must have kind release-key", gentooKeyObject.ID)
+	}
+	gentooRepositoryKeyName := filepath.Base(gentooKeyObject.Path)
+	if _, duplicate := seenBundleNames[gentooRepositoryKeyName]; duplicate {
+		return nil, fmt.Errorf("gentoo key and repository bundle have duplicate basename %q", gentooRepositoryKeyName)
+	}
+	seenBundleNames[gentooRepositoryKeyName] = struct{}{}
+	lockedRepositoryInputPaths = append(lockedRepositoryInputPaths, filepath.Join(offlineRoot, gentooKeyObject.Path))
+	repositoryKeyIDs["gentoo"] = gentooKeyObject.ID
+	trustedCAName := ""
+	if plan.TrustedCAObjectID != "" {
+		caObject, err := requiredObject(lock, plan.TrustedCAObjectID, plan.Target)
+		if err != nil {
+			return nil, err
+		}
+		if caObject.Kind != "ca-bundle" {
+			return nil, fmt.Errorf("trusted CA object %q must have kind ca-bundle", caObject.ID)
+		}
+		trustedCAName = filepath.Base(caObject.Path)
+		if _, duplicate := seenBundleNames[trustedCAName]; duplicate {
+			return nil, fmt.Errorf("trusted CA and repository inputs have duplicate basename %q", trustedCAName)
+		}
+		seenBundleNames[trustedCAName] = struct{}{}
+		lockedRepositoryInputPaths = append(lockedRepositoryInputPaths, filepath.Join(offlineRoot, caObject.Path))
+	}
+	if plan.ProfileRepository != "gentoo" {
+		keyObject, err := requiredObject(lock, plan.ProfileRepositoryKeyObjectID, plan.Target)
+		if err != nil {
+			return nil, err
+		}
+		if keyObject.Kind != "release-key" {
+			return nil, fmt.Errorf("profile repository key object %q must have kind release-key", keyObject.ID)
+		}
+		profileRepositoryKeyName = filepath.Base(keyObject.Path)
+		if _, duplicate := seenBundleNames[profileRepositoryKeyName]; duplicate {
+			return nil, fmt.Errorf("profile key and repository bundle have duplicate basename %q", profileRepositoryKeyName)
+		}
+		lockedRepositoryInputPaths = append(lockedRepositoryInputPaths, filepath.Join(offlineRoot, keyObject.Path))
+		repositoryKeyIDs[plan.ProfileRepository] = keyObject.ID
+	}
+	distfileManifestPath := filepath.Join(offlineRoot, manifestObject.Path)
+	packageSetCatalogPath := filepath.Join(offlineRoot, packageSetObject.Path)
+	packageSetCatalog, err := LoadPackageSetCatalog(packageSetCatalogPath)
+	if err != nil {
+		return nil, fmt.Errorf("load package-set catalog: %w", err)
+	}
+	effectivePackages, err := packageSetCatalog.Resolve(plan.PackageSets, plan.Packages)
+	if err != nil {
+		return nil, fmt.Errorf("resolve package sets: %w", err)
+	}
+	if err := validateDistfileClosure(distfileManifestPath, plan, lock); err != nil {
+		return nil, err
+	}
+	return &preparedPlanInputs{
+		common: common, plan: plan, lock: lock, sourceObject: sourceObject,
+		manifestObject: manifestObject, packageSetObject: packageSetObject,
+		offlineRoot: offlineRoot, hosts: hosts, repositoryNames: repositoryNames,
+		repositoryBundlePaths: repositoryBundlePaths,
+		repositoryBundleNames: repositoryBundleNames,
+		repositoryURIs:        repositoryURIs, repositoryRevisions: repositoryRevisions,
+		repositoryBundleIDs:        repositoryBundleIDs,
+		lockedRepositoryInputPaths: lockedRepositoryInputPaths,
+		profileRepositoryKeyName:   profileRepositoryKeyName,
+		repositoryKeyIDs:           repositoryKeyIDs,
+		gentooRepositoryKeyName:    gentooRepositoryKeyName,
+		trustedCAName:              trustedCAName, effectivePackages: effectivePackages,
+		distfileManifestPath: distfileManifestPath,
+	}, nil
 }
 
 func validatePlanEndpoints(common *CommonConfig, plan *BuildPlan, lock *InputLock) ([]string, error) {
@@ -709,7 +798,7 @@ func validateCatalystSourceManifest(path string, plan *BuildPlan) error {
 		return fmt.Errorf("load Catalyst QCOW2 source manifest: %w", err)
 	}
 	if plan == nil || manifest.Arch != plan.Arch || manifest.ProfileID != plan.ProfileID {
-		return fmt.Errorf("Catalyst QCOW2 source manifest does not match the BuildPlan architecture/profile contract")
+		return fmt.Errorf("catalyst QCOW2 source manifest does not match the BuildPlan architecture/profile contract")
 	}
 	return nil
 }
@@ -735,10 +824,10 @@ func requirePackerExecutionSurface(lock *InputLock, target string) error {
 			}
 		}
 		if object == nil {
-			return fmt.Errorf("Packer execution surface %q is absent from the input lock for %q", path, target)
+			return fmt.Errorf("packer execution surface %q is absent from the input lock for %q", path, target)
 		}
 		if object.Kind != "script" || object.Executable != executable {
-			return fmt.Errorf("Packer execution surface %q must be a locked script with executable=%t", path, executable)
+			return fmt.Errorf("packer execution surface %q must be a locked script with executable=%t", path, executable)
 		}
 	}
 	return nil
@@ -752,22 +841,22 @@ func validateTerraformCLIConfig(offlineRoot string, lock *InputLock, target stri
 			continue
 		}
 		if config != nil {
-			return fmt.Errorf("multiple Terraform CLI configs are applicable to %q", target)
+			return fmt.Errorf("multiple terraform CLI configs are applicable to %q", target)
 		}
 		config = candidate
 	}
 	if config == nil {
-		return fmt.Errorf("Terraform CLI config is absent from the input lock for %q", target)
+		return fmt.Errorf("terraform CLI config is absent from the input lock for %q", target)
 	}
 	if config.Kind != "terraform-lock" || config.Executable {
-		return fmt.Errorf("Terraform CLI config must be a locked terraform-lock object with executable=false")
+		return fmt.Errorf("terraform CLI config must be a locked terraform-lock object with executable=false")
 	}
-	contents, err := os.ReadFile(filepath.Join(offlineRoot, filepath.FromSlash(config.Path)))
+	contents, err := os.ReadFile(filepath.Join(offlineRoot, filepath.FromSlash(config.Path))) // #nosec G304 -- config.Path is matched above to the fixed terraform/terraform.rc lock entry.
 	if err != nil {
 		return fmt.Errorf("read Terraform CLI config: %w", err)
 	}
 	if strings.TrimSpace(string(contents)) != strictTerraformCLIConfig {
-		return fmt.Errorf("Terraform CLI config must use only the approved filesystem mirror template without direct fallback")
+		return fmt.Errorf("terraform CLI config must use only the approved filesystem mirror template without direct fallback")
 	}
 	return nil
 }

@@ -92,6 +92,16 @@ REPOSCONF
 	if config.BuilderToken != "" {
 		tokenLine = fmt.Sprintf("BUILDER_TOKEN=%s\n", heredocEscape(config.BuilderToken))
 	}
+	pullLines := ""
+	if config.WorkerPullEnabled {
+		pullLines = fmt.Sprintf(
+			"WORKER_PULL_ENABLED=true\nWORKER_GATEWAY_URL=%s\n"+
+				"WORKER_TLS_CERT=/etc/portage-engine/tls/worker.crt\n"+
+				"WORKER_TLS_KEY=/etc/portage-engine/tls/worker.key\n"+
+				"WORKER_TLS_CA=/etc/portage-engine/tls/ca.crt\n",
+			heredocEscape(config.WorkerGatewayURL),
+		)
+	}
 	fmt.Fprintf(&sb, `
 log "Writing builder configuration (native mode)..."
 INSTANCE_ID_VAL=$(hostname)
@@ -106,12 +116,12 @@ DATA_DIR=/var/lib/portage-engine
 PERSISTENCE_ENABLED=true
 RETENTION_DAYS=7
 SERVER_URL=%s
-%sPORTAGE_REPOS_PATH=/var/db/repos
+%s%sPORTAGE_REPOS_PATH=/var/db/repos
 PORTAGE_CONF_PATH=/etc/portage
 MAKE_CONF_PATH=/etc/portage/make.conf
 BUILDERCONF
 
-`, config.BuilderPort, heredocEscape(arch), heredocEscape(config.ServerCallbackURL), tokenLine)
+`, config.BuilderPort, heredocEscape(arch), heredocEscape(config.ServerCallbackURL), tokenLine, pullLines)
 
 	// systemd unit (no docker dependency).
 	sb.WriteString(`log "Installing systemd service..."

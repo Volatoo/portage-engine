@@ -11,6 +11,8 @@ import (
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/google/uuid"
 )
 
 // MaxBuildRequestBodyBytes is the largest JSON build request accepted by the
@@ -533,6 +535,11 @@ func validateBoundedInt(value string, minValue, maxValue int, key string) error 
 func validateLocalBuildRequest(req *LocalBuildRequest) error {
 	if req == nil {
 		return fmt.Errorf("nil build request")
+	}
+	if req.ExecutionID != "" {
+		if _, err := uuid.Parse(req.ExecutionID); err != nil {
+			return fmt.Errorf("invalid execution ID")
+		}
 	}
 	if !atomPattern.MatchString(req.PackageName) {
 		return fmt.Errorf("invalid package name %q", req.PackageName)

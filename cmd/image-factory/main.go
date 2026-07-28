@@ -292,7 +292,7 @@ func runOpsKeygen(args []string) {
 	if err := os.Chmod(*privatePath, 0o600); err != nil {
 		log.Fatal(err)
 	}
-	if err := os.Chmod(*publicPath, 0o644); err != nil {
+	if err := os.Chmod(*publicPath, 0o644); err != nil { // #nosec G302 -- this command explicitly exports a public signing key.
 		log.Fatal(err)
 	}
 	fmt.Printf("generated operations key %s\n", publicKey.KeyID)

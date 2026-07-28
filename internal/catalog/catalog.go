@@ -22,11 +22,12 @@ import (
 const maxCatalogBytes int64 = 4 << 20
 
 var (
-	idPattern     = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9+._/-]{0,255}$`)
-	repoNameRegex = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$`)
-	digestPattern = regexp.MustCompile(`^sha256:[a-f0-9]{64}$`)
-	revisionRegex = regexp.MustCompile(`^[a-fA-F0-9]{7,64}$`)
-	binhostPart   = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9+._-]{0,127}$`)
+	idPattern            = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9+._/-]{0,255}$`)
+	repoNameRegex        = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$`)
+	digestPattern        = regexp.MustCompile(`^sha256:[a-f0-9]{64}$`)
+	revisionRegex        = regexp.MustCompile(`^[a-fA-F0-9]{7,64}$`)
+	binhostPart          = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9+._-]{0,127}$`)
+	executionZonePattern = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
 )
 
 // Catalog is an immutable, versioned control-plane inventory.
@@ -37,6 +38,7 @@ type Catalog struct {
 	Images          []ImageManifest        `json:"images"`
 	MirrorBundles   []MirrorBundle         `json:"mirror_bundles"`
 	ResourceClasses []ResourceClass        `json:"resource_classes,omitempty"`
+	EgressPolicies  []EgressPolicy         `json:"egress_policies,omitempty"`
 
 	profilesByID      map[string]*ProfileDefinition
 	profilesByLegacy  map[string]*ProfileDefinition
@@ -44,6 +46,7 @@ type Catalog struct {
 	imagesByID        map[string]*ImageManifest
 	mirrorBundlesByID map[string]*MirrorBundle
 	resourceByID      map[string]*ResourceClass
+	egressByID        map[string]*EgressPolicy
 	defaultProfileID  string
 }
 
@@ -61,6 +64,7 @@ type ProfileDefinition struct {
 	ImageID              string                    `json:"image_id"`
 	MirrorBundleID       string                    `json:"mirror_bundle_id"`
 	DefaultResourceClass string                    `json:"default_resource_class,omitempty"`
+	EgressPolicyID       string                    `json:"egress_policy_id"`
 	Default              bool                      `json:"default,omitempty"`
 	Channel              string                    `json:"channel"`
 }
@@ -93,6 +97,7 @@ type ImageManifest struct {
 	ProfileID               string   `json:"profile_id,omitempty"`
 	Generation              string   `json:"generation"`
 	Provider                string   `json:"provider"`
+	ExecutionZone           string   `json:"execution_zone,omitempty"`
 	Arch                    string   `json:"arch"`
 	BuildMode               string   `json:"build_mode"`
 	Template                string   `json:"template,omitempty"`
@@ -120,8 +125,10 @@ type MirrorBundle struct {
 // resource knobs. Endpoint, template, network, storage, and credentials are
 // intentionally not representable here.
 type ResourceClass struct {
-	ID          string            `json:"id"`
-	MachineSpec map[string]string `json:"machine_spec"`
+	ID                           string            `json:"id"`
+	MachineSpec                  map[string]string `json:"machine_spec"`
+	MaxRuntimeMinutes            int               `json:"max_runtime_minutes"`
+	CloudCostMicrounitsPerMinute int64             `json:"cloud_cost_microunits_per_minute"`
 }
 
 // ResolveRequest contains the untrusted identifiers accepted from a build
@@ -138,34 +145,39 @@ type ResolveRequest struct {
 // ResolvedBuildContext is stored on the job and passed through the control
 // plane as the authoritative environment selected for the build.
 type ResolvedBuildContext struct {
-	CatalogVersion          int                     `json:"catalog_version"`
-	ProfileID               string                  `json:"profile_id"`
-	ProfilePath             string                  `json:"profile_path"`
-	BinhostPath             string                  `json:"binhost_path"`
-	ProfileRepositoryID     string                  `json:"profile_repository_id"`
-	ProfileRepositoryName   string                  `json:"profile_repository_name"`
-	ProfileParents          []ResolvedProfileParent `json:"profile_parents,omitempty"`
-	ProfileChannel          string                  `json:"profile_channel"`
-	Arch                    string                  `json:"arch"`
-	Provider                string                  `json:"provider"`
-	BuildMode               string                  `json:"build_mode"`
-	ImageID                 string                  `json:"image_id"`
-	ImageGeneration         string                  `json:"image_generation"`
-	ImageDigest             string                  `json:"image_digest,omitempty"`
-	ImageChannel            string                  `json:"image_channel"`
-	Template                string                  `json:"template,omitempty"`
-	RootfsSource            string                  `json:"rootfs_source"`
-	DisplayModel            string                  `json:"display_model,omitempty"`
-	RootfsManifestDigest    string                  `json:"rootfs_manifest_digest,omitempty"`
-	PackageSetIDs           []string                `json:"package_sets,omitempty"`
-	PackageSetCatalogDigest string                  `json:"package_set_catalog_digest,omitempty"`
-	MirrorBundleID          string                  `json:"mirror_bundle_id"`
-	MirrorBundleDigest      string                  `json:"mirror_bundle_digest,omitempty"`
-	MirrorBundleChannel     string                  `json:"mirror_bundle_channel"`
-	ResourceClass           string                  `json:"resource_class,omitempty"`
-	MachineSpec             map[string]string       `json:"machine_spec,omitempty"`
-	Repositories            []ResolvedRepository    `json:"repositories"`
-	ResolvedAt              time.Time               `json:"resolved_at"`
+	CatalogVersion               int                     `json:"catalog_version"`
+	ProfileID                    string                  `json:"profile_id"`
+	ProfilePath                  string                  `json:"profile_path"`
+	BinhostPath                  string                  `json:"binhost_path"`
+	ProfileRepositoryID          string                  `json:"profile_repository_id"`
+	ProfileRepositoryName        string                  `json:"profile_repository_name"`
+	ProfileParents               []ResolvedProfileParent `json:"profile_parents,omitempty"`
+	ProfileChannel               string                  `json:"profile_channel"`
+	Arch                         string                  `json:"arch"`
+	Provider                     string                  `json:"provider"`
+	ExecutionZone                string                  `json:"execution_zone"`
+	BuildMode                    string                  `json:"build_mode"`
+	ImageID                      string                  `json:"image_id"`
+	ImageGeneration              string                  `json:"image_generation"`
+	ImageDigest                  string                  `json:"image_digest,omitempty"`
+	ImageChannel                 string                  `json:"image_channel"`
+	Template                     string                  `json:"template,omitempty"`
+	RootfsSource                 string                  `json:"rootfs_source"`
+	DisplayModel                 string                  `json:"display_model,omitempty"`
+	RootfsManifestDigest         string                  `json:"rootfs_manifest_digest,omitempty"`
+	PackageSetIDs                []string                `json:"package_sets,omitempty"`
+	PackageSetCatalogDigest      string                  `json:"package_set_catalog_digest,omitempty"`
+	MirrorBundleID               string                  `json:"mirror_bundle_id"`
+	MirrorBundleDigest           string                  `json:"mirror_bundle_digest,omitempty"`
+	MirrorBundleChannel          string                  `json:"mirror_bundle_channel"`
+	ResourceClass                string                  `json:"resource_class,omitempty"`
+	MachineSpec                  map[string]string       `json:"machine_spec,omitempty"`
+	MaxRuntimeMinutes            int                     `json:"max_runtime_minutes"`
+	CloudCostMicrounitsPerMinute int64                   `json:"cloud_cost_microunits_per_minute"`
+	EgressPolicy                 EgressPolicy            `json:"egress_policy"`
+	EgressPolicyDigest           string                  `json:"egress_policy_digest"`
+	Repositories                 []ResolvedRepository    `json:"repositories"`
+	ResolvedAt                   time.Time               `json:"resolved_at"`
 }
 
 // ResolvedProfileParent is execution metadata derived only from catalog
@@ -260,6 +272,7 @@ func NewCompatibility(opts CompatibilityOptions) *Catalog {
 			ImageID:              "compat/current-image",
 			MirrorBundleID:       "compat/current-mirrors",
 			DefaultResourceClass: "medium",
+			EgressPolicyID:       "compat/unrestricted",
 			Default:              true,
 			Channel:              "compatibility",
 		}},
@@ -293,6 +306,11 @@ func NewCompatibility(opts CompatibilityOptions) *Catalog {
 				"memory":    "8192",
 				"disk_size": "50",
 			},
+			MaxRuntimeMinutes:            60,
+			CloudCostMicrounitsPerMinute: 1000,
+		}},
+		EgressPolicies: []EgressPolicy{{
+			ID: "compat/unrestricted", Mode: EgressModeDisabled, Channel: "compatibility",
 		}},
 	}
 	if err := c.Validate(); err != nil {
@@ -320,6 +338,7 @@ func (c *Catalog) Validate() error {
 	c.imagesByID = make(map[string]*ImageManifest, len(c.Images))
 	c.mirrorBundlesByID = make(map[string]*MirrorBundle, len(c.MirrorBundles))
 	c.resourceByID = make(map[string]*ResourceClass, len(c.ResourceClasses))
+	c.egressByID = make(map[string]*EgressPolicy, len(c.EgressPolicies))
 	c.defaultProfileID = ""
 	binhostOwners := make(map[string]string, len(c.Profiles))
 
@@ -364,7 +383,24 @@ func (c *Catalog) Validate() error {
 		if err := validateResourceSpec(class.MachineSpec); err != nil {
 			return fmt.Errorf("resource class %q: %w", class.ID, err)
 		}
+		if class.MaxRuntimeMinutes <= 0 || class.MaxRuntimeMinutes > 24*60 {
+			return fmt.Errorf("resource class %q max_runtime_minutes must be between 1 and 1440", class.ID)
+		}
+		if class.CloudCostMicrounitsPerMinute <= 0 ||
+			class.CloudCostMicrounitsPerMinute > 1_000_000_000_000 {
+			return fmt.Errorf("resource class %q cloud cost rate must be between 1 and 1000000000000 microunits per minute", class.ID)
+		}
 		c.resourceByID[class.ID] = class
+	}
+	for i := range c.EgressPolicies {
+		policy := &c.EgressPolicies[i]
+		if err := policy.Validate(); err != nil {
+			return fmt.Errorf("egress policy %q: %w", policy.ID, err)
+		}
+		if _, exists := c.egressByID[policy.ID]; exists {
+			return fmt.Errorf("duplicate egress policy ID %q", policy.ID)
+		}
+		c.egressByID[policy.ID] = policy
 	}
 
 	for i := range c.Profiles {
@@ -426,6 +462,7 @@ func (c *Catalog) ResolveAt(req ResolveRequest, now time.Time) (*ResolvedBuildCo
 		return nil, fmt.Errorf("provider %q does not match profile %q provider %q", req.CloudProvider, profile.ID, image.Provider)
 	}
 	bundle := c.mirrorBundlesByID[profile.MirrorBundleID]
+	egressPolicy := c.egressByID[profile.EgressPolicyID]
 	if profile.Channel != "compatibility" && (bundle.FreshUntil.IsZero() || !now.Before(bundle.FreshUntil)) {
 		return nil, fmt.Errorf("mirror bundle %q is stale at %s", bundle.ID, now.UTC().Format(time.RFC3339))
 	}
@@ -486,6 +523,8 @@ func (c *Catalog) ResolveAt(req ResolveRequest, now time.Time) (*ResolvedBuildCo
 		resourceClass = profile.DefaultResourceClass
 	}
 	machineSpec := map[string]string{}
+	maxRuntimeMinutes := 0
+	var cloudCostMicrounitsPerMinute int64
 	if resourceClass != "" {
 		class, ok := c.resourceByID[resourceClass]
 		if !ok {
@@ -494,37 +533,57 @@ func (c *Catalog) ResolveAt(req ResolveRequest, now time.Time) (*ResolvedBuildCo
 		for key, value := range class.MachineSpec {
 			machineSpec[key] = value
 		}
+		maxRuntimeMinutes = class.MaxRuntimeMinutes
+		cloudCostMicrounitsPerMinute = class.CloudCostMicrounitsPerMinute
+	}
+	policyCopy := *egressPolicy
+	policyCopy.DNSResolvers = append([]string(nil), egressPolicy.DNSResolvers...)
+	policyCopy.Rules = make([]EgressRule, len(egressPolicy.Rules))
+	for index, rule := range egressPolicy.Rules {
+		policyCopy.Rules[index] = rule
+		policyCopy.Rules[index].Hosts = append([]string(nil), rule.Hosts...)
+		policyCopy.Rules[index].CIDRs = append([]string(nil), rule.CIDRs...)
+		policyCopy.Rules[index].Ports = append([]int(nil), rule.Ports...)
+	}
+	policyDigest, err := policyCopy.Digest()
+	if err != nil {
+		return nil, fmt.Errorf("egress policy %q: %w", policyCopy.ID, err)
 	}
 
 	return &ResolvedBuildContext{
-		CatalogVersion:          c.Version,
-		ProfileID:               profile.ID,
-		ProfilePath:             profile.ProfilePath,
-		BinhostPath:             profile.BinhostPath,
-		ProfileRepositoryID:     profileRepository.ID,
-		ProfileRepositoryName:   profileRepository.Name,
-		ProfileParents:          profileParents,
-		ProfileChannel:          profile.Channel,
-		Arch:                    profile.Arch,
-		Provider:                image.Provider,
-		BuildMode:               image.BuildMode,
-		ImageID:                 image.ID,
-		ImageGeneration:         image.Generation,
-		ImageDigest:             image.Digest,
-		ImageChannel:            image.Channel,
-		Template:                image.Template,
-		RootfsSource:            image.RootfsSource,
-		DisplayModel:            image.DisplayModel,
-		RootfsManifestDigest:    image.RootfsManifestDigest,
-		PackageSetIDs:           append([]string(nil), image.PackageSetIDs...),
-		PackageSetCatalogDigest: image.PackageSetCatalogDigest,
-		MirrorBundleID:          bundle.ID,
-		MirrorBundleDigest:      bundle.Digest,
-		MirrorBundleChannel:     bundle.Channel,
-		ResourceClass:           resourceClass,
-		MachineSpec:             machineSpec,
-		Repositories:            repositories,
-		ResolvedAt:              now.UTC(),
+		CatalogVersion:               c.Version,
+		ProfileID:                    profile.ID,
+		ProfilePath:                  profile.ProfilePath,
+		BinhostPath:                  profile.BinhostPath,
+		ProfileRepositoryID:          profileRepository.ID,
+		ProfileRepositoryName:        profileRepository.Name,
+		ProfileParents:               profileParents,
+		ProfileChannel:               profile.Channel,
+		Arch:                         profile.Arch,
+		Provider:                     image.Provider,
+		ExecutionZone:                executionZone(image.ExecutionZone),
+		BuildMode:                    image.BuildMode,
+		ImageID:                      image.ID,
+		ImageGeneration:              image.Generation,
+		ImageDigest:                  image.Digest,
+		ImageChannel:                 image.Channel,
+		Template:                     image.Template,
+		RootfsSource:                 image.RootfsSource,
+		DisplayModel:                 image.DisplayModel,
+		RootfsManifestDigest:         image.RootfsManifestDigest,
+		PackageSetIDs:                append([]string(nil), image.PackageSetIDs...),
+		PackageSetCatalogDigest:      image.PackageSetCatalogDigest,
+		MirrorBundleID:               bundle.ID,
+		MirrorBundleDigest:           bundle.Digest,
+		MirrorBundleChannel:          bundle.Channel,
+		ResourceClass:                resourceClass,
+		MachineSpec:                  machineSpec,
+		MaxRuntimeMinutes:            maxRuntimeMinutes,
+		CloudCostMicrounitsPerMinute: cloudCostMicrounitsPerMinute,
+		EgressPolicy:                 policyCopy,
+		EgressPolicyDigest:           policyDigest,
+		Repositories:                 repositories,
+		ResolvedAt:                   now.UTC(),
 	}, nil
 }
 
@@ -562,24 +621,56 @@ func (c *Catalog) validateProfile(p *ProfileDefinition) error {
 	if !validChannel(p.Channel) {
 		return fmt.Errorf("invalid channel %q", p.Channel)
 	}
-	if _, ok := c.imagesByID[p.ImageID]; !ok {
+	if err := c.validateProfileBindings(p); err != nil {
+		return err
+	}
+	if err := c.validateProfileRepositories(p); err != nil {
+		return err
+	}
+	if err := c.validateProfileParents(p); err != nil {
+		return err
+	}
+	if p.DefaultResourceClass != "" {
+		if _, ok := c.resourceByID[p.DefaultResourceClass]; !ok {
+			return fmt.Errorf("unknown resource class %q", p.DefaultResourceClass)
+		}
+	}
+	if err := c.validateProfileEgress(p); err != nil {
+		return err
+	}
+	for _, legacy := range p.LegacyProfiles {
+		if !idPattern.MatchString(legacy) {
+			return fmt.Errorf("invalid legacy profile %q", legacy)
+		}
+	}
+	return nil
+}
+
+func (c *Catalog) validateProfileBindings(p *ProfileDefinition) error {
+	image, ok := c.imagesByID[p.ImageID]
+	if !ok {
 		return fmt.Errorf("unknown image %q", p.ImageID)
 	}
-	if c.imagesByID[p.ImageID].Arch != p.Arch {
+	if image.Arch != p.Arch {
 		return fmt.Errorf("image %q architecture does not match", p.ImageID)
 	}
-	if c.imagesByID[p.ImageID].ProfileID != p.ID {
+	if image.ProfileID != p.ID {
 		return fmt.Errorf("image %q is not bound to this profile", p.ImageID)
 	}
-	if c.imagesByID[p.ImageID].Channel != p.Channel {
+	if image.Channel != p.Channel {
 		return fmt.Errorf("image %q channel does not match profile channel", p.ImageID)
 	}
-	if _, ok := c.mirrorBundlesByID[p.MirrorBundleID]; !ok {
+	bundle, ok := c.mirrorBundlesByID[p.MirrorBundleID]
+	if !ok {
 		return fmt.Errorf("unknown mirror bundle %q", p.MirrorBundleID)
 	}
-	if c.mirrorBundlesByID[p.MirrorBundleID].Channel != p.Channel {
+	if bundle.Channel != p.Channel {
 		return fmt.Errorf("mirror bundle %q channel does not match profile channel", p.MirrorBundleID)
 	}
+	return nil
+}
+
+func (c *Catalog) validateProfileRepositories(p *ProfileDefinition) error {
 	seenRepositoryNames := make(map[string]struct{}, len(p.RepositoryIDs))
 	for _, id := range p.RepositoryIDs {
 		repository, ok := c.repositoriesByID[id]
@@ -604,6 +695,10 @@ func (c *Catalog) validateProfile(p *ProfileDefinition) error {
 	if profileRepository.Name != "gentoo" && p.Channel != "compatibility" && len(p.Parents) == 0 {
 		return fmt.Errorf("external profile requires an explicit parent chain")
 	}
+	return nil
+}
+
+func (c *Catalog) validateProfileParents(p *ProfileDefinition) error {
 	seenParents := make(map[string]struct{}, len(p.Parents))
 	for _, parent := range p.Parents {
 		if !idPattern.MatchString(parent.RepositoryID) || !idPattern.MatchString(parent.ProfilePath) || strings.HasPrefix(parent.ProfilePath, "/") {
@@ -622,14 +717,27 @@ func (c *Catalog) validateProfile(p *ProfileDefinition) error {
 		}
 		seenParents[key] = struct{}{}
 	}
-	if p.DefaultResourceClass != "" {
-		if _, ok := c.resourceByID[p.DefaultResourceClass]; !ok {
-			return fmt.Errorf("unknown resource class %q", p.DefaultResourceClass)
-		}
+	return nil
+}
+
+func (c *Catalog) validateProfileEgress(profile *ProfileDefinition) error {
+	policy, ok := c.egressByID[profile.EgressPolicyID]
+	if !ok {
+		return fmt.Errorf("unknown egress policy %q", profile.EgressPolicyID)
 	}
-	for _, legacy := range p.LegacyProfiles {
-		if !idPattern.MatchString(legacy) {
-			return fmt.Errorf("invalid legacy profile %q", legacy)
+	if policy.Channel != profile.Channel {
+		return fmt.Errorf("egress policy %q channel does not match profile channel", profile.EgressPolicyID)
+	}
+	if policy.Mode != EgressModeEnforce {
+		return nil
+	}
+	for _, repositoryID := range profile.RepositoryIDs {
+		repository := c.repositoriesByID[repositoryID]
+		if repository.SyncURI == "" {
+			continue
+		}
+		if err := policy.CoversURL(repository.SyncURI, "repository "+repository.ID); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -733,7 +841,23 @@ func validateRepository(r *RepositoryDefinition) error {
 }
 
 func validateImage(image *ImageManifest) error {
-	if !idPattern.MatchString(image.ID) || image.Generation == "" || image.Provider == "" || image.Arch == "" || image.BuildMode == "" || image.RootfsSource == "" {
+	if err := validateImageIdentity(image); err != nil {
+		return err
+	}
+	if err := validateImageDigests(image); err != nil {
+		return err
+	}
+	if err := validateImagePackageSets(image); err != nil {
+		return err
+	}
+	if image.Channel == "stable" && (image.Template == "" || image.Digest == "") {
+		return fmt.Errorf("stable image requires template and digest")
+	}
+	return nil
+}
+
+func validateImageIdentity(image *ImageManifest) error {
+	if !idPattern.MatchString(image.ID) || !idPattern.MatchString(image.Generation) || image.Provider == "" || image.Arch == "" || image.BuildMode == "" || image.RootfsSource == "" {
 		return fmt.Errorf("missing or invalid required field")
 	}
 	if image.DisplayModel != "" && image.DisplayModel != "std" && image.DisplayModel != "qxl" {
@@ -753,9 +877,16 @@ func validateImage(image *ImageManifest) error {
 	default:
 		return fmt.Errorf("unsupported provider %q", image.Provider)
 	}
+	if zone := executionZone(image.ExecutionZone); !executionZonePattern.MatchString(zone) {
+		return fmt.Errorf("invalid execution_zone %q", image.ExecutionZone)
+	}
 	if image.BuildMode != "native-gentoo" {
 		return fmt.Errorf("unsupported build mode %q", image.BuildMode)
 	}
+	return nil
+}
+
+func validateImageDigests(image *ImageManifest) error {
 	if err := validateDigest(image.Digest); err != nil {
 		return err
 	}
@@ -765,6 +896,10 @@ func validateImage(image *ImageManifest) error {
 	if err := validateDigest(image.PackageSetCatalogDigest); err != nil {
 		return err
 	}
+	return nil
+}
+
+func validateImagePackageSets(image *ImageManifest) error {
 	if (len(image.PackageSetIDs) == 0) != (image.PackageSetCatalogDigest == "") {
 		return fmt.Errorf("package sets and package-set catalog digest must be provided together")
 	}
@@ -778,10 +913,15 @@ func validateImage(image *ImageManifest) error {
 		}
 		seenSets[id] = struct{}{}
 	}
-	if image.Channel == "stable" && (image.Template == "" || image.Digest == "") {
-		return fmt.Errorf("stable image requires template and digest")
-	}
 	return nil
+}
+
+func executionZone(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "default"
+	}
+	return value
 }
 
 func validateMirrorBundle(bundle *MirrorBundle) error {
@@ -808,6 +948,11 @@ func validateDigest(digest string) error {
 }
 
 func validateResourceSpec(spec map[string]string) error {
+	for _, required := range []string{"cores", "memory", "disk_size"} {
+		if strings.TrimSpace(spec[required]) == "" {
+			return fmt.Errorf("machine spec requires %q for resource accounting", required)
+		}
+	}
 	for key, value := range spec {
 		if value == "" || len(value) > 128 || strings.ContainsAny(value, "\r\n\x00") {
 			return fmt.Errorf("invalid value for machine spec key %q", key)

@@ -20,7 +20,8 @@ portage-server: validate request and select PVE
 Terraform: clone native Gentoo template and wait for guest IP
         |
         v
-SSH/SCP: deliver pinned Linux builder binary and runtime configuration
+transient SSH: bootstrap identity/configuration; fetch the builder from an
+immutable internal URL with a mandatory SHA-256 (SCP remains a lab fallback)
         |
         v
 Native Gentoo VM: emerge --buildpkg -> GPKG
@@ -51,8 +52,14 @@ each reproducible baseline. The generated Terraform currently pins
 
 This is a **trusted-network alpha** deployment:
 
-- the server reaches each builder on SSH and TCP 9090;
-- builders authenticate with a shared `BUILDER_TOKEN`;
+- the server uses SSH only for the initial binary/identity bootstrap;
+- the builder opens no inbound build API and actively pulls through the
+  dedicated TLS 1.3 Worker Gateway;
+- every short-lived worker certificate binds one worker ID, job ID, scheduler
+  attempt ID and fencing token; the gateway rechecks the PostgreSQL lease;
+- after the outbound worker authenticates, the target PVE VM is read back with
+  `policy_in=DROP` and `policy_out=DROP`; SSH and TCP 9090 are no longer
+  reachable for the task lifetime;
 - builders receive only the release **public** key for a job-local verification
   keyring; neither builder nor server mounts the signing private key;
 - the independent signer has no HTTP listener, pulls digest-bound tasks from
@@ -61,12 +68,36 @@ This is a **trusted-network alpha** deployment:
 - PVE and SSH credentials are operator secrets;
 - native instances are single-use and are destroyed after the pipeline.
 
-Do not expose the server, dashboard, builder port, or PVE API directly to an
-untrusted network. The target community architecture replaces inbound builder
-APIs and shared tokens with outbound leases and per-worker mTLS. The release
-key isolation is already implemented; worker identity and network isolation
-remain future work. See
+Do not expose the HTTP server/dashboard or PVE API directly to an untrusted
+network. The worker gateway may bind to the builder VLAN because it requires a
+CA-verified client certificate before HTTP dispatch, and additionally validates
+the certificate URI against the active attempt/fence. The release key isolation,
+outbound worker identity, project runtime/cost quota, failure-storm cooldown,
+administrator step-up and cross-replica OIDC session lifecycle are
+implemented; production identity-provider callbacks and an external workload
+issuer/recovery drill remain.
+See
 [ROADMAP_AND_DESKTOP_E2E.html](ROADMAP_AND_DESKTOP_E2E.html).
+
+In a multi-replica control plane, the normal HTTP API may sit behind a load
+balancer, but each replica's `WORKER_GATEWAY_ADVERTISE_URL` must route directly
+back to that issuing/executing replica (or use an equivalent identity-aware
+sticky route). The in-flight gateway session is deliberately process-local;
+PostgreSQL remains the authority and retries with a new attempt/VM after a
+replica loss. Do not round-robin a worker's long polls across replicas. Schema
+8 records a minimum executor protocol on every new job and rejects attempts
+from old binaries at the database boundary, so a mixed-version replica cannot
+silently drop egress or mTLS fields. Rolling upgrades must still drain old
+executors before removing their deployment.
+
+The advertised Worker Gateway and callback addresses must be stable from the
+builder VLAN and must match both the gateway certificate SAN and the resolved
+egress allowlist. Do not advertise a laptop's DHCP address. The 2026-07-28 lab
+Gate used `10.31.0.2` as a stable NAS-side L4 ingress to the local control
+plane, which also removed the PVE-to-laptop routing dependency. Its reverse SSH
+tunnel and small TCP relay are lab-only scaffolding: a persistent deployment
+needs a supervised listener, load balancer/VIP, or routed service address with
+health checks and managed certificates.
 
 ## Prerequisites
 
@@ -74,10 +105,21 @@ remain future work. See
 
 - Terraform available on the server `PATH`. The Compose control-plane image
   includes the repository-pinned Terraform version.
-- Network access from the server to the PVE API and builder SSH/9090 ports.
-- Network access from the builder VM to `SERVER_CALLBACK_URL`.
+- Network access from the server to the PVE API and transient builder SSH.
+- Network access from the builder VM to `SERVER_CALLBACK_URL` plus
+  `WORKER_GATEWAY_ADVERTISE_URL`; the resolved profile egress policy must cover
+  both exact host/CIDR and port.
+- A server certificate matching the gateway advertise host, its server CA, a
+  client CA/issuer pair, and an issuer private key readable only by the server.
+  Generate a lab PKI with
+  `WORKER_GATEWAY_HOST=<LAN-host> scripts/generate-worker-pki.sh .local/worker-pki`;
+  production should use an
+  operator-managed issuer and rotation procedure.
 - A Linux builder binary matching the template architecture.
-- PostgreSQL schema 7 with the repeatable signer-role bootstrap applied.
+- PostgreSQL schema 20 with the repeatable signer-role bootstrap, executor
+  protocol fence, OIDC subjects/project RBAC, durable phase execution context,
+  Worker Gateway spool, attempt runtime/cost ledger, IAM session lifecycle and
+  exact executor capability routing applied.
 - Shared writable `DATA_DIR`/quarantine, `BINPKG_PATH`, public-key directory,
   and Terraform workspace paths.
 - A separate signer-only private GPG volume. The server and builders must not
@@ -523,7 +565,7 @@ rewritten when loaded.
 
 `configs/server.conf` contains bootstrap settings only. For signing-enabled
 operation, start PostgreSQL/migrations, the isolated signer, and the server as
-one deployment. The checked-in Compose stack applies schema 7 and creates a
+one deployment. The checked-in Compose stack applies schema 20 and creates a
 least-privilege `portage_signer` role:
 
 ```bash
@@ -544,9 +586,11 @@ For a non-Compose deployment, run `portage-signer` as a separate service with
 signer-only `GPG_HOME`, shared quarantine/binpkg storage, and the signer
 database role. Run `portage-server` with the same public-key path and shared
 storage but without the signer GPG home. The signer has no inbound listener.
-Store generated database/API/builder secrets and the signing key in a secret
-manager or protected volume before restarting services. Changing
-`BUILDER_TOKEN` requires rolling the builders that use it.
+Store generated database/API secrets, the worker CA issuer key, and the signing
+key in a secret manager or protected volume before restarting services.
+`BUILDER_TOKEN` is only for legacy push-mode static builders; changing it
+requires rolling those legacy builders. Reference PVE pull workers instead use
+an attempt-bound short-lived certificate and must leave the shared token empty.
 
 Operational non-secret PVE settings are managed in the dashboard and
 versioned/audited in PostgreSQL. Inject credentials before starting the server:
@@ -599,37 +643,44 @@ Expected evidence:
 
 1. The request passes ConfigBundle validation and enters provisioning.
 2. Terraform clones the configured template and reports a guest-agent IP.
-3. SSH deployment starts `portage-builder.service` on the VM.
-4. Native `emerge --buildpkg` writes into a per-job PKGDIR and produces the
+3. SSH deployment copies the short-lived identity and starts
+   `portage-builder.service` in pull mode; no process binds TCP 9090.
+4. The worker authenticates outbound, the gateway verifies
+   worker/job/attempt/fence, and PVE closes the transient SSH window with
+   per-VM `policy_in=DROP` readback. Every VM-level inbound rule is removed
+   and a second rules readback must contain no `type=in` entry; Cluster, Node
+   and every other VM firewall object are untouched.
+5. Native `emerge --buildpkg` writes into a per-job PKGDIR and produces the
    requested package plus every dependency built by that task.
-5. The server collects the category-preserving unsigned task closure into a
+6. The worker streams the category-preserving unsigned task closure through
+   one-shot, size-limited, SHA-256-bound upload slots into a
    job-private quarantine. Public `BINPKG_PATH` is unchanged.
-6. Unsigned native install verification creates a fresh `PKGDIR`, downloads
+7. Unsigned native install verification creates a fresh `PKGDIR`, downloads
    only the expected `Packages` file and exact task artifacts from the private
    capability binhost, and rejects redirects, unexpected paths, sizes, digests,
    or files. It then copies the image baseline VDB into a throwaway root,
    removes every package produced by the task, and installs with
    `--usepkgonly=y --getbinpkg=n`. No host package cache or other configured
    binhost can participate.
-7. Before signing, the server submits the exact unsigned generation under the
+8. Before signing, the server submits the exact unsigned generation under the
    signer-key policy. The verifier must reject it; acceptance is a hard
    pipeline failure. This is the release Gate's required negative control.
-8. The server enqueues exact input paths, sizes, and SHA-256 digests. The
+9. The server enqueues exact input paths, sizes, and SHA-256 digests. The
    isolated signer claims the task once, rejects symlinks/path changes, creates
    embedded GPKG signatures and a clear-signed Manifest, self-verifies the
    result, and returns an output manifest.
-9. A second fresh `PKGDIR` downloads only the signer's output manifest. Before
+10. A second fresh `PKGDIR` downloads only the signer's output manifest. Before
    Portage runs, the builder verifies every expected GPKG signature with a
    job-local keyring containing exactly one approved primary fingerprint. The
    throwaway-root install then enables `binpkg-request-signature`, keeps
    `--getbinpkg=n`, and rechecks every artifact digest after emerge. It must
    install the complete task closure.
-10. The server immutably promotes the full signed closure, atomically
+11. The server immutably promotes the full signed closure, atomically
    regenerates `BINPKG_PATH/Packages`, and records `SIGNED: 1`. An existing
    destination is a hard failure; choose a package/version not already present
    when running a release-gating smoke test.
-11. The job reaches `completed` with an artifact reference.
-12. The native VM is destroyed after successful publication. A failed destroy
+12. The job reaches `completed` with an artifact reference.
+13. The native VM is destroyed after successful publication. A failed destroy
    remains tracked as `destroy_failed` for retry; it is never returned to the
    warm pool.
 
@@ -653,6 +704,204 @@ must contain `[verify-negative] unsigned generation rejected`, must show
 an unrelated binhost. The index stanza must contain `SIGNED: 1`. Also verify
 the signing task is `completed`, quarantine is empty, and the matching
 `infra_instances` row has `state=destroyed` and `deleted_at` set.
+
+## SEC-0B/B packet-layer builder egress Gate
+
+The catalog allowlist is not sufficient by itself. The reference PVE Gate must
+prove that the hypervisor, rather than the guest, enforces the boundary.
+
+Prerequisites:
+
+1. Enable the PVE Datacenter firewall. Portage Engine deliberately refuses to
+   change this cluster-wide setting and fails if it reads as disabled.
+2. Give the provisioning identity only the PVE VM/firewall permissions needed
+   to read cluster firewall options, manage the selected VM's firewall
+   options/rules, start the VM and perform its existing clone/destroy flow.
+3. Put every runtime endpoint in the selected catalog policy: control-plane
+   callback, binhost/upload mirror, builder binary URL, repository URLs,
+   Gentoo mirror/Portage sync URI and DNS resolver. Each hostname needs the
+   immutable internal CIDR used by the PVE rule.
+
+Run a representative cloud build with an enforced stable policy. The job log
+must show:
+
+```text
+[policy] applying PVE default-deny egress policy ... before VM boot
+[policy] verified policy_out=DROP with ... allow rules; VM started
+```
+
+During the build, inspect the VM in PVE and record:
+
+- the virtual NIC has `firewall=1`;
+- VM Firewall Options show `Enable=Yes`, Input Policy `ACCEPT`, and Output
+  Policy `DROP`; the explicit input policy preserves controller SSH/bootstrap
+  while the Gate remains scoped to outbound traffic;
+- every enabled outbound rule is an exact Portage Engine rule to an approved
+  CIDR/protocol/port; there is no `0.0.0.0/0` or `::/0` allow;
+- the Terraform workspace contains owner-only `egress-policy.json` and
+  `egress-policy-evidence.json`, and runtime metadata contains the same policy
+  ID/digest plus `pe_egress_enforced=true`;
+- an approved internal fetch/build succeeds while a request to a public test
+  endpoint fails at the network layer.
+
+Then run three negative cases: remove the callback host from the policy
+(the provision request must fail before Terraform), disable the PVE cluster
+firewall (the stopped VM must be rolled back without booting), and alter
+readback rules in a test double or isolated VM (verification must fail closed).
+A successful build without these negative cases is not completion evidence for
+SEC-0B/B.
+
+### Reference Gate result — 2026-07-27
+
+The reference cluster passed the VM-scoped Gate with the Datacenter firewall
+engine enabled and no Cluster or Node rules:
+
+- the preflight found 72 QEMU guests, zero existing guests with VM firewall
+  enabled, zero Cluster rules and zero rules on each of the six nodes;
+- enabling only the Datacenter engine left all 16 running QEMU guests and the
+  representative LAN/PBS/SSH endpoints reachable;
+- the disposable builder was created stopped, then received
+  `policy_in=ACCEPT`, `policy_out=DROP`, DHCP/NDP helpers and four exact rules:
+  NAS HTTP, control-plane/binhost HTTP, and internal DNS over TCP/UDP;
+- the first live attempt exposed an important default mismatch: enabling the
+  VM firewall without an explicit input policy blocked SSH bootstrap. The
+  adapter now sets and reads back `policy_in=ACCEPT`; evidence schema v2 and a
+  regression test reject an implicit/missing input policy;
+- from the final builder VM, both approved internal endpoints returned HTTP
+  200 while direct public IPv4 requests on ports 80 and 443 timed out;
+- `app-misc/editor-wrapper-4-r1` completed unsigned install verification,
+  rejected the unsigned generation under the signer key, completed signed
+  install verification, published an artifact whose index has `SIGNED: 1`,
+  and destroyed the single-use VM;
+- after cleanup the cluster again had 72 QEMU guests, zero guests with VM
+  firewall enabled, zero Cluster/Node rules, and the same representative
+  connectivity baseline.
+
+The Datacenter engine remains enabled as the enforcement prerequisite.
+Portage Engine owns only the selected builder VM's options and rules; it does
+not add Cluster/Node rules or modify another VM ID.
+
+## SEC-1 outbound worker Gate result — 2026-07-27
+
+Job `e3a308a1-28ad-4cc0-be49-618018c2c926` completed the stricter outbound
+worker and signed-publication Gate on disposable VM 142:
+
+- the per-attempt client certificate bound worker, job, attempt and fence 1;
+- after the worker connected, the control plane set both VM policies to
+  `DROP`, removed every VM-level inbound allow rule, read the rules back as
+  empty, and external probes confirmed TCP 22 and 9090 were unreachable;
+- `sys-process/htop-3.5.1` produced a 225,280-byte unsigned GPKG with SHA-256
+  `2e32ff3a7f11764f9a7c1aa06bf92f50ad4620de6b37fd133cadfebeb985e59b`;
+- unsigned install passed and the mandatory signed-policy negative control
+  rejected that generation;
+- the isolated signer produced a 226,816-byte generation with SHA-256
+  `b23f513231f14a39bc4de6f93d6b38c4ceefcafc439b84f6edaecaa2e38d4099`
+  and fingerprint `31069C2591541344976994527B0D1E08E82197B0`;
+- a new throwaway root installed that exact generation with
+  `signature_required=true`, the official-style `Packages` index was updated,
+  and Terraform destroyed the single-use VM.
+
+The exercise also caught an old secondary control-plane binary claiming a new
+job during a rolling upgrade. Schema 8 now stores a minimum executor protocol
+on each new job, records every scheduler worker's protocol, and rejects a
+legacy executor in the database trigger. Stable control-plane worker IDs carry
+the `sec1-v1` generation so an older binary cannot reuse a current identity.
+Drain old replicas during deployment even with this fail-closed fence.
+
+## IAM-1B2b2c active phase restart Gate — 2026-07-27
+
+Schema 16 and executor protocol 3 were exercised with two active control-plane
+replicas and one disposable PVE VM at a time. Job
+`78372ded-3c34-464d-9e04-3d7779212017` paused the primary after the stable
+`sys-process/btop` build command was delivered. The 45-second build-phase
+lease expired, the secondary reclaimed the same work item at claim fence 2,
+and the VM continued its original emerge. PostgreSQL retained one build
+command ID at delivery fence 1, four deterministic collect commands, one
+signing task and one publish phase. Four signed GPKGs passed fresh-root
+installation and the VM was destroyed.
+
+Job `a0be1bcb-b431-455f-bee2-b3663d311337` repeated the failure during
+verification of `app-misc/sl`. The secondary reclaimed verify at fence 2,
+reused the same three stable verification command IDs, ran exactly one signer
+claim, installed the 30,208-byte signed generation with fingerprint
+`31069C2591541344976994527B0D1E08E82197B0`, and wrote exactly one CPV and PATH
+entry to the official-style `Packages` index. PVE API read-back found no live
+VM 142 after cleanup.
+
+The exercise found and fixed four deployment/execution gaps:
+
+- an empty Worker Gateway poll now commits its connection heartbeat instead
+  of rolling it back with the expected no-work result;
+- exact completion replay is accepted after a database commit followed by a
+  lost HTTP response, while a different result/fence remains rejected;
+- a long-running result is phase-fenced again before logs, collection,
+  signing or publication, so the stale executor cannot create visible
+  duplicate side effects;
+- schema v20 now permits intentionally heterogeneous replicas only through
+  exact phase/provider/zone/arch/profile/image labels. A replica still needs
+  all material implied by the labels it advertises; do not claim a capability
+  merely because another replica has the credential, binary, or shared state.
+
+## IAM-1B3 runtime/cost Gate — 2026-07-28
+
+Schema 17 and executor protocol 4 passed the PostgreSQL concurrency Gate, the
+two-replica Compose Gate, and a complete real-PVE build. Job
+`226ae3f5-2642-402c-9683-5fdb01f36ead` cloned disposable VM 142 on
+`infra-node4` and built `app-misc/figlet-2.2.5-r2`.
+
+- admission reserved 3,600 build seconds and 120,000 cloud-cost microunits at
+  the catalog rate of 2,000 microunits/minute;
+- the VM booted with `policy_out=DROP` and four exact allow rules; after its
+  outbound mTLS session connected, `policy_in=DROP` was read back;
+- the worker fetched the builder once from the NAS content-addressed object
+  whose SHA-256 was
+  `38f13734b44071a4d90beab8a3a896bf711d9a4b6a2ac603a9ed241ea73ff8fd`;
+  the guest verified that digest before execution;
+- unsigned install verification passed, then the mandatory signature policy
+  rejected that unsigned generation;
+- the isolated signer produced a 179,200-byte generation with SHA-256
+  `d3fe22f5d64f5225ba95a016584a1938d52cb73ca06c31f67095216366c93f9f`
+  and fingerprint `31069C2591541344976994527B0D1E08E82197B0`;
+- a new throwaway root installed that exact signed generation with
+  `signature_required=true`; the official-style `Packages` index contained
+  exactly one matching CPV and one matching PATH, and the published HTTP
+  object had the same SHA-256;
+- terminal settlement charged 630 seconds and 22,000 microunits, released the
+  unused reservation, and left runtime, resource, worker-session, and phase
+  lease usage at zero;
+- the infra ledger recorded cleanup and direct PVE API read-back confirmed
+  that VM 142 no longer existed.
+
+This Gate also verified that settlement is capped by the amount admitted even
+when deadline recovery is delayed: post-deadline wall time cannot create
+unapproved project usage. Estimated cloud cost is currently a scheduling and
+abuse-control unit, not a provider invoice; provider reconciliation remains a
+later milestone.
+
+## IAM-1C session/step-up Gate — 2026-07-28
+
+Schema 18 is an additive control-plane migration; it does not alter the PVE
+worker protocol or guest image. The local two-replica Compose Gate applied the
+migration with the DDL owner and verified that both API replicas use
+PostgreSQL session authority, while the signer role cannot read the session
+tables.
+
+- verified OIDC credentials are represented only by SHA-256 fingerprints and
+  bounded lifecycle metadata; bearer bytes are never persisted or returned;
+- per-session revoke, idle expiry, issuer expiry, maximum lifetime and
+  per-subject revoke-all watermarks are covered by PostgreSQL integration
+  tests, including an unseen pre-watermark token;
+- high-risk legacy writes return HTTP 428 without a distinct step-up key and
+  reject reuse of the primary API key;
+- OIDC step-up requires recent `auth_time` and, when configured, accepted AMR
+  and ACR values; the Dashboard initiates `prompt=login`/`max_age=0`;
+- the Dashboard session view passed a real browser login/render check with no
+  console errors. In legacy mode it correctly reports that OIDC session
+  authority is unavailable.
+
+No additional PVE VM was created for this Gate because the data-plane contract
+was unchanged. The prior signed-GPKG real-PVE Gate remains the worker evidence;
+schema 20 must be included in the next PostgreSQL backup/restore drill.
 
 ## Scaling behavior
 
@@ -682,9 +931,11 @@ fail; it must not be reported as a successful build.
 | Native VM does not boot | Template uses OVMF/Q35/SCSI and retains its cloud-init drive |
 | SSH host-key verification fails | Populate the configured known-hosts file; use insecure host-key mode only for an isolated lab |
 | Deployment fails on permissions/systemd | Current native deployment requires root SSH and a systemd-based template |
-| Builder never becomes healthy | Linux binary path/architecture, executable bit, service logs, firewall, and port 9090 |
-| Builder cannot register or fetch binpkgs | `SERVER_CALLBACK_URL` is routable from the VM and DNS resolves any mirror host |
+| Pull worker never connects | Linux binary path/architecture, executable bit, service logs, gateway CA/SAN, certificate lifetime, active attempt/fence, and exact gateway egress CIDR/port |
+| Pull worker cannot fetch binpkgs | `SERVER_CALLBACK_URL` is routable from the VM, DNS resolves every approved mirror host, and the catalog egress policy covers each exact URL |
 | Terraform cannot read `<ssh-key>.pub` | Mount/provide both the configured private key and the exact sibling `.pub`; Terraform reads the public file while rendering the VM resource |
+| Queued/ready work is `unschedulable` | Compare the job/work-item all-of requirements with live protocol-5 worker labels: phase, provider, execution zone, architecture, build mode, profile, image generation and optional egress-policy digest |
+| Provision works on one replica but fails on another | Verify that only the capable replica advertises the matching provider/zone/profile/image labels, then compare its catalog, cloud credentials, SSH key pair, builder binary/digest, Terraform state and binpkg mounts |
 | Builder binary disappears after a local rebuild | Do not hot-replace a single-file bind mount; use an immutable URL/digest, mount its parent directory, or recreate the server container and verify the digest inside it |
 | Signing fails with `invalid GPKG Manifest record` | Use the current signer: Portage emits `BLAKE2B` before `SHA512`; the parser accepts either valid order and verifies both |
 | Signed verification reports `NO_PUBKEY` | Ensure `gpg_pubkey` reaches the builder and `BINPKG_GPG_VERIFY_GPG_HOME` points to the job-local trusted keyring; do not rely on the builder host `/etc/portage/gnupg` |

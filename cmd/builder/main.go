@@ -24,6 +24,13 @@ import (
 func main() {
 	cfg := loadConfig()
 	bldr := builder.NewLocalBuilder(cfg.Workers, cfg)
+	if cfg.PullEnabled {
+		if err := runPullMode(cfg, bldr); err != nil {
+			log.Printf("Outbound-pull builder stopped: %v", err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	mux := setupHTTPHandlers(bldr)
 	handler := authMiddleware(cfg.AuthToken, mux)
@@ -33,6 +40,14 @@ func main() {
 	defer stopHeartbeat()
 
 	waitForShutdown(server, bldr)
+}
+
+func runPullMode(cfg *config.BuilderConfig, bldr *builder.LocalBuilder) error {
+	log.Printf("Starting outbound-pull builder; no inbound build listener will be opened")
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+	defer bldr.Shutdown()
+	return builder.RunPullAgent(ctx, cfg, bldr)
 }
 
 // heartbeatInterval is how often the builder refreshes its registration with
@@ -84,6 +99,7 @@ func startHeartbeat(cfg *config.BuilderConfig, bldr *builder.LocalBuilder) func(
 	log.Printf("Registering builder %q (endpoint %s) with server %s", builderID, endpoint, cfg.ServerURL)
 	send()
 
+	// #nosec G118 -- cancel is returned to the caller, which defers it for shutdown.
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
 		ticker := time.NewTicker(heartbeatInterval)
@@ -145,7 +161,11 @@ func loadConfig() *config.BuilderConfig {
 		log.Printf("WARNING: %s", w)
 	}
 
-	log.Printf("Starting Portage Builder Service on port %d", cfg.Port)
+	if cfg.PullEnabled {
+		log.Printf("Configured Portage Builder in outbound-pull mode")
+	} else {
+		log.Printf("Starting Portage Builder Service on port %d", cfg.Port)
+	}
 	return cfg
 }
 

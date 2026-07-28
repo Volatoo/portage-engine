@@ -437,10 +437,10 @@ func PrepareCatalystPlan(planPath, lockPath, offlineRoot, workRoot string) (*Cat
 		filepath.Join(portageConfig, "package.use"),
 	}
 	for _, dir := range generatedDirectories {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
+		if err := os.MkdirAll(dir, 0o755); err != nil { // #nosec G301 -- generated image inputs are intentionally readable by the isolated builder account.
 			return nil, err
 		}
-		if err := os.Chmod(dir, 0o755); err != nil {
+		if err := os.Chmod(dir, 0o755); err != nil { // #nosec G302 -- generated image inputs are intentionally readable by the isolated builder account.
 			return nil, err
 		}
 	}
@@ -656,11 +656,9 @@ func GenerateCatalystRootfsManifest(planPath, lockPath, preparedPath, gatePath, 
 	if err != nil {
 		return nil, err
 	}
-	if prepared.SchemaVersion != 1 || gate.SchemaVersion != 1 || gate.CompletedAt.IsZero() || prepared.Target != plan.Target || gate.Target != prepared.Target || prepared.PlanDigest != gate.PlanDigest || prepared.InputLockDigest != gate.InputLockDigest ||
-		prepared.PlanDigest != "sha256:"+planDigest || prepared.InputLockDigest != "sha256:"+lockDigest || lock.BundleID != plan.MirrorBundleID ||
-		prepared.MirrorBundleID != plan.MirrorBundleID || prepared.RepositoryCommit != plan.Repositories["gentoo"] || prepared.RepositoryCommit != gate.RepositoryCommit ||
-		prepared.SnapshotID != plan.SnapshotID || prepared.SnapshotID != gate.SnapshotID || prepared.ProfileID != plan.ProfileID || prepared.ProfilePath != plan.ProfilePath || prepared.ProfileRepository != plan.ProfileRepository ||
-		!slices.Equal(prepared.ProfileParents, plan.ProfileParents) || !slices.Equal(prepared.PackageSets, plan.PackageSets) || !gate.Stage3SignatureVerified || !gate.RepositoryCommitVerified || !gate.ProfileCommitVerified || !gate.ProfileParentsVerified || !gate.NetworkNamespaceDenied || !gate.FreshWorkDirectory {
+	if !validCatalystExecutionEvidence(
+		plan, lock, &prepared, &gate, planDigest, lockDigest,
+	) {
 		return nil, fmt.Errorf("catalyst execution evidence is incomplete or inconsistent")
 	}
 	effectivePackages, err := validateCatalystPreparedInputs(plan, lock, &prepared)
@@ -690,6 +688,61 @@ func GenerateCatalystRootfsManifest(planPath, lockPath, preparedPath, gatePath, 
 		EnvscriptDigest: prepared.GeneratedEnvDigest, FSScriptDigest: prepared.GeneratedFSScriptDigest, RootOverlayDigest: prepared.GeneratedOverlayDigest,
 		Inputs: append([]CatalystInputEvidence(nil), prepared.Inputs...), RootfsFilename: plan.OutputFilename, RootfsDigest: "sha256:" + digest, RootfsSize: info.Size(),
 		QCOW2Filename: plan.QCOW2Filename, DiskSizeGiB: plan.DiskSizeGiB, Gate: gate}, nil
+}
+
+func validCatalystExecutionEvidence(
+	plan *CatalystPlan,
+	lock *InputLock,
+	prepared *CatalystPrepared,
+	gate *CatalystGateEvidence,
+	planDigest, lockDigest string,
+) bool {
+	return validCatalystEvidenceEnvelope(plan, lock, prepared, gate, planDigest, lockDigest) &&
+		validCatalystEvidenceProfile(plan, prepared, gate) &&
+		gate.Stage3SignatureVerified &&
+		gate.RepositoryCommitVerified &&
+		gate.ProfileCommitVerified &&
+		gate.ProfileParentsVerified &&
+		gate.NetworkNamespaceDenied &&
+		gate.FreshWorkDirectory
+}
+
+func validCatalystEvidenceEnvelope(
+	plan *CatalystPlan,
+	lock *InputLock,
+	prepared *CatalystPrepared,
+	gate *CatalystGateEvidence,
+	planDigest, lockDigest string,
+) bool {
+	return prepared.SchemaVersion == 1 &&
+		gate.SchemaVersion == 1 &&
+		!gate.CompletedAt.IsZero() &&
+		prepared.Target == plan.Target &&
+		gate.Target == prepared.Target &&
+		prepared.PlanDigest == gate.PlanDigest &&
+		prepared.InputLockDigest == gate.InputLockDigest &&
+		prepared.PlanDigest == "sha256:"+planDigest &&
+		prepared.InputLockDigest == "sha256:"+lockDigest &&
+		lock.BundleID == plan.MirrorBundleID &&
+		prepared.MirrorBundleID == plan.MirrorBundleID
+}
+
+func validCatalystEvidenceProfile(
+	plan *CatalystPlan,
+	prepared *CatalystPrepared,
+	gate *CatalystGateEvidence,
+) bool {
+	repositoryMatchesPlan := prepared.RepositoryCommit ==
+		plan.Repositories["gentoo"]
+	return repositoryMatchesPlan &&
+		gate.RepositoryCommit == prepared.RepositoryCommit &&
+		prepared.SnapshotID == plan.SnapshotID &&
+		prepared.SnapshotID == gate.SnapshotID &&
+		prepared.ProfileID == plan.ProfileID &&
+		prepared.ProfilePath == plan.ProfilePath &&
+		prepared.ProfileRepository == plan.ProfileRepository &&
+		slices.Equal(prepared.ProfileParents, plan.ProfileParents) &&
+		slices.Equal(prepared.PackageSets, plan.PackageSets)
 }
 
 func validateCatalystPreparedInputs(plan *CatalystPlan, lock *InputLock, prepared *CatalystPrepared) ([]string, error) {
@@ -882,30 +935,86 @@ func LoadCatalystRootfsManifest(path string) (*CatalystRootfsManifest, error) {
 }
 
 func validateCatalystRootfsManifest(manifest *CatalystRootfsManifest) error {
-	digests := []string{manifest.RootfsDigest, manifest.PlanDigest, manifest.InputLockDigest, manifest.PackageSetCatalogDigest, manifest.ConfigDigest,
-		manifest.SpecDigest, manifest.EnvscriptDigest, manifest.FSScriptDigest, manifest.RootOverlayDigest}
+	if err := validateCatalystRootfsDigests(manifest); err != nil {
+		return err
+	}
+	expectedInputs, profileValid := catalystRootfsProfileContract(manifest)
+	if !profileValid || !validCatalystRootfsEnvelope(manifest, expectedInputs) ||
+		!validCatalystRootfsGate(manifest) {
+		return fmt.Errorf("catalyst rootfs manifest is incomplete")
+	}
+	return nil
+}
+
+func validateCatalystRootfsDigests(manifest *CatalystRootfsManifest) error {
+	digests := []string{
+		manifest.RootfsDigest, manifest.PlanDigest, manifest.InputLockDigest,
+		manifest.PackageSetCatalogDigest, manifest.ConfigDigest,
+		manifest.SpecDigest, manifest.EnvscriptDigest, manifest.FSScriptDigest,
+		manifest.RootOverlayDigest,
+	}
 	for _, digest := range digests {
 		if !prefixedSHA256Pattern.MatchString(digest) {
 			return fmt.Errorf("catalyst rootfs manifest has an invalid digest")
 		}
 	}
-	expectedInputs := 9
-	profileValid := manifest.Target == catalystTarget && manifest.ProfileRepository == "gentoo" && manifest.ProfilePath == catalystOfficialProfile && manifest.ProfileRepositoryCommit == "" && len(manifest.ProfileParents) == 0
-	if manifest.Target == catalystProfileTarget {
-		expectedInputs = 11
-		profileValid = repoComponentPattern.MatchString(manifest.ProfileRepository) && manifest.ProfileRepository != "gentoo" && validProfilePath(manifest.ProfilePath) && fullRevisionPattern.MatchString(manifest.ProfileRepositoryCommit) && len(manifest.ProfileParents) > 0
-	}
-	if manifest.SchemaVersion != 1 || manifest.CreatedAt.IsZero() || !profileValid || manifest.Arch != "amd64" ||
-		!objectIDPattern.MatchString(manifest.RootfsID) || !objectIDPattern.MatchString(manifest.Generation) || !objectIDPattern.MatchString(manifest.ProfileID) ||
-		!objectIDPattern.MatchString(manifest.MirrorBundleID) || !fullRevisionPattern.MatchString(manifest.RepositoryCommit) || !catalystNamePattern.MatchString(manifest.SnapshotID) ||
-		len(manifest.PackageSets) == 0 || len(manifest.Packages) == 0 || len(manifest.Inputs) != expectedInputs || manifest.RootfsSize <= 0 || manifest.DiskSizeGiB < 8 || manifest.DiskSizeGiB > 512 ||
-		!catalystNamePattern.MatchString(manifest.RootfsFilename) || !strings.HasSuffix(manifest.RootfsFilename, ".tar.xz") || !catalystNamePattern.MatchString(manifest.QCOW2Filename) || !strings.HasSuffix(manifest.QCOW2Filename, ".qcow2") ||
-		manifest.Gate.SchemaVersion != 1 || manifest.Gate.CompletedAt.IsZero() || manifest.Gate.Target != manifest.Target || manifest.Gate.PlanDigest != manifest.PlanDigest ||
-		manifest.Gate.InputLockDigest != manifest.InputLockDigest || manifest.Gate.RepositoryCommit != manifest.RepositoryCommit || manifest.Gate.SnapshotID != manifest.SnapshotID ||
-		!manifest.Gate.Stage3SignatureVerified || !manifest.Gate.RepositoryCommitVerified || !manifest.Gate.ProfileCommitVerified || !manifest.Gate.ProfileParentsVerified || !manifest.Gate.NetworkNamespaceDenied || !manifest.Gate.FreshWorkDirectory {
-		return fmt.Errorf("catalyst rootfs manifest is incomplete")
-	}
 	return nil
+}
+
+func catalystRootfsProfileContract(manifest *CatalystRootfsManifest) (int, bool) {
+	if manifest.Target == catalystTarget {
+		return 9, manifest.ProfileRepository == "gentoo" &&
+			manifest.ProfilePath == catalystOfficialProfile &&
+			manifest.ProfileRepositoryCommit == "" &&
+			len(manifest.ProfileParents) == 0
+	}
+	if manifest.Target == catalystProfileTarget {
+		return 11, repoComponentPattern.MatchString(manifest.ProfileRepository) &&
+			manifest.ProfileRepository != "gentoo" &&
+			validProfilePath(manifest.ProfilePath) &&
+			fullRevisionPattern.MatchString(manifest.ProfileRepositoryCommit) &&
+			len(manifest.ProfileParents) > 0
+	}
+	return 0, false
+}
+
+func validCatalystRootfsEnvelope(
+	manifest *CatalystRootfsManifest,
+	expectedInputs int,
+) bool {
+	return manifest.SchemaVersion == 1 && !manifest.CreatedAt.IsZero() &&
+		manifest.Arch == "amd64" &&
+		objectIDPattern.MatchString(manifest.RootfsID) &&
+		objectIDPattern.MatchString(manifest.Generation) &&
+		objectIDPattern.MatchString(manifest.ProfileID) &&
+		objectIDPattern.MatchString(manifest.MirrorBundleID) &&
+		fullRevisionPattern.MatchString(manifest.RepositoryCommit) &&
+		catalystNamePattern.MatchString(manifest.SnapshotID) &&
+		len(manifest.PackageSets) > 0 &&
+		len(manifest.Packages) > 0 &&
+		len(manifest.Inputs) == expectedInputs &&
+		manifest.RootfsSize > 0 &&
+		manifest.DiskSizeGiB >= 8 && manifest.DiskSizeGiB <= 512 &&
+		catalystNamePattern.MatchString(manifest.RootfsFilename) &&
+		strings.HasSuffix(manifest.RootfsFilename, ".tar.xz") &&
+		catalystNamePattern.MatchString(manifest.QCOW2Filename) &&
+		strings.HasSuffix(manifest.QCOW2Filename, ".qcow2")
+}
+
+func validCatalystRootfsGate(manifest *CatalystRootfsManifest) bool {
+	gate := manifest.Gate
+	return gate.SchemaVersion == 1 && !gate.CompletedAt.IsZero() &&
+		gate.Target == manifest.Target &&
+		gate.PlanDigest == manifest.PlanDigest &&
+		gate.InputLockDigest == manifest.InputLockDigest &&
+		gate.RepositoryCommit == manifest.RepositoryCommit &&
+		gate.SnapshotID == manifest.SnapshotID &&
+		gate.Stage3SignatureVerified &&
+		gate.RepositoryCommitVerified &&
+		gate.ProfileCommitVerified &&
+		gate.ProfileParentsVerified &&
+		gate.NetworkNamespaceDenied &&
+		gate.FreshWorkDirectory
 }
 
 func GenerateQCOW2Manifest(rootfsManifestPath, qcow2Path, assemblerPath string, now time.Time) (*QCOW2Manifest, error) {

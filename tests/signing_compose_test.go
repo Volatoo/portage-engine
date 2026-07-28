@@ -73,8 +73,11 @@ func TestComposeSigningRoundTrip(t *testing.T) {
 			return err
 		}
 		if _, err := q.Exec(ctx, `
-			INSERT INTO build_jobs (id, package_atom, state, request, request_digest)
-			VALUES ($1, 'app-misc/compose-signing-smoke', 'signing', '{}'::jsonb, $2)
+			INSERT INTO build_jobs (id, project_id, package_atom, state, request, request_digest)
+			VALUES (
+				$1, (SELECT id FROM projects WHERE name = 'default'),
+				'app-misc/compose-signing-smoke', 'signing', '{}'::jsonb, $2
+			)
 		`, jobID, digest); err != nil {
 			return err
 		}
@@ -103,6 +106,7 @@ func TestComposeSigningRoundTrip(t *testing.T) {
 	task, err := repo.EnqueueSigning(ctx, signing.Request{
 		JobID: jobID.String(), AttemptID: attemptID.String(), AttemptFence: 1,
 		LeaseOwner: stableName, SourceToken: sourceToken, Architecture: "amd64",
+		MaxOutputBytes: 1 << 20,
 		Artifacts: []signing.Artifact{{
 			RelativePath: relative, InputDigest: digest, InputSize: size,
 		}},

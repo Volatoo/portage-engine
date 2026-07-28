@@ -66,7 +66,7 @@ func (be *BuildExecutor) ExecuteBuild(
 	buildWorkDir := filepath.Join(be.workDir, buildID)
 	// Portage drops fetch/build helpers to the portage user. It must be able to
 	// traverse the job-scoped PORTAGE_CONFIGROOT on native build nodes.
-	if err := os.MkdirAll(buildWorkDir, 0755); err != nil {
+	if err := os.MkdirAll(buildWorkDir, 0755); err != nil { // #nosec G301 -- Portage helpers require traversal of the isolated job root.
 		return fmt.Errorf("failed to create build workspace: %w", err)
 	}
 	defer func() {
@@ -88,7 +88,7 @@ func (be *BuildExecutor) ExecuteBuild(
 		return fmt.Errorf("profile selection failed: %w", err)
 	}
 	pkgDir := filepath.Join(buildWorkDir, "binpkgs")
-	if err := os.MkdirAll(pkgDir, 0o755); err != nil {
+	if err := os.MkdirAll(pkgDir, 0o755); err != nil { // #nosec G301 -- emerge writes as the portage user.
 		return fmt.Errorf("failed to create job package directory: %w", err)
 	}
 
@@ -120,7 +120,7 @@ func (be *BuildExecutor) buildPackage(
 
 	// Execute build
 	var stdout, stderr bytes.Buffer
-	execCmd := exec.CommandContext(ctx, cmd[0], cmd[1:]...)
+	execCmd := exec.CommandContext(ctx, cmd[0], cmd[1:]...) // #nosec G204 -- command originates from the trusted executor backend and is never passed through a shell.
 	execCmd.Stdout = &stdout
 	execCmd.Stderr = &stderr
 	execCmd.Dir = buildWorkDir
@@ -239,7 +239,7 @@ func (be *BuildExecutor) buildEnvironment(pkg PackageSpec, bundle *ConfigBundle,
 
 func seedNativeMakeConf(configRoot string) error {
 	destinationDir := filepath.Join(configRoot, "etc", "portage")
-	if err := os.MkdirAll(destinationDir, 0o755); err != nil {
+	if err := os.MkdirAll(destinationDir, 0o755); err != nil { // #nosec G301 -- native Portage must traverse its isolated config root.
 		return err
 	}
 	source := filepath.Join("/etc", "portage", "make.conf")
@@ -254,7 +254,7 @@ func seedNativeMakeConf(configRoot string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(destinationDir, "make.conf"), content, 0o644) // #nosec G703 -- destinationDir is the builder-owned isolated config root.
+	return os.WriteFile(filepath.Join(destinationDir, "make.conf"), content, 0o644) // #nosec G306,G703 -- Portage must read this file; destinationDir is builder-owned.
 }
 
 func prepareNativeProfile(bundle *ConfigBundle, configRoot string) (string, error) {
@@ -360,7 +360,7 @@ func (be *BuildExecutor) collectArtifacts(pkgDir string, job *BuildJob) error {
 
 // copyFile copies a file from src to dst.
 func (be *BuildExecutor) copyFile(src, dst string) error {
-	sourceFile, err := os.Open(src)
+	sourceFile, err := os.Open(src) // #nosec G304 -- src is resolved from the trusted executor worktree, not an HTTP request.
 	if err != nil {
 		return err
 	}
@@ -368,7 +368,7 @@ func (be *BuildExecutor) copyFile(src, dst string) error {
 		_ = sourceFile.Close()
 	}()
 
-	destFile, err := os.Create(dst)
+	destFile, err := os.Create(dst) // #nosec G304 -- dst is resolved beneath the executor-owned worktree.
 	if err != nil {
 		return err
 	}
@@ -395,11 +395,11 @@ func verifyRepositoryRevisions(ctx context.Context, repos []RepoConfig) error {
 		if repo.SyncType != "git" {
 			return fmt.Errorf("repository %q pins a revision but is not git-backed", repo.Name)
 		}
-		output, err := exec.CommandContext(ctx, "git", "-C", repo.Location, "rev-parse", "HEAD").Output()
+		output, err := exec.CommandContext(ctx, "git", "-C", repo.Location, "rev-parse", "HEAD").Output() // #nosec G204 -- fixed git executable and catalog-validated repository path.
 		if err != nil {
 			return fmt.Errorf("read repository %q revision: %w", repo.Name, err)
 		}
-		status, err := exec.CommandContext(ctx, "git", "-C", repo.Location, "status", "--porcelain=v1", "--untracked-files=all").Output()
+		status, err := exec.CommandContext(ctx, "git", "-C", repo.Location, "status", "--porcelain=v1", "--untracked-files=all").Output() // #nosec G204 -- fixed git executable and catalog-validated repository path.
 		if err != nil {
 			return fmt.Errorf("read repository %q worktree state: %w", repo.Name, err)
 		}

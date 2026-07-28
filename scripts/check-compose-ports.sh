@@ -14,6 +14,7 @@ fi
 
 ports=(
   "server:${PORTAGE_SERVER_PORT:-18080}"
+  "worker-gateway:${PORTAGE_WORKER_GATEWAY_PORT:-19444}"
   "dashboard:${PORTAGE_DASHBOARD_PORT:-18081}"
   "grafana:${PORTAGE_GRAFANA_PORT:-23000}"
   "loki:${PORTAGE_LOKI_PORT:-23100}"

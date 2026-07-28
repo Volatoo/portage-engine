@@ -88,7 +88,8 @@ func TestSubmitBuildResolvesServerOwnedCatalogInputs(t *testing.T) {
 			BinhostPath:         "releases/amd64/binpackages/23.0/x86-64",
 			ProfileRepositoryID: "gentoo", RepositoryIDs: []string{"gentoo"}, ImageID: "pve/amd64-001",
 			MirrorBundleID: "offline/001", DefaultResourceClass: "small",
-			Default: true, Channel: "stable",
+			EgressPolicyID: "egress/internal",
+			Default:        true, Channel: "stable",
 		}},
 		Repositories: []catalog.RepositoryDefinition{{
 			ID: "gentoo", Name: "gentoo", Location: "/var/db/repos/gentoo",
@@ -105,7 +106,14 @@ func TestSubmitBuildResolvesServerOwnedCatalogInputs(t *testing.T) {
 			ID: "offline/001", Digest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
 			CreatedAt: time.Now().UTC().Add(-time.Hour), FreshUntil: time.Now().UTC().Add(24 * time.Hour), AdvisoryWatermark: "2026-07-22T00:00:00Z", Channel: "stable",
 		}},
-		ResourceClasses: []catalog.ResourceClass{{ID: "small", MachineSpec: map[string]string{"cores": "2", "memory": "4096"}}},
+		ResourceClasses: []catalog.ResourceClass{{
+			ID: "small", MachineSpec: map[string]string{"cores": "2", "memory": "4096", "disk_size": "40"},
+			MaxRuntimeMinutes: 60, CloudCostMicrounitsPerMinute: 1000,
+		}},
+		EgressPolicies: []catalog.EgressPolicy{{
+			ID: "egress/internal", Mode: catalog.EgressModeEnforce, Channel: "stable",
+			Rules: []catalog.EgressRule{{ID: "git", Hosts: []string{"mirror.internal"}, CIDRs: []string{"10.31.0.2/32"}, Protocol: "tcp", Ports: []int{443}}},
+		}},
 	}
 	if err := c.Validate(); err != nil {
 		t.Fatal(err)
@@ -165,6 +173,39 @@ func TestSubmitBuildResolvesServerOwnedCatalogInputs(t *testing.T) {
 	})
 	if err == nil || !IsRequestError(err) {
 		t.Fatalf("catalog resource class should not be overridden, got %v", err)
+	}
+}
+
+func TestValidateResolvedEgressRejectsRuntimeEndpointDrift(t *testing.T) {
+	policy := catalog.EgressPolicy{
+		ID: "egress/internal", Mode: catalog.EgressModeEnforce, Channel: "stable",
+		Rules: []catalog.EgressRule{{
+			ID: "services", Hosts: []string{"control.internal", "nas.internal"},
+			CIDRs: []string{"10.31.0.2/32"}, Protocol: "tcp", Ports: []int{80, 443},
+		}},
+	}
+	digest, err := policy.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	context := &catalog.ResolvedBuildContext{EgressPolicy: policy, EgressPolicyDigest: digest}
+	if err := validateResolvedEgress("pve", context, map[string]string{
+		"server callback": "http://control.internal:80",
+		"binhost":         "https://nas.internal/binpkgs",
+	}); err != nil {
+		t.Fatalf("approved endpoints were rejected: %v", err)
+	}
+	if err := validateResolvedEgress("pve", context, map[string]string{
+		"public fallback": "https://distfiles.gentoo.org",
+	}); err == nil || !strings.Contains(err.Error(), "absent") {
+		t.Fatalf("unapproved runtime endpoint was accepted: %v", err)
+	}
+	if err := validateResolvedEgress("gcp", context, nil); err == nil || !strings.Contains(err.Error(), "not implemented") {
+		t.Fatalf("unsupported network enforcement provider was accepted: %v", err)
+	}
+	context.EgressPolicyDigest = "sha256:" + strings.Repeat("0", 64)
+	if err := validateResolvedEgress("pve", context, nil); err == nil || !strings.Contains(err.Error(), "digest changed") {
+		t.Fatalf("mutated policy was accepted: %v", err)
 	}
 }
 

@@ -23,14 +23,8 @@ func PromoteRelease(candidateCatalogPath, bundleManifestPath, bundleSignaturePat
 	if err := decodeStrictFile(promotionPlanPath, &plan); err != nil {
 		return nil, err
 	}
-	legacyBundle := len(plan.Bundles) == 0
-	if plan.SchemaVersion != 1 || !validOperationsID(plan.ReleaseID) || !validOperationsID(plan.Alias) || plan.Alias == plan.ReleaseID ||
-		!prefixedSHA256Pattern.MatchString(plan.CandidateCatalogDigest) || (legacyBundle && !prefixedSHA256Pattern.MatchString(plan.BundleManifestDigest)) ||
-		plan.MinimumFreshHours < 1 || plan.MinimumFreshHours > 24*30 || len(plan.Evidence) == 0 {
-		return nil, fmt.Errorf("promotion plan is incomplete")
-	}
-	if plan.ExpectedPreviousReleaseID != "" && !validOperationsID(plan.ExpectedPreviousReleaseID) {
-		return nil, fmt.Errorf("promotion plan has an invalid previous release")
+	if err := validatePromotionPlan(&plan); err != nil {
+		return nil, err
 	}
 	root, err := filepath.Abs(evidenceRoot)
 	if err != nil {
@@ -91,6 +85,9 @@ func PromoteRelease(candidateCatalogPath, bundleManifestPath, bundleSignaturePat
 		stable.MirrorBundles[index].FreshUntil = bundle.manifest.FreshUntil
 		stable.MirrorBundles[index].AdvisoryWatermark = bundle.manifest.AdvisoryWatermark
 	}
+	for index := range stable.EgressPolicies {
+		stable.EgressPolicies[index].Channel = "stable"
+	}
 	if err := stable.Validate(); err != nil {
 		return nil, fmt.Errorf("promoted catalog is invalid: %w", err)
 	}
@@ -126,6 +123,26 @@ func PromoteRelease(candidateCatalogPath, bundleManifestPath, bundleSignaturePat
 	}
 	envelope := &SignedReleaseAlias{SchemaVersion: 1, Alias: *alias, Signature: *aliasSignature}
 	return &PromotionResult{Catalog: stable, Receipt: receipt, ReceiptSignature: receiptSignature, Alias: alias, AliasSignature: aliasSignature, AliasEnvelope: envelope}, nil
+}
+
+func validatePromotionPlan(plan *PromotionPlan) error {
+	legacyBundle := len(plan.Bundles) == 0
+	if plan.SchemaVersion != 1 ||
+		!validOperationsID(plan.ReleaseID) ||
+		!validOperationsID(plan.Alias) ||
+		plan.Alias == plan.ReleaseID ||
+		!prefixedSHA256Pattern.MatchString(plan.CandidateCatalogDigest) ||
+		(legacyBundle && !prefixedSHA256Pattern.MatchString(plan.BundleManifestDigest)) ||
+		plan.MinimumFreshHours < 1 ||
+		plan.MinimumFreshHours > 24*30 ||
+		len(plan.Evidence) == 0 {
+		return fmt.Errorf("promotion plan is incomplete")
+	}
+	if plan.ExpectedPreviousReleaseID != "" &&
+		!validOperationsID(plan.ExpectedPreviousReleaseID) {
+		return fmt.Errorf("promotion plan has an invalid previous release")
+	}
+	return nil
 }
 
 func validatePromotionCatalog(candidate *catalog.Catalog, plan PromotionPlan, bundles map[string]verifiedPromotionBundle) error {

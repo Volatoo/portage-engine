@@ -12,6 +12,8 @@ services:
     environment:
       CONTROL_PLANE_ID: compose-secondary
       SERVER_PORT: "8082"
+      EXECUTOR_ZONES: ${PORTAGE_EXECUTOR_ZONES_SECONDARY:-default}
+      EXECUTOR_CAPABILITIES: ${PORTAGE_EXECUTOR_CAPABILITIES_SECONDARY:-}
     ports: !override
       - "127.0.0.1:${PORTAGE_SERVER_SECONDARY_PORT:-18082}:8082"
     healthcheck:

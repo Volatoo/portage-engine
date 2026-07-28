@@ -12,21 +12,23 @@ import (
 )
 
 type imageFactoryProfileView struct {
-	ID          string   `json:"id"`
-	Arch        string   `json:"arch"`
-	ProfilePath string   `json:"profile_path"`
-	BinhostPath string   `json:"binhost_path"`
-	ImageID     string   `json:"image_id"`
-	Channel     string   `json:"channel"`
-	Default     bool     `json:"default"`
-	PackageSets []string `json:"package_sets,omitempty"`
+	ID             string   `json:"id"`
+	Arch           string   `json:"arch"`
+	ProfilePath    string   `json:"profile_path"`
+	BinhostPath    string   `json:"binhost_path"`
+	ImageID        string   `json:"image_id"`
+	EgressPolicyID string   `json:"egress_policy_id"`
+	Channel        string   `json:"channel"`
+	Default        bool     `json:"default"`
+	PackageSets    []string `json:"package_sets,omitempty"`
 }
 
 type imageFactoryCatalogView struct {
-	Version       int                       `json:"version"`
-	Profiles      []imageFactoryProfileView `json:"profiles"`
-	Images        []catalog.ImageManifest   `json:"images"`
-	MirrorBundles []catalog.MirrorBundle    `json:"mirror_bundles"`
+	Version        int                       `json:"version"`
+	Profiles       []imageFactoryProfileView `json:"profiles"`
+	Images         []catalog.ImageManifest   `json:"images"`
+	MirrorBundles  []catalog.MirrorBundle    `json:"mirror_bundles"`
+	EgressPolicies []catalog.EgressPolicy    `json:"egress_policies"`
 }
 
 type imageFactoryStatusResponse struct {
@@ -44,12 +46,13 @@ func imageFactoryCatalog(c *catalog.Catalog) imageFactoryCatalogView {
 	view.Version = c.Version
 	view.Images = append([]catalog.ImageManifest(nil), c.Images...)
 	view.MirrorBundles = append([]catalog.MirrorBundle(nil), c.MirrorBundles...)
+	view.EgressPolicies = append([]catalog.EgressPolicy(nil), c.EgressPolicies...)
 	images := make(map[string]catalog.ImageManifest, len(c.Images))
 	for _, image := range c.Images {
 		images[image.ID] = image
 	}
 	for _, profile := range c.Profiles {
-		item := imageFactoryProfileView{ID: profile.ID, Arch: profile.Arch, ProfilePath: profile.ProfilePath, BinhostPath: profile.BinhostPath, ImageID: profile.ImageID, Channel: profile.Channel, Default: profile.Default}
+		item := imageFactoryProfileView{ID: profile.ID, Arch: profile.Arch, ProfilePath: profile.ProfilePath, BinhostPath: profile.BinhostPath, ImageID: profile.ImageID, EgressPolicyID: profile.EgressPolicyID, Channel: profile.Channel, Default: profile.Default}
 		item.PackageSets = append([]string(nil), images[profile.ImageID].PackageSetIDs...)
 		view.Profiles = append(view.Profiles, item)
 	}

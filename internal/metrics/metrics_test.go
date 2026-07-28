@@ -5,10 +5,62 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 )
+
+func TestPrometheusSchedulerSnapshot(t *testing.T) {
+	m := New(&Config{Enabled: true})
+	m.SetSchedulerProvider(func() SchedulerSnapshot {
+		return SchedulerSnapshot{
+			QueuedTasks: 7, StarvedProjects: 2,
+			WorkerDecisions: 9, WorkerMultiCandidate: 4,
+			TargetSamples30d: 12, TargetSuccesses30d: 10,
+			TargetFailures30d: 2, TargetSLOBreaches30d: 1,
+			TargetReservedCost30d: 9000, TargetChargedCost30d: 7500,
+			AutoscaleActiveSlots: 4, AutoscaleDesiredSlots: 6,
+			AutoscalePools: 3, AutoscaleBlockedPools: 1,
+			CapacityOpenActions: 2, CapacityProvisioning: 1,
+			CapacityActive: 4, CapacityDraining: 1, CapacityDeleting: 1,
+		}
+	})
+	request := httptest.NewRequest(
+		http.MethodGet, "/metrics/prometheus", nil,
+	)
+	response := httptest.NewRecorder()
+	m.PrometheusHandler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("prometheus status=%d", response.Code)
+	}
+	body := response.Body.String()
+	for _, expected := range []string{
+		"portage_scheduler_queued_tasks 7",
+		"portage_scheduler_fair_starved_projects 2",
+		"portage_scheduler_worker_decisions_last_hour 9",
+		"portage_scheduler_worker_multi_candidate_last_hour 4",
+		"portage_monitor_target_samples_30d 12",
+		"portage_monitor_target_successes_30d 10",
+		"portage_monitor_target_failures_30d 2",
+		"portage_monitor_target_slo_breaches_30d 1",
+		"portage_monitor_target_reserved_cost_microunits_30d 9000",
+		"portage_monitor_target_charged_cost_microunits_30d 7500",
+		"portage_scheduler_autoscale_active_slots 4",
+		"portage_scheduler_autoscale_desired_slots 6",
+		"portage_scheduler_autoscale_pools 3",
+		"portage_scheduler_autoscale_blocked_pools 1",
+		"portage_capacity_actuator_open_actions 2",
+		"portage_capacity_instances_provisioning 1",
+		"portage_capacity_instances_active 4",
+		"portage_capacity_instances_draining 1",
+		"portage_capacity_instances_deleting 1",
+	} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("prometheus body missing %q", expected)
+		}
+	}
+}
 
 func TestNew(t *testing.T) {
 	tests := []struct {

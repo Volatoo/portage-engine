@@ -103,7 +103,7 @@ func prefetchVerificationGeneration(baseURL, pkgDir string, artifacts []Verifica
 	if err := downloadVerificationFile(client, baseURL, "Packages", indexPath, maxVerificationIndexBytes, ""); err != nil {
 		return err
 	}
-	index, err := os.ReadFile(indexPath)
+	index, err := os.ReadFile(indexPath) // #nosec G304 -- indexPath is the fixed Packages file beneath the internally-created verify PKGDIR.
 	if err != nil {
 		return err
 	}
@@ -145,7 +145,7 @@ func downloadVerificationFile(client *http.Client, baseURL, relativePath, destin
 	if expectedDigest != "" && response.ContentLength >= 0 && response.ContentLength != expectedSize {
 		return fmt.Errorf("download %q size header is %d, expected %d", relativePath, response.ContentLength, expectedSize)
 	}
-	if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil { // #nosec G301 -- the isolated verify root must be traversable by Portage.
 		return err
 	}
 	temp, err := os.CreateTemp(filepath.Dir(destination), "."+filepath.Base(destination)+".download-*")
@@ -177,7 +177,7 @@ func downloadVerificationFile(client *http.Client, baseURL, relativePath, destin
 			return fmt.Errorf("download %q proof mismatch: size=%d sha256=%s", relativePath, size, digest)
 		}
 	}
-	if err := os.Chmod(tempPath, 0o644); err != nil {
+	if err := os.Chmod(tempPath, 0o644); err != nil { // #nosec G302 -- this is a public signing key copied into the verification binhost.
 		return err
 	}
 	if err := os.Rename(tempPath, destination); err != nil {
@@ -207,7 +207,7 @@ func verificationObjectURL(baseURL, relativePath string) (string, error) {
 func verifyLocalArtifactSet(pkgDir string, artifacts []VerificationArtifact) error {
 	for _, artifact := range artifacts {
 		file := filepath.Join(pkgDir, filepath.FromSlash(artifact.RelativePath))
-		handle, err := os.Open(file)
+		handle, err := os.Open(file) // #nosec G304 -- artifact.RelativePath is validated and confined to the temporary PKGDIR.
 		if err != nil {
 			return err
 		}
@@ -249,7 +249,7 @@ func parsePrimaryFingerprints(colonOutput []byte) []string {
 }
 
 func assertVerifierKeyring(gpgHome, expectedFingerprint string) error {
-	command := exec.Command("gpg", "--homedir", gpgHome, "--batch", "--with-colons", "--list-keys")
+	command := exec.Command("gpg", "--homedir", gpgHome, "--batch", "--with-colons", "--list-keys") // #nosec G204 -- fixed gpg executable and isolated internally-created keyring.
 	output, err := command.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("list verifier keyring: %w: %s", err, strings.TrimSpace(string(output)))

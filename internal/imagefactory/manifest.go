@@ -292,19 +292,19 @@ func GenerateManifest(commonPath, planPath, lockPath, packerManifestPath string,
 func validatePackerResult(data map[string]any, plan *BuildPlan, planDigest, lockDigest, commonDigest, sourceDigest, packageSetCatalogDigest string) (string, error) {
 	builds, ok := data["builds"].([]any)
 	if !ok || len(builds) != 1 {
-		return "", fmt.Errorf("Packer manifest must contain exactly one build")
+		return "", fmt.Errorf("packer manifest must contain exactly one build")
 	}
 	build, ok := builds[0].(map[string]any)
 	if !ok {
-		return "", fmt.Errorf("Packer manifest build has an invalid shape")
+		return "", fmt.Errorf("packer manifest build has an invalid shape")
 	}
 	artifactID, ok := build["artifact_id"].(string)
 	if !ok || artifactID == "" {
-		return "", fmt.Errorf("Packer manifest build has no artifact_id")
+		return "", fmt.Errorf("packer manifest build has no artifact_id")
 	}
 	customData, ok := build["custom_data"].(map[string]any)
 	if !ok {
-		return "", fmt.Errorf("Packer manifest build has no custom_data")
+		return "", fmt.Errorf("packer manifest build has no custom_data")
 	}
 	repositoryNames := make([]string, 0, len(plan.Repositories))
 	for name := range plan.Repositories {
@@ -344,7 +344,7 @@ func validatePackerResult(data map[string]any, plan *BuildPlan, planDigest, lock
 	for key, value := range expected {
 		actual, ok := customData[key].(string)
 		if !ok || actual != value {
-			return "", fmt.Errorf("Packer manifest custom_data %q does not match image spec", key)
+			return "", fmt.Errorf("packer manifest custom_data %q does not match image spec", key)
 		}
 	}
 	return artifactID, nil

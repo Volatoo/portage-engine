@@ -137,7 +137,9 @@ Flags:
 | Flag | Meaning |
 | --- | --- |
 | `-server` | Server URL (default `http://localhost:8080`) |
-| `-api-key` | API key, or set `PORTAGE_ENGINE_API_KEY` |
+| `-token` | Portage Engine federated session token, or set `PORTAGE_ENGINE_TOKEN` |
+| `-project` | Authorized project name/UUID, or set `PORTAGE_ENGINE_PROJECT` |
+| `-api-key` | Legacy administrator key, or set `PORTAGE_ENGINE_API_KEY` |
 | `-package` | Package atom, e.g. `dev-lang/python` |
 | `-version` | Package version (optional) |
 | `-use` | USE flags, comma-separated |
@@ -226,21 +228,93 @@ outside the untrusted build root.
 
 ---
 
-## 3. Authentication
+## 3. Identity and projects
 
-When the server is started with `API_KEY` set, protected `/api/v1/*` requests,
-including the public-key endpoint, need it. The read-only binhost tree and
-`GET /api/v1/binhosts` inventory remain public because `emerge` and initial
-client configuration cannot present an API key. HTTPS protects transport;
-the independently verified package signature protects artifact authenticity.
+The server supports three rollout modes:
 
-Pass the key to the client via `-api-key` or the `PORTAGE_ENGINE_API_KEY`
-environment variable:
+| `AUTH_MODE` | Accepted identity | Intended use |
+| --- | --- | --- |
+| `legacy` | Administrator `API_KEY` | Compatibility/trusted bring-up |
+| `hybrid` | OIDC users plus administrator `API_KEY` | Migration and break-glass |
+| `oidc` | OIDC only | Normal identity path |
+
+Upstream OIDC or GitHub credentials are exchanged once for an opaque Portage
+Engine session token. OIDC credentials are verified against the configured exact issuer, signature,
+expiry and audience. Authorization comes only from PostgreSQL memberships;
+username, email, groups and token role claims are not authorization inputs.
+Project roles are `viewer`, `developer`, `maintainer` and `owner`. A developer
+can submit builds; a maintainer can cancel/retry/delete them; an owner manages
+members. System-administrator endpoints such as cloud settings, workers and
+the image factory remain separate from project roles.
+
+Ask the API which projects the current subject can use:
 
 ```bash
-export PORTAGE_ENGINE_API_KEY=$(cat /path/to/key)
-./bin/portage-client build -server=https://portage.example.org -package=app-misc/hello
+export PORTAGE_ENGINE_TOKEN=$(idp-specific-command)
+./bin/portage-client whoami \
+  -server=https://portage.example.org \
+  -token="${PORTAGE_ENGINE_TOKEN}"
 ```
+
+Select a project explicitly when the identity has more than one:
+
+```bash
+export PORTAGE_ENGINE_PROJECT=gentoo-desktop
+./bin/portage-client build \
+  -server=https://portage.example.org \
+  -package=app-misc/hello
+```
+
+The read-only binhost tree and `GET /api/v1/binhosts` inventory remain public
+because `emerge` and initial client configuration cannot present an identity.
+The legacy key can still be supplied with `-api-key` or
+`PORTAGE_ENGINE_API_KEY`; it is a system-administrator credential, not a
+per-user token.
+
+The Dashboard uses OIDC Authorization Code + PKCE and stores an encrypted,
+HttpOnly session containing the verified ID token. Its project selector sends
+`X-Project-ID` to the API. An HTTP issuer/redirect can be enabled explicitly
+for an isolated trusted LAN, but both the browser token and API bearer token
+are observable on that network; use HTTPS outside that boundary.
+
+Inspect the selected project's admission limits and live PostgreSQL usage:
+
+```bash
+./bin/portage-client project-policy \
+  -server=https://portage.example.org \
+  -token="${PORTAGE_ENGINE_TOKEN}" \
+  -project="${PORTAGE_ENGINE_PROJECT}"
+```
+
+Owners use `project-policy-set` with the current policy version to change
+queued, simultaneously active, UTC-daily, vCPU, memory and disk caps or
+suspend a project:
+
+```bash
+./bin/portage-client project-policy-set \
+  -server=https://portage.example.org \
+  -token="${PORTAGE_ENGINE_TOKEN}" \
+  -project="${PORTAGE_ENGINE_PROJECT}" \
+  -version=1 -max-queued=100 -max-active=4 -max-daily=500 \
+  -priority-weight=100 -starvation-seconds=300 \
+  -max-vcpus=32 -max-memory-mib=131072 -max-disk-gib=1000 \
+  -max-artifact-bytes=34359738368 \
+  -max-claimed=4 -max-provision=2 -max-build=4 \
+  -max-verify=2 -max-publish=1
+```
+
+Suspension stops new submissions, retries and scheduler claims; it does not
+terminate an already active build. Active attempts reserve the selected
+resource class in PostgreSQL and expose enforced
+`claimed/provision/build/verify/publish` phase usage and limits through the
+same policy API. At a full phase checkpoint, the fenced attempt waits and
+renews its lease; it is not marked failed and cannot oversubscribe the final
+slot across control-plane replicas.
+
+`priority-weight` is the project's relative scheduler share.
+`starvation-seconds` promotes an eligible project to oldest-first scheduling
+after the configured wait. They do not bypass hard resource, phase, capability,
+or suspension policy.
 
 ---
 

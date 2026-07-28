@@ -41,7 +41,7 @@ func (g GPG) SignGPKG(path string) error {
 		return err
 	}
 
-	var output []gpkgMember
+	output := make([]gpkgMember, 0, len(members)*2+2)
 	manifestRecords := make([]string, 0, len(members)*2)
 	for _, member := range members {
 		base := filepath.Base(member.header.Name)
@@ -369,7 +369,7 @@ func (g GPG) sign(data []byte, detached bool) ([]byte, error) {
 		"--armor", "--digest-algo", "SHA512", "--local-user", g.KeyID,
 		mode, "--output", "-",
 	}
-	command := exec.Command("gpg", args...)
+	command := exec.Command("gpg", args...) // #nosec G204 -- fixed gpg executable with an argument vector, not a shell.
 	command.Stdin = bytes.NewReader(data)
 	var stdout, stderr bytes.Buffer
 	command.Stdout, command.Stderr = &stdout, &stderr
@@ -396,7 +396,7 @@ func (g GPG) verifyDetached(data, signature []byte) error {
 	if err := signatureFile.Close(); err != nil {
 		return err
 	}
-	command := exec.Command("gpg", "--homedir", g.Home, "--batch", "--status-fd", "1", "--verify", name, "-")
+	command := exec.Command("gpg", "--homedir", g.Home, "--batch", "--status-fd", "1", "--verify", name, "-") // #nosec G204 -- fixed gpg executable with separate arguments.
 	command.Stdin = bytes.NewReader(data)
 	var status, stderr bytes.Buffer
 	command.Stdout, command.Stderr = &status, &stderr
@@ -410,7 +410,7 @@ func (g GPG) verifyDetached(data, signature []byte) error {
 }
 
 func (g GPG) verifyClearSigned(data []byte) ([]byte, error) {
-	command := exec.Command("gpg", "--homedir", g.Home, "--batch", "--status-fd", "2", "--decrypt")
+	command := exec.Command("gpg", "--homedir", g.Home, "--batch", "--status-fd", "2", "--decrypt") // #nosec G204 -- fixed gpg executable with separate arguments.
 	command.Stdin = bytes.NewReader(data)
 	var plain, status bytes.Buffer
 	command.Stdout, command.Stderr = &plain, &status

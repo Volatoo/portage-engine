@@ -1,0 +1,61 @@
+{
+  "owner": "capacity-actuator-a",
+  "lease_seconds": 90,
+  "poll_seconds": 10,
+  "operation_limit_minutes": 40,
+  "idle_seconds": 5,
+  "pve": {
+    "endpoint": "https://pve.example.internal:8006",
+    "insecure": false,
+    "node": "auto",
+    "nodes": ["pve01", "pve02"],
+    "storage": "ceph-vm",
+    "network": "vmbr0",
+    "workspace_dir": "/var/lib/portage-engine/capacity-terraform",
+    "templates": [
+      {
+        "image_id": "pe/amd64/base-g1",
+        "image_generation": "g1",
+        "template": "pe-gentoo-amd64-persistent-executor-g1",
+        "bootstrap_contract": "pve-dmi-v1",
+        "spec": {
+          "cores": "4",
+          "memory_mb": "8192",
+          "disk_size_gb": "50",
+          "bios": "ovmf",
+          "machine": "q35",
+          "disk_type": "scsi",
+          "ip_config": "dhcp",
+          "agent": "true"
+        },
+        "egress_policy": {
+          "id": "egress/persistent-executor-example",
+          "mode": "enforce",
+          "dns_resolvers": ["192.0.2.53"],
+          "rules": [
+            {
+              "id": "dns",
+              "hosts": ["dns.example.internal"],
+              "cidrs": ["192.0.2.53/32"],
+              "protocol": "udp",
+              "ports": [53]
+            },
+            {
+              "id": "control-data",
+              "hosts": [
+                "postgres.example.internal",
+                "worker-gateway.example.internal",
+                "nas.example.internal",
+                "pve.example.internal"
+              ],
+              "cidrs": ["192.0.2.10/32", "192.0.2.20/32", "192.0.2.30/32"],
+              "protocol": "tcp",
+              "ports": [443, 8006, 9443, 25432]
+            }
+          ],
+          "channel": "candidate"
+        }
+      }
+    ]
+  }
+}

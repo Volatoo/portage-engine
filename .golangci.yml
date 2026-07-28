@@ -9,12 +9,12 @@ linters:
     cyclop:
       # Dispatchers and validation-heavy supply-chain code need some branching,
       # but values above this point should be split into auditable stages.
-      max-complexity: 45
+      max-complexity: 40
       package-average: 0.0
     gocyclo:
       # The second metric catches boolean-heavy validators that cyclop weighs
-      # differently. This gate targets only genuinely exceptional functions.
-      min-complexity: 50
+      # differently. Report functions above the shared complexity budget.
+      min-complexity: 41
     gosec:
       excludes:
         # Executing reviewed command arrays and reading operator-selected,

@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/http"
 	"time"
+
+	"github.com/slchris/portage-engine/internal/iam"
 )
 
 func (s *Server) handleCacheStatus(w http.ResponseWriter, r *http.Request) {
@@ -45,6 +47,11 @@ func (s *Server) handleJobEvents(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "live events require Redis; poll build status as fallback", http.StatusServiceUnavailable)
 		return
 	}
+	_, project, err := s.authorizeProject(r, iam.RoleViewer)
+	if err != nil {
+		writeIAMError(w, http.StatusForbidden, err.Error())
+		return
+	}
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "streaming is unavailable", http.StatusInternalServerError)
@@ -54,10 +61,23 @@ func (s *Server) handleJobEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache, no-transform")
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
-	_, _ = fmt.Fprint(w, "event: ready\ndata: {\"transport\":\"redis-pubsub\"}\n\n")
+	ready, _ := json.Marshal(map[string]string{
+		"transport": "redis-pubsub", "project_id": project.ProjectID,
+	})
+	_, _ = fmt.Fprintf(w, "event: ready\ndata: %s\n\n", ready)
 	flusher.Flush()
 
-	err := s.cache.StreamJobEvents(r.Context(), func(payload string) error {
+	err = s.cache.StreamJobEvents(r.Context(), func(payload string) error {
+		var event struct {
+			JobID string `json:"job_id"`
+		}
+		if json.Unmarshal([]byte(payload), &event) != nil || event.JobID == "" {
+			return nil
+		}
+		status, statusErr := s.builder.GetStatus(event.JobID)
+		if statusErr != nil || (project.ProjectID != "" && status.ProjectID != project.ProjectID) {
+			return nil
+		}
 		if _, err := fmt.Fprintf(w, "event: job\ndata: %s\n\n", payload); err != nil {
 			return err
 		}

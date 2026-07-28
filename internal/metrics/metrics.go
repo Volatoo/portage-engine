@@ -22,13 +22,41 @@ type Config struct {
 	Password string
 }
 
+type SchedulerSnapshot struct {
+	QueuedTasks           int64
+	UnschedulableTasks    int64
+	RunningTasks          int64
+	EligibleProjects      int64
+	StarvedProjects       int64
+	MaxQueueWaitSeconds   int64
+	WorkerDecisions       int64
+	WorkerMultiCandidate  int64
+	TargetSamples30d      int64
+	TargetSuccesses30d    int64
+	TargetFailures30d     int64
+	TargetSLOBreaches30d  int64
+	TargetReservedCost30d int64
+	TargetChargedCost30d  int64
+	AutoscaleActiveSlots  int64
+	AutoscaleDesiredSlots int64
+	AutoscaleBacklog      int64
+	AutoscalePools        int64
+	AutoscaleBlockedPools int64
+	CapacityOpenActions   int64
+	CapacityProvisioning  int64
+	CapacityActive        int64
+	CapacityDraining      int64
+	CapacityDeleting      int64
+}
+
 // Metrics collects various system metrics.
 type Metrics struct {
 	// enabled is accessed concurrently by metric recorders and Handler,
 	// so it is stored as an atomic to keep reads/writes race-free.
-	enabled  atomic.Bool
-	password string
-	mu       sync.RWMutex
+	enabled           atomic.Bool
+	password          string
+	mu                sync.RWMutex
+	schedulerProvider func() SchedulerSnapshot
 
 	// Build metrics
 	buildsTotal     *expvar.Int
@@ -58,6 +86,14 @@ type Metrics struct {
 	// System metrics
 	goroutines *expvar.Int
 	startTime  time.Time
+}
+
+// SetSchedulerProvider installs a low-cardinality scrape-time snapshot. The
+// callback must not mutate scheduler state or expose project/package labels.
+func (m *Metrics) SetSchedulerProvider(provider func() SchedulerSnapshot) {
+	m.mu.Lock()
+	m.schedulerProvider = provider
+	m.mu.Unlock()
 }
 
 // New creates a new Metrics instance.
@@ -346,6 +382,7 @@ func (m *Metrics) PrometheusHandler() http.Handler {
 		// concurrently (same fix as Handler()).
 		m.mu.RLock()
 		expectedPassword := m.password
+		schedulerProvider := m.schedulerProvider
 		m.mu.RUnlock()
 
 		// Check basic auth if password is set
@@ -432,7 +469,52 @@ func (m *Metrics) PrometheusHandler() http.Handler {
 		_, _ = fmt.Fprintf(w, "# HELP portage_uptime_seconds Server uptime in seconds.\n")
 		_, _ = fmt.Fprintf(w, "# TYPE portage_uptime_seconds gauge\n")
 		_, _ = fmt.Fprintf(w, "portage_uptime_seconds %.2f\n", time.Since(m.startTime).Seconds())
+
+		if schedulerProvider != nil {
+			scheduler := schedulerProvider()
+			writeSchedulerPrometheus(w, scheduler)
+		}
 	})
+}
+
+func writeSchedulerPrometheus(
+	w http.ResponseWriter,
+	snapshot SchedulerSnapshot,
+) {
+	gauges := []struct {
+		name, help string
+		value      int64
+	}{
+		{"portage_scheduler_queued_tasks", "Queued durable scheduler tasks.", snapshot.QueuedTasks},
+		{"portage_scheduler_unschedulable_tasks", "Queued tasks without a matching active executor.", snapshot.UnschedulableTasks},
+		{"portage_scheduler_running_tasks", "Running durable scheduler tasks.", snapshot.RunningTasks},
+		{"portage_scheduler_fair_eligible_projects", "Projects currently eligible for fair scheduling.", snapshot.EligibleProjects},
+		{"portage_scheduler_fair_starved_projects", "Projects promoted by the anti-starvation threshold.", snapshot.StarvedProjects},
+		{"portage_scheduler_fair_max_wait_seconds", "Largest queue wait observed at a fair dispatch.", snapshot.MaxQueueWaitSeconds},
+		{"portage_scheduler_worker_decisions_last_hour", "Worker soft-scoring decisions recorded during the last hour.", snapshot.WorkerDecisions},
+		{"portage_scheduler_worker_multi_candidate_last_hour", "Worker decisions with more than one eligible candidate during the last hour.", snapshot.WorkerMultiCandidate},
+		{"portage_monitor_target_samples_30d", "Terminal target samples retained during the last 30 days.", snapshot.TargetSamples30d},
+		{"portage_monitor_target_successes_30d", "Successful target outcomes during the last 30 days.", snapshot.TargetSuccesses30d},
+		{"portage_monitor_target_failures_30d", "Failed target outcomes during the last 30 days.", snapshot.TargetFailures30d},
+		{"portage_monitor_target_slo_breaches_30d", "Targets with enough samples that are below the operator SLO during the last 30 days.", snapshot.TargetSLOBreaches30d},
+		{"portage_monitor_target_reserved_cost_microunits_30d", "Reserved target cloud cost during the last 30 days.", snapshot.TargetReservedCost30d},
+		{"portage_monitor_target_charged_cost_microunits_30d", "Settled target cloud cost during the last 30 days.", snapshot.TargetChargedCost30d},
+		{"portage_scheduler_autoscale_active_slots", "Active phase-executor slots observed by autoscaling.", snapshot.AutoscaleActiveSlots},
+		{"portage_scheduler_autoscale_desired_slots", "Observe-only desired phase-executor slots.", snapshot.AutoscaleDesiredSlots},
+		{"portage_scheduler_autoscale_backlog", "Backlog observed by autoscaling.", snapshot.AutoscaleBacklog},
+		{"portage_scheduler_autoscale_pools", "Catalog capacity pools observed by autoscaling.", snapshot.AutoscalePools},
+		{"portage_scheduler_autoscale_blocked_pools", "Capacity pools with unschedulable backlog.", snapshot.AutoscaleBlockedPools},
+		{"portage_capacity_actuator_open_actions", "Open fenced capacity actions.", snapshot.CapacityOpenActions},
+		{"portage_capacity_instances_provisioning", "Actuator-owned instances awaiting executor heartbeat.", snapshot.CapacityProvisioning},
+		{"portage_capacity_instances_active", "Actuator-owned active persistent executors.", snapshot.CapacityActive},
+		{"portage_capacity_instances_draining", "Actuator-owned persistent executors draining live work.", snapshot.CapacityDraining},
+		{"portage_capacity_instances_deleting", "Actuator-owned persistent executors undergoing exact provider deletion.", snapshot.CapacityDeleting},
+	}
+	for _, gauge := range gauges {
+		_, _ = fmt.Fprintf(w, "# HELP %s %s\n", gauge.name, gauge.help)
+		_, _ = fmt.Fprintf(w, "# TYPE %s gauge\n", gauge.name)
+		_, _ = fmt.Fprintf(w, "%s %d\n", gauge.name, gauge.value)
+	}
 }
 
 // GetSnapshot returns a snapshot of current metrics.

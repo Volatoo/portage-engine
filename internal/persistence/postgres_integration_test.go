@@ -2,6 +2,9 @@ package persistence_test
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
@@ -16,12 +19,22 @@ import (
 
 	"github.com/slchris/portage-engine/internal/builder"
 	"github.com/slchris/portage-engine/internal/catalog"
+	"github.com/slchris/portage-engine/internal/iam"
 	"github.com/slchris/portage-engine/internal/imagefactory"
 	"github.com/slchris/portage-engine/internal/migrations"
 	"github.com/slchris/portage-engine/internal/persistence"
 	"github.com/slchris/portage-engine/internal/signing"
+	"github.com/slchris/portage-engine/internal/workergateway"
 	"github.com/slchris/portage-engine/pkg/config"
 )
+
+var legacyExecutorCapabilities = []string{
+	"context:legacy",
+	"phase:provision",
+	"phase:build",
+	"phase:verify",
+	"phase:publish",
+}
 
 func TestPostgresMigrationTransactionAndCompatibility(t *testing.T) {
 	adminDSN := os.Getenv("PORTAGE_TEST_DATABASE_URL")
@@ -50,7 +63,7 @@ func TestPostgresMigrationTransactionAndCompatibility(t *testing.T) {
 		}
 	}()
 
-	testDSN, err := withQueryValue(adminDSN, "search_path", schema)
+	testDSN, err := withSearchPath(adminDSN, schema)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,6 +96,454 @@ func TestPostgresMigrationTransactionAndCompatibility(t *testing.T) {
 	defer db.Close()
 	if health := db.Check(ctx); !health.OK || health.SchemaVersion != persistence.MaxSchemaVersion {
 		t.Fatalf("health after migration = %+v", health)
+	}
+
+	iamRepo := persistence.NewIAMRepository(db)
+	alice, err := iamRepo.ObserveSubject(ctx, iam.ExternalIdentity{
+		Issuer: "https://issuer.example.test", Subject: "alice",
+		PreferredUsername: "alice",
+	}, false)
+	if err != nil {
+		t.Fatalf("observe IAM subject: %v", err)
+	}
+	sessionNow := time.Now().UTC()
+	rawPlatformSession := "pe1_postgres-integration-session"
+	platformDigest := sha256.Sum256([]byte(rawPlatformSession))
+	sessionIdentity := iam.ExternalIdentity{
+		Issuer: alice.Issuer, Subject: alice.Subject,
+		TokenHash:         hex.EncodeToString(platformDigest[:]),
+		ProviderSessionID: "provider-session-alice",
+		ProviderTokenID:   "token-alice-1",
+		IssuedAt:          sessionNow.Add(-time.Minute),
+		AuthenticatedAt:   sessionNow.Add(-2 * time.Minute),
+		ExpiresAt:         sessionNow.Add(time.Hour),
+		ACR:               "urn:test:mfa", AMR: []string{"pwd", "otp"},
+	}
+	alice, err = iamRepo.AuthorizeSession(
+		ctx, alice, sessionIdentity,
+		persistence.IAMSessionPolicy{
+			IdleTimeout: time.Hour, MaxLifetime: 12 * time.Hour,
+		},
+	)
+	if err != nil || alice.SessionID == "" || alice.ACR != "urn:test:mfa" ||
+		len(alice.AMR) != 2 {
+		t.Fatalf("authorize IAM session = %+v, %v", alice, err)
+	}
+	if platformPrincipal, err := iamRepo.AuthorizePlatformSession(
+		ctx, rawPlatformSession,
+		persistence.IAMSessionPolicy{
+			IdleTimeout: time.Hour, MaxLifetime: 12 * time.Hour,
+		},
+	); err != nil || platformPrincipal.SubjectID != alice.SubjectID ||
+		platformPrincipal.Authentication != "federated-session" {
+		t.Fatalf("authorize platform session = %+v, %v", platformPrincipal, err)
+	}
+	expiredIdentity := sessionIdentity
+	expiredIdentity.TokenHash = strings.Repeat("d", 64)
+	expiredIdentity.IssuedAt = sessionNow.Add(-2 * time.Hour)
+	expiredIdentity.ExpiresAt = sessionNow.Add(-time.Hour)
+	if _, err := iamRepo.AuthorizeSession(
+		ctx, alice, expiredIdentity,
+		persistence.IAMSessionPolicy{
+			IdleTimeout: time.Hour, MaxLifetime: 12 * time.Hour,
+		},
+	); err == nil || !strings.Contains(err.Error(), "lifecycle policy") {
+		t.Fatalf("expired new IAM session was accepted: %v", err)
+	}
+	overAgeIdentity := sessionIdentity
+	overAgeIdentity.TokenHash = strings.Repeat("e", 64)
+	overAgeIdentity.IssuedAt = sessionNow.Add(-13 * time.Hour)
+	overAgeIdentity.ExpiresAt = sessionNow.Add(time.Minute)
+	if _, err := iamRepo.AuthorizeSession(
+		ctx, alice, overAgeIdentity,
+		persistence.IAMSessionPolicy{
+			IdleTimeout: time.Hour, MaxLifetime: 12 * time.Hour,
+		},
+	); err == nil || !strings.Contains(err.Error(), "lifetime exceeds") {
+		t.Fatalf("over-age new IAM session was accepted: %v", err)
+	}
+	sessions, err := iamRepo.ListSessions(ctx, alice.SubjectID)
+	if err != nil || len(sessions) != 1 || sessions[0].ID != alice.SessionID {
+		t.Fatalf("list IAM sessions = %+v, %v", sessions, err)
+	}
+	if _, err := db.Pool().Exec(ctx, `
+		UPDATE iam_sessions
+		SET last_seen_at = clock_timestamp() - interval '2 hours'
+		WHERE id = $1
+	`, alice.SessionID); err != nil {
+		t.Fatalf("age IAM session: %v", err)
+	}
+	if _, err := iamRepo.AuthorizeSession(
+		ctx, alice, sessionIdentity,
+		persistence.IAMSessionPolicy{
+			IdleTimeout: time.Hour, MaxLifetime: 12 * time.Hour,
+		},
+	); err == nil || !strings.Contains(err.Error(), "lifecycle policy") {
+		t.Fatalf("idle-expired IAM session was accepted: %v", err)
+	}
+	if _, err := iamRepo.RevokeSession(
+		ctx, alice, alice.SessionID, "integration-test", false,
+	); err != nil {
+		t.Fatalf("revoke IAM session: %v", err)
+	}
+	if _, err := iamRepo.AuthorizeSession(
+		ctx, alice, sessionIdentity,
+		persistence.IAMSessionPolicy{
+			IdleTimeout: time.Hour, MaxLifetime: 12 * time.Hour,
+		},
+	); err == nil || !strings.Contains(err.Error(), "revoked") {
+		t.Fatalf("revoked IAM session was accepted: %v", err)
+	}
+	secondIdentity := sessionIdentity
+	secondIdentity.TokenHash = strings.Repeat("b", 64)
+	secondIdentity.ProviderTokenID = "token-alice-2"
+	secondIdentity.IssuedAt = sessionNow.Add(-30 * time.Second)
+	secondIdentity.ExpiresAt = sessionNow.Add(time.Hour)
+	alice, err = iamRepo.AuthorizeSession(
+		ctx, alice, secondIdentity,
+		persistence.IAMSessionPolicy{
+			IdleTimeout: time.Hour, MaxLifetime: 12 * time.Hour,
+		},
+	)
+	if err != nil {
+		t.Fatalf("authorize replacement IAM session: %v", err)
+	}
+	logout := iam.LogoutIdentity{
+		Issuer: alice.Issuer, Subject: alice.Subject,
+		ProviderSessionID: secondIdentity.ProviderSessionID,
+		ProviderTokenID:   "logout-integration-1",
+		IssuedAt:          sessionNow, ExpiresAt: sessionNow.Add(5 * time.Minute),
+	}
+	if result, err := iamRepo.ApplyBackchannelLogout(ctx, logout); err != nil ||
+		result.Duplicate || result.RevokedSessions != 1 {
+		t.Fatalf("apply back-channel logout = %+v, %v", result, err)
+	}
+	if result, err := iamRepo.ApplyBackchannelLogout(ctx, logout); err != nil ||
+		!result.Duplicate || result.RevokedSessions != 1 {
+		t.Fatalf("replay back-channel logout = %+v, %v", result, err)
+	}
+	thirdIdentity := sessionIdentity
+	thirdIdentity.TokenHash = strings.Repeat("f", 64)
+	thirdIdentity.ProviderSessionID = "provider-session-alice-2"
+	thirdIdentity.ProviderTokenID = "token-alice-3"
+	thirdIdentity.IssuedAt = sessionNow.Add(-15 * time.Second)
+	thirdIdentity.ExpiresAt = sessionNow.Add(time.Hour)
+	alice, err = iamRepo.AuthorizeSession(
+		ctx, alice, thirdIdentity,
+		persistence.IAMSessionPolicy{
+			IdleTimeout: time.Hour, MaxLifetime: 12 * time.Hour,
+		},
+	)
+	if err != nil {
+		t.Fatalf("authorize post-logout IAM session: %v", err)
+	}
+	if count, err := iamRepo.RevokeAllSessions(
+		ctx, alice, alice.SubjectID, "integration-revoke-all", false,
+	); err != nil || count != 1 {
+		t.Fatalf("revoke all IAM sessions count=%d err=%v", count, err)
+	}
+	unseenOldIdentity := sessionIdentity
+	unseenOldIdentity.TokenHash = strings.Repeat("c", 64)
+	unseenOldIdentity.ProviderTokenID = "unseen-old-token"
+	unseenOldIdentity.IssuedAt = sessionNow.Add(-10 * time.Minute)
+	unseenOldIdentity.ExpiresAt = sessionNow.Add(time.Hour)
+	if _, err := iamRepo.AuthorizeSession(
+		ctx, alice, unseenOldIdentity,
+		persistence.IAMSessionPolicy{
+			IdleTimeout: time.Hour, MaxLifetime: 12 * time.Hour,
+		},
+	); err == nil || !strings.Contains(err.Error(), "watermark") {
+		t.Fatalf("unseen pre-watermark token was accepted: %v", err)
+	}
+	alpha, err := iamRepo.CreateProject(ctx, "alpha-project", "IAM integration fixture")
+	if err != nil {
+		t.Fatalf("create IAM project: %v", err)
+	}
+	if _, err := iamRepo.PutMembership(
+		ctx, alpha.ID, alice.Issuer, alice.Subject, iam.RoleDeveloper, "",
+	); err != nil {
+		t.Fatalf("grant IAM project membership: %v", err)
+	}
+	if access, err := iamRepo.ResolveProject(ctx, alice, alpha.ID, iam.RoleDeveloper); err != nil ||
+		access.ProjectID != alpha.ID || access.Role != iam.RoleDeveloper {
+		t.Fatalf("resolve authorized project = %+v, %v", access, err)
+	}
+	if _, err := iamRepo.ResolveProject(ctx, alice, alpha.ID, iam.RoleMaintainer); err == nil {
+		t.Fatal("developer unexpectedly received maintainer access")
+	}
+	bob, err := iamRepo.ObserveSubject(ctx, iam.ExternalIdentity{
+		Issuer: "https://issuer.example.test", Subject: "bob",
+	}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := iamRepo.PutMembership(
+		ctx, alpha.ID, bob.Issuer, bob.Subject, iam.RoleOwner, "",
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := iamRepo.DeleteMembership(ctx, alpha.ID, bob.SubjectID); err == nil ||
+		!strings.Contains(err.Error(), "last owner") {
+		t.Fatalf("last project owner removal was not rejected: %v", err)
+	}
+
+	jobRepo := persistence.NewJobRepository(db)
+	now := time.Now().UTC()
+	iamJobID := uuid.NewString()
+	iamRequest := &builder.BuildRequest{
+		ProjectID: alpha.ID, RequestedBy: alice.SubjectID,
+		PackageName: "app-misc/iam-fixture", Arch: "amd64",
+		ResourceClass: "small",
+		MachineSpec: map[string]string{
+			"cores": "2", "memory": "2048", "disk_size": "20",
+		},
+		IdempotencyKey: "iam-project-scope",
+	}
+	iamStatus := &builder.BuildStatus{
+		JobID: iamJobID, ProjectID: alpha.ID, RequestedBy: alice.SubjectID,
+		Status: "queued", PackageName: iamRequest.PackageName, Arch: "amd64",
+		CreatedAt: now, UpdatedAt: now, Request: iamRequest,
+	}
+	if result, err := jobRepo.CreateJob(ctx, iamRequest, iamStatus); err != nil || !result.Created {
+		t.Fatalf("create project-owned job = %+v, %v", result, err)
+	}
+	var storedProject, storedSubject string
+	if err := db.Pool().QueryRow(ctx, `
+		SELECT project_id::text, requested_by_subject_id::text
+		FROM build_jobs WHERE id = $1
+	`, iamJobID).Scan(&storedProject, &storedSubject); err != nil {
+		t.Fatal(err)
+	}
+	if storedProject != alpha.ID || storedSubject != alice.SubjectID {
+		t.Fatalf("durable IAM ownership = project %s subject %s", storedProject, storedSubject)
+	}
+	if err := iamRepo.RecordAudit(ctx, persistence.AuditRecord{
+		Principal: alice, Action: "build.submit", ResourceType: "build_job",
+		ResourceID: iamJobID, ProjectID: alpha.ID, RequestID: "iam-fixture",
+		SourceIP: "127.0.0.1", Outcome: "success",
+		Detail: map[string]any{"package": iamRequest.PackageName},
+	}); err != nil {
+		t.Fatalf("record project audit event: %v", err)
+	}
+	var auditRows int
+	if err := db.Pool().QueryRow(ctx, `
+		SELECT count(*)
+		FROM audit_events
+		WHERE actor_subject_id = $1 AND project_id = $2
+		  AND resource_id = $3 AND outcome = 'success'
+	`, alice.SubjectID, alpha.ID, iamJobID).Scan(&auditRows); err != nil || auditRows != 1 {
+		t.Fatalf("project audit rows=%d err=%v", auditRows, err)
+	}
+
+	policy, err := iamRepo.GetProjectPolicy(ctx, alpha.ID)
+	if err != nil || policy.QueuedJobs != 1 || policy.SubmissionsToday != 1 {
+		t.Fatalf("initial project policy=%+v err=%v", policy, err)
+	}
+	policy, err = iamRepo.UpdateProjectPolicy(ctx, alpha.ID, persistence.ProjectPolicyUpdate{
+		Version: policy.Version, MaxQueuedJobs: 2, MaxActiveJobs: 2,
+		MaxDailySubmissions: 3, MaxActiveVCPUs: 4,
+		MaxActiveMemoryMiB: 8192, MaxActiveDiskGiB: 50,
+	}, alice.SubjectID)
+	if err != nil || policy.Version != 2 || policy.MaxActiveJobs != 2 {
+		t.Fatalf("updated project policy=%+v err=%v", policy, err)
+	}
+	if _, err := iamRepo.UpdateProjectPolicy(ctx, alpha.ID, persistence.ProjectPolicyUpdate{
+		Version: 1, MaxQueuedJobs: 10, MaxActiveJobs: 10, MaxDailySubmissions: 10,
+		MaxActiveVCPUs: 10, MaxActiveMemoryMiB: 16384, MaxActiveDiskGiB: 100,
+	}, alice.SubjectID); err == nil || !strings.Contains(err.Error(), "version conflict") {
+		t.Fatalf("stale policy replacement was not rejected: %v", err)
+	}
+	if duplicate, err := jobRepo.CreateJob(ctx, iamRequest, iamStatus); err != nil || duplicate.Created {
+		t.Fatalf("idempotent admission bypass=%+v err=%v", duplicate, err)
+	}
+	secondRequest := &builder.BuildRequest{
+		ProjectID: alpha.ID, RequestedBy: alice.SubjectID,
+		PackageName: "app-misc/alpha-second", Arch: "amd64",
+		IdempotencyKey: "iam-project-second",
+	}
+	secondStatus := &builder.BuildStatus{
+		JobID: uuid.NewString(), ProjectID: alpha.ID, RequestedBy: alice.SubjectID,
+		Status: "queued", PackageName: secondRequest.PackageName, Arch: "amd64",
+		CreatedAt: now.Add(time.Second), UpdatedAt: now.Add(time.Second), Request: secondRequest,
+	}
+	if result, err := jobRepo.CreateJob(ctx, secondRequest, secondStatus); err != nil || !result.Created {
+		t.Fatalf("second project job=%+v err=%v", result, err)
+	}
+	queuedLimitRequest := &builder.BuildRequest{
+		ProjectID: alpha.ID, RequestedBy: alice.SubjectID,
+		PackageName: "app-misc/queued-limit", Arch: "amd64",
+		IdempotencyKey: "iam-project-queued-limit",
+	}
+	queuedLimitStatus := &builder.BuildStatus{
+		JobID: uuid.NewString(), ProjectID: alpha.ID, RequestedBy: alice.SubjectID,
+		Status: "queued", PackageName: queuedLimitRequest.PackageName, Arch: "amd64",
+		CreatedAt: now.Add(2 * time.Second), UpdatedAt: now.Add(2 * time.Second),
+		Request: queuedLimitRequest,
+	}
+	_, err = jobRepo.CreateJob(ctx, queuedLimitRequest, queuedLimitStatus)
+	admission, ok := builder.AsAdmissionError(err)
+	if !ok || admission.Code != "queued_limit_reached" || admission.Used != 2 {
+		t.Fatalf("queued admission error=%+v raw=%v", admission, err)
+	}
+
+	var (
+		quotaClaims [2]*builder.SchedulerClaim
+		quotaErrors [2]error
+		quotaWG     sync.WaitGroup
+		quotaStart  = make(chan struct{})
+	)
+	for index := range quotaClaims {
+		quotaWG.Add(1)
+		go func(index int) {
+			defer quotaWG.Done()
+			<-quotaStart
+			quotaClaims[index], quotaErrors[index] = jobRepo.ClaimNext(
+				ctx, fmt.Sprintf("iam-quota-worker-%d", index), time.Minute,
+			)
+		}(index)
+	}
+	close(quotaStart)
+	quotaWG.Wait()
+	var firstClaim *builder.SchedulerClaim
+	for index, claim := range quotaClaims {
+		if quotaErrors[index] != nil {
+			t.Fatalf("concurrent quota claim %d: %v", index, quotaErrors[index])
+		}
+		if claim != nil {
+			if firstClaim != nil {
+				t.Fatalf("resource budget oversold: claims=%+v", quotaClaims)
+			}
+			firstClaim = claim
+		}
+	}
+	if firstClaim == nil || firstClaim.Status.ProjectID != alpha.ID {
+		t.Fatalf("concurrent resource quota claims=%+v", quotaClaims)
+	}
+	expectedVCPUs, expectedMemoryMiB, expectedDiskGiB := 4, 8192, 50
+	if firstClaim.Request.ResourceClass == "small" {
+		expectedVCPUs, expectedMemoryMiB, expectedDiskGiB = 2, 2048, 20
+	}
+	policy, err = iamRepo.GetProjectPolicy(ctx, alpha.ID)
+	if err != nil || policy.ReservedVCPUs != expectedVCPUs ||
+		policy.ReservedMemoryMiB != expectedMemoryMiB ||
+		policy.ReservedDiskGiB != expectedDiskGiB || policy.ClaimedReservations != 1 {
+		t.Fatalf("claimed resource usage=%+v err=%v", policy, err)
+	}
+	if blockedClaim, err := jobRepo.ClaimNext(ctx, "iam-quota-worker-b", time.Minute); err != nil || blockedClaim != nil {
+		t.Fatalf("resource cap claim=%+v err=%v", blockedClaim, err)
+	}
+	firstProvisioning := *firstClaim.Status
+	firstProvisioning.Status = "provisioning"
+	firstProvisioning.UpdatedAt = now.Add(250 * time.Millisecond)
+	if err := jobRepo.RecordTransition(ctx, firstClaim.Status, &firstProvisioning); err != nil {
+		t.Fatal(err)
+	}
+	policy, err = iamRepo.GetProjectPolicy(ctx, alpha.ID)
+	if err != nil || policy.ProvisionReservations != 1 || policy.ClaimedReservations != 0 {
+		t.Fatalf("provision resource phase=%+v err=%v", policy, err)
+	}
+	firstFailed := firstProvisioning
+	firstFailed.Status, firstFailed.Error = "failed", "quota test release"
+	firstFailed.UpdatedAt = now.Add(3 * time.Second)
+	if err := jobRepo.RecordTransition(ctx, &firstProvisioning, &firstFailed); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(300 * time.Millisecond)
+	secondClaim, err := jobRepo.ClaimNext(ctx, "iam-quota-worker-b", time.Minute)
+	if err != nil || secondClaim == nil || secondClaim.Status.ProjectID != alpha.ID {
+		t.Fatalf("second quota claim=%+v err=%v", secondClaim, err)
+	}
+	secondFailed := *secondClaim.Status
+	secondFailed.Status, secondFailed.Error = "failed", "quota test release"
+	secondFailed.UpdatedAt = now.Add(4 * time.Second)
+	if err := jobRepo.RecordTransition(ctx, secondClaim.Status, &secondFailed); err != nil {
+		t.Fatal(err)
+	}
+	policy, err = iamRepo.GetProjectPolicy(ctx, alpha.ID)
+	if err != nil || policy.ReservedVCPUs != 0 || policy.ReservedMemoryMiB != 0 ||
+		policy.ReservedDiskGiB != 0 {
+		t.Fatalf("released resource usage=%+v err=%v", policy, err)
+	}
+	if result, err := jobRepo.CreateJob(ctx, queuedLimitRequest, queuedLimitStatus); err != nil || !result.Created {
+		t.Fatalf("third daily submission=%+v err=%v", result, err)
+	}
+	dailyLimitRequest := *queuedLimitRequest
+	dailyLimitRequest.PackageName = "app-misc/daily-limit"
+	dailyLimitRequest.IdempotencyKey = "iam-project-daily-limit"
+	dailyLimitStatus := *queuedLimitStatus
+	dailyLimitStatus.JobID = uuid.NewString()
+	dailyLimitStatus.PackageName = dailyLimitRequest.PackageName
+	dailyLimitStatus.Request = &dailyLimitRequest
+	_, err = jobRepo.CreateJob(ctx, &dailyLimitRequest, &dailyLimitStatus)
+	admission, ok = builder.AsAdmissionError(err)
+	if !ok || admission.Code != "daily_submission_limit_reached" || admission.Used != 3 {
+		t.Fatalf("daily admission error=%+v raw=%v", admission, err)
+	}
+	policy, err = iamRepo.UpdateProjectPolicy(ctx, alpha.ID, persistence.ProjectPolicyUpdate{
+		Version: policy.Version, Suspended: true, MaxQueuedJobs: 2,
+		MaxActiveJobs: 2, MaxDailySubmissions: 3,
+		MaxActiveVCPUs: 4, MaxActiveMemoryMiB: 8192, MaxActiveDiskGiB: 50,
+	}, alice.SubjectID)
+	if err != nil || !policy.Suspended {
+		t.Fatalf("suspend policy=%+v err=%v", policy, err)
+	}
+	if duplicate, err := jobRepo.CreateJob(ctx, queuedLimitRequest, queuedLimitStatus); err != nil || duplicate.Created {
+		t.Fatalf("suspended idempotent replay=%+v err=%v", duplicate, err)
+	}
+	suspendedRequest := dailyLimitRequest
+	suspendedRequest.IdempotencyKey = "iam-project-suspended"
+	suspendedStatus := dailyLimitStatus
+	suspendedStatus.JobID = uuid.NewString()
+	suspendedStatus.Request = &suspendedRequest
+	_, err = jobRepo.CreateJob(ctx, &suspendedRequest, &suspendedStatus)
+	admission, ok = builder.AsAdmissionError(err)
+	if !ok || admission.Code != "project_suspended" {
+		t.Fatalf("suspended admission error=%+v raw=%v", admission, err)
+	}
+	testResourceReservationReleasePaths(t, ctx, db, iamRepo, jobRepo)
+	testRuntimeBudgetsAndAbuseGate(t, ctx, db, iamRepo, jobRepo)
+	testArtifactBudgetLifecycle(t, ctx, iamRepo, jobRepo)
+	testProjectPhaseCaps(t, ctx, iamRepo, jobRepo)
+	testDurablePhaseWorkQueue(t, ctx, db, iamRepo, jobRepo)
+	testExecutorCapabilityRouting(t, ctx, db, iamRepo, jobRepo)
+	testActivePhaseContextAndFinalization(t, ctx, db, iamRepo, jobRepo)
+	testDurableWorkerGatewaySpool(t, ctx, db, iamRepo, jobRepo)
+	testConcurrentIdempotentAdmission(t, ctx, db, iamRepo, jobRepo)
+
+	legacyWorkerID, currentWorkerID, fencedJobID := uuid.New(), uuid.New(), uuid.New()
+	if _, err := db.Pool().Exec(ctx, `
+		INSERT INTO workers (id, stable_name, max_slots, executor_protocol)
+		VALUES ($1, $2, 1, 0), ($3, $4, 1, $5)
+	`, legacyWorkerID, "legacy-executor-"+uuid.NewString(),
+		currentWorkerID, "current-executor-"+uuid.NewString(),
+		builder.ExecutorProtocolVersion); err != nil {
+		t.Fatalf("seed executor protocol fence: %v", err)
+	}
+	if _, err := db.Pool().Exec(ctx, `
+		INSERT INTO build_jobs (
+			id, project_id, package_atom, state, request, request_digest,
+			minimum_executor_protocol
+		) VALUES (
+			$1, (SELECT id FROM projects WHERE name = 'default'),
+			'app-misc/cmatrix', 'queued', '{}'::jsonb, 'fixture', $2
+		)
+	`, fencedJobID, builder.ExecutorProtocolVersion); err != nil {
+		t.Fatalf("seed protocol-fenced job: %v", err)
+	}
+	if _, err := db.Pool().Exec(ctx, `
+		INSERT INTO build_attempts (
+			id, job_id, attempt_no, state, worker_id, fence_token
+		) VALUES ($1, $2, 1, 'claimed', $3, 1)
+	`, uuid.New(), fencedJobID, legacyWorkerID); err == nil ||
+		!strings.Contains(err.Error(), "does not satisfy job minimum") {
+		t.Fatalf("legacy executor was not fenced: %v", err)
+	}
+	if _, err := db.Pool().Exec(ctx, `
+		INSERT INTO build_attempts (
+			id, job_id, attempt_no, state, worker_id, fence_token
+		) VALUES ($1, $2, 1, 'claimed', $3, 1)
+	`, uuid.New(), fencedJobID, currentWorkerID); err != nil {
+		t.Fatalf("current executor was rejected: %v", err)
 	}
 
 	projectID := uuid.New()
@@ -126,6 +587,1824 @@ func TestPostgresMigrationTransactionAndCompatibility(t *testing.T) {
 	}
 }
 
+func testRuntimeBudgetsAndAbuseGate(
+	t *testing.T,
+	ctx context.Context,
+	db *persistence.Database,
+	iamRepo *persistence.IAMRepository,
+	jobRepo *persistence.JobRepository,
+) {
+	t.Helper()
+	newRequest := func(projectID, key string) (*builder.BuildRequest, *builder.BuildStatus) {
+		request := &builder.BuildRequest{
+			ProjectID: projectID, PackageName: "app-misc/" + key,
+			Arch: "amd64", ResourceClass: "minute",
+			MachineSpec: map[string]string{
+				"cores": "1", "memory": "1024", "disk_size": "20",
+			},
+			ResolvedContext: &catalog.ResolvedBuildContext{
+				ProfileID: "pe/amd64/runtime-budget-v1",
+				Arch:      "amd64", Provider: "pve", ExecutionZone: "default",
+				BuildMode: "native-gentoo", ImageID: "pe/runtime-budget-g1",
+				ImageGeneration: "g1", ResourceClass: "minute",
+				MaxRuntimeMinutes:            1,
+				CloudCostMicrounitsPerMinute: 100,
+			},
+			IdempotencyKey: key,
+		}
+		now := time.Now().UTC()
+		status := &builder.BuildStatus{
+			JobID: uuid.NewString(), ProjectID: projectID, Status: "queued",
+			PackageName: request.PackageName, Arch: request.Arch,
+			CreatedAt: now, UpdatedAt: now, Request: request,
+			ResolvedContext: request.ResolvedContext,
+		}
+		return request, status
+	}
+	terminal := func(claim *builder.SchedulerClaim, state string, at time.Time) {
+		t.Helper()
+		previous := *claim.Status
+		current := previous
+		current.Status, current.UpdatedAt = state, at
+		if state == "failed" {
+			current.Error = "test failure"
+		}
+		if err := jobRepo.RecordTransition(ctx, &previous, &current); err != nil {
+			t.Fatalf("settle %s attempt: %v", state, err)
+		}
+	}
+
+	budgetProject, err := iamRepo.CreateProject(
+		ctx, "runtime-budget", "runtime budget integration fixture",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, err := iamRepo.GetProjectPolicy(ctx, budgetProject.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, err = iamRepo.UpdateProjectPolicy(
+		ctx, budgetProject.ID, persistence.ProjectPolicyUpdate{
+			Version: policy.Version, MaxQueuedJobs: 10, MaxActiveJobs: 10,
+			MaxDailySubmissions: 100, MaxActiveVCPUs: 10,
+			MaxActiveMemoryMiB: 10240, MaxActiveDiskGiB: 200,
+			MaxDailyBuildSeconds: 61, MaxDailyCloudCostMicrounits: 101,
+			MaxFailuresPerHour: 10, AbuseCooldownSeconds: 60,
+		}, "runtime-budget-test",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstRequest, firstStatus := newRequest(budgetProject.ID, "runtime-first")
+	secondRequest, secondStatus := newRequest(budgetProject.ID, "runtime-second")
+	var runtimeCapabilities []string
+	for _, phase := range []string{"provision", "build", "verify", "publish"} {
+		labels, err := builder.PhaseCapabilityRequirements(firstRequest, phase)
+		if err != nil {
+			t.Fatal(err)
+		}
+		runtimeCapabilities = append(runtimeCapabilities, labels...)
+	}
+	runtimeCapabilities, err = builder.NormalizeExecutorCapabilities(runtimeCapabilities)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claim, err := jobRepo.ClaimPhaseWork(
+		ctx, "runtime-capability-worker", time.Minute, runtimeCapabilities,
+	); err != nil || claim != nil {
+		t.Fatalf("register runtime capability worker: claim=%+v err=%v", claim, err)
+	}
+	if _, err := jobRepo.CreateJob(ctx, firstRequest, firstStatus); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := jobRepo.CreateJob(ctx, secondRequest, secondStatus); err != nil {
+		t.Fatal(err)
+	}
+	first, err := jobRepo.ClaimNext(
+		ctx, "runtime-budget-first", time.Minute, runtimeCapabilities,
+	)
+	if err != nil || first == nil {
+		t.Fatalf("claim first runtime budget=%+v err=%v", first, err)
+	}
+	if blocked, err := jobRepo.ClaimNext(
+		ctx, "runtime-budget-blocked", time.Minute, runtimeCapabilities,
+	); err != nil || blocked != nil {
+		t.Fatalf("runtime budget was oversubscribed claim=%+v err=%v", blocked, err)
+	}
+	// A worker timestamp can be skewed. Runtime settlement must use the
+	// PostgreSQL authority clock rather than charging this synthetic future.
+	terminal(first, "completed", time.Now().UTC().Add(5*time.Minute))
+	policy, err = iamRepo.GetProjectPolicy(ctx, budgetProject.ID)
+	if err != nil || policy.BuildSecondsToday != 1 ||
+		policy.CloudCostMicrounitsToday != 0 ||
+		policy.ActiveRuntimeBudgets != 0 {
+		t.Fatalf("settled runtime policy=%+v err=%v", policy, err)
+	}
+	second, err := jobRepo.ClaimNext(
+		ctx, "runtime-budget-second", time.Minute, runtimeCapabilities,
+	)
+	if err != nil || second == nil {
+		t.Fatalf("claim after unused budget release=%+v err=%v", second, err)
+	}
+	if _, err := db.Pool().Exec(ctx, `
+		UPDATE project_attempt_usage
+		SET metering_started_at = clock_timestamp() - interval '2 minutes',
+		    cloud_started_at = clock_timestamp() - interval '2 minutes'
+		WHERE attempt_id = $1
+	`, second.Status.AttemptID); err != nil {
+		t.Fatal(err)
+	}
+	if err := jobRepo.RenewClaim(ctx, second.Status, time.Minute); err == nil {
+		t.Fatal("runtime-expired attempt renewed its lease")
+	}
+	if err := jobRepo.CheckClaim(ctx, second.Status); err == nil {
+		t.Fatal("runtime-expired attempt passed the external-side-effect fence")
+	}
+	if _, err := jobRepo.CancelJob(
+		ctx, second.Status.JobID, "runtime deadline test cleanup",
+	); err != nil {
+		t.Fatalf("cleanup runtime-expired job: %v", err)
+	}
+	var chargedSeconds, chargedCloud, reservedSeconds, reservedCloud int64
+	if err := db.Pool().QueryRow(ctx, `
+		SELECT charged_build_seconds, charged_cloud_cost_microunits,
+		       reserved_build_seconds, reserved_cloud_cost_microunits
+		FROM project_attempt_usage
+		WHERE attempt_id = $1
+	`, second.Status.AttemptID).Scan(
+		&chargedSeconds, &chargedCloud, &reservedSeconds, &reservedCloud,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if chargedSeconds != reservedSeconds || chargedCloud != reservedCloud {
+		t.Fatalf(
+			"deadline settlement exceeded reservation: charged=%d/%d reserved=%d/%d",
+			chargedSeconds, chargedCloud, reservedSeconds, reservedCloud,
+		)
+	}
+
+	abuseProject, err := iamRepo.CreateProject(
+		ctx, "runtime-abuse", "failure storm integration fixture",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	abusePolicy, err := iamRepo.GetProjectPolicy(ctx, abuseProject.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	abusePolicy, err = iamRepo.UpdateProjectPolicy(
+		ctx, abuseProject.ID, persistence.ProjectPolicyUpdate{
+			Version: abusePolicy.Version, MaxQueuedJobs: 10, MaxActiveJobs: 10,
+			MaxDailySubmissions: 100, MaxActiveVCPUs: 10,
+			MaxActiveMemoryMiB: 10240, MaxActiveDiskGiB: 200,
+			MaxDailyBuildSeconds: 3600, MaxDailyCloudCostMicrounits: 10000,
+			MaxFailuresPerHour: 2, AbuseCooldownSeconds: 60,
+		}, "runtime-abuse-test",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index := 0; index < 2; index++ {
+		request, status := newRequest(
+			abuseProject.ID, fmt.Sprintf("abuse-failure-%d", index),
+		)
+		if _, err := jobRepo.CreateJob(ctx, request, status); err != nil {
+			t.Fatal(err)
+		}
+		claim, err := jobRepo.ClaimNext(
+			ctx, fmt.Sprintf("abuse-worker-%d", index), time.Minute,
+			runtimeCapabilities,
+		)
+		if err != nil || claim == nil {
+			t.Fatalf("claim abuse failure %d=%+v err=%v", index, claim, err)
+		}
+		terminal(claim, "failed", time.Now().UTC())
+	}
+	abusePolicy, err = iamRepo.GetProjectPolicy(ctx, abuseProject.ID)
+	if err != nil || !abusePolicy.AbuseSuspended ||
+		abusePolicy.FailuresLastHour != 2 || abusePolicy.AbuseGeneration == 0 {
+		t.Fatalf("failure storm policy=%+v err=%v", abusePolicy, err)
+	}
+	rejectedRequest, rejectedStatus := newRequest(abuseProject.ID, "abuse-rejected")
+	_, err = jobRepo.CreateJob(ctx, rejectedRequest, rejectedStatus)
+	admission, ok := builder.AsAdmissionError(err)
+	if !ok || admission.Code != "project_abuse_suspended" {
+		t.Fatalf("failure storm admission error=%+v raw=%v", admission, err)
+	}
+	abusePolicy, err = iamRepo.UpdateProjectPolicy(
+		ctx, abuseProject.ID, persistence.ProjectPolicyUpdate{
+			Version: abusePolicy.Version, MaxQueuedJobs: abusePolicy.MaxQueuedJobs,
+			MaxActiveJobs:               abusePolicy.MaxActiveJobs,
+			MaxDailySubmissions:         abusePolicy.MaxDailySubmissions,
+			MaxActiveVCPUs:              abusePolicy.MaxActiveVCPUs,
+			MaxActiveMemoryMiB:          abusePolicy.MaxActiveMemoryMiB,
+			MaxActiveDiskGiB:            abusePolicy.MaxActiveDiskGiB,
+			MaxDailyBuildSeconds:        abusePolicy.MaxDailyBuildSeconds,
+			MaxDailyCloudCostMicrounits: abusePolicy.MaxDailyCloudCostMicrounits,
+			MaxFailuresPerHour:          abusePolicy.MaxFailuresPerHour,
+			AbuseCooldownSeconds:        abusePolicy.AbuseCooldownSeconds,
+			ClearAbuseSuspension:        true,
+		}, "runtime-abuse-owner",
+	)
+	if err != nil || abusePolicy.AbuseSuspended ||
+		abusePolicy.AbuseSuspendedUntil != nil {
+		t.Fatalf("clear failure storm suspension=%+v err=%v", abusePolicy, err)
+	}
+	result, err := jobRepo.CreateJob(
+		ctx, rejectedRequest, rejectedStatus,
+	)
+	if err != nil || !result.Created {
+		t.Fatalf("submission after abuse clear=%+v err=%v", result, err)
+	}
+	if _, err := jobRepo.CancelJob(
+		ctx, result.JobID, "runtime abuse test cleanup",
+	); err != nil {
+		t.Fatalf("cleanup post-clear job: %v", err)
+	}
+	var auditCount int
+	if err := db.Pool().QueryRow(ctx, `
+		SELECT count(*) FROM audit_events
+		WHERE project_id = $1 AND action = 'project.abuse_suspended'
+	`, abuseProject.ID).Scan(&auditCount); err != nil || auditCount == 0 {
+		t.Fatalf("abuse suspension audit count=%d err=%v", auditCount, err)
+	}
+}
+
+func testActivePhaseContextAndFinalization(
+	t *testing.T,
+	ctx context.Context,
+	db *persistence.Database,
+	iamRepo *persistence.IAMRepository,
+	jobRepo *persistence.JobRepository,
+) {
+	t.Helper()
+	project, err := iamRepo.CreateProject(
+		ctx, "active-phase-finalize", "active phase context fixture",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := &builder.BuildRequest{
+		ProjectID: project.ID, PackageName: "app-misc/active-phase",
+		Arch: "amd64", ResourceClass: "small",
+		IdempotencyKey: "active-phase-finalize",
+		MachineSpec: map[string]string{
+			"cores": "2", "memory": "2048", "disk_size": "20",
+		},
+	}
+	now := time.Now().UTC()
+	status := &builder.BuildStatus{
+		JobID: uuid.NewString(), ProjectID: project.ID, Status: "queued",
+		PackageName: request.PackageName, Arch: request.Arch,
+		CreatedAt: now, UpdatedAt: now, Request: request,
+	}
+	if result, err := jobRepo.CreateJob(
+		ctx, request, status,
+	); err != nil || !result.Created {
+		t.Fatalf("create active phase fixture: result=%+v err=%v", result, err)
+	}
+	schedulerClaim, err := jobRepo.ClaimNext(
+		ctx, "active-phase-admission", 2*time.Minute,
+	)
+	if err != nil || schedulerClaim == nil ||
+		schedulerClaim.Status.JobID != status.JobID {
+		t.Fatalf("claim active phase fixture: claim=%+v err=%v", schedulerClaim, err)
+	}
+	if err := jobRepo.ActivatePhasePlan(ctx, schedulerClaim.Status); err != nil {
+		t.Fatal(err)
+	}
+
+	var publish *builder.PhaseWorkClaim
+	for _, phase := range []string{"provision", "build", "verify", "publish"} {
+		claim, err := jobRepo.ClaimPhaseWork(
+			ctx, "active-phase-"+phase, time.Minute,
+			legacyExecutorCapabilities, phase,
+		)
+		if err != nil || claim == nil || claim.Phase != phase ||
+			claim.Request == nil || claim.Status == nil ||
+			claim.Status.LeaseOwner != "active-phase-admission" {
+			t.Fatalf("claim %s: claim=%+v err=%v", phase, claim, err)
+		}
+		if phase == "provision" {
+			value := &builder.PhaseExecutionContext{
+				WorkerID: uuid.NewString(),
+				Instance: &builder.PhaseInstanceContext{
+					ID: "pve-active-phase", Provider: "pve", Status: "running",
+					Arch: "amd64", BuilderEndpoint: "pull://fixture",
+					TerraformDir: "/shared/terraform/pve-active-phase",
+					Metadata:     map[string]string{"node": "pve"},
+				},
+			}
+			if err := jobRepo.SavePhaseExecutionContext(ctx, claim, value); err != nil {
+				t.Fatal(err)
+			}
+			loaded, err := jobRepo.LoadPhaseExecutionContext(ctx, claim)
+			if err != nil || loaded.WorkerID != value.WorkerID ||
+				loaded.Instance == nil || loaded.Instance.ID != value.Instance.ID {
+				t.Fatalf("phase context=%+v err=%v", loaded, err)
+			}
+			forbidden := *value
+			instance := *value.Instance
+			instance.Metadata = map[string]string{"api_token": "must-not-persist"}
+			forbidden.Instance = &instance
+			if err := jobRepo.SavePhaseExecutionContext(
+				ctx, claim, &forbidden,
+			); err == nil {
+				t.Fatal("secret-like phase metadata was persisted")
+			}
+		}
+		if phase == "publish" {
+			publish = claim
+			break
+		}
+		if err := jobRepo.CompletePhaseWork(ctx, claim); err != nil {
+			t.Fatalf("complete %s: %v", phase, err)
+		}
+	}
+	if publish == nil {
+		t.Fatal("publish phase was not claimed")
+	}
+	completed := *publish.Status
+	completed.Status, completed.Error, completed.UpdatedAt = "completed", "", time.Now().UTC()
+	completed.ArtifactURL = "/binpkgs/releases/amd64/binpackages/23.0/x86-64/app-misc/active-phase.gpkg.tar"
+	if err := jobRepo.FinalizePhaseWork(
+		ctx, publish, publish.Status, &completed,
+	); err != nil {
+		t.Fatal(err)
+	}
+	var jobState, attemptState, publishState string
+	var leases int
+	if err := db.Pool().QueryRow(ctx, `
+		SELECT j.state, a.state, w.state,
+		       (SELECT count(*) FROM worker_leases l WHERE l.attempt_id = a.id)
+		FROM build_jobs j
+		JOIN build_attempts a ON a.job_id = j.id
+		JOIN phase_work_items w ON w.attempt_id = a.id AND w.phase = 'publish'
+		WHERE j.id = $1
+	`, status.JobID).Scan(
+		&jobState, &attemptState, &publishState, &leases,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if jobState != "completed" || attemptState != "completed" ||
+		publishState != "completed" || leases != 0 {
+		t.Fatalf("atomic final state job=%s attempt=%s publish=%s leases=%d",
+			jobState, attemptState, publishState, leases)
+	}
+	if err := jobRepo.CompletePhaseWork(ctx, publish); err == nil {
+		t.Fatal("finalized phase accepted a duplicate completion")
+	}
+}
+
+func TestProjectResourceAndArtifactMigrationsRequireDrainedAttempts(t *testing.T) {
+	adminDSN := os.Getenv("PORTAGE_TEST_DATABASE_URL")
+	if adminDSN == "" {
+		t.Skip("set PORTAGE_TEST_DATABASE_URL to run PostgreSQL integration tests")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	admin, err := pgx.Connect(ctx, adminDSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = admin.Close(context.Background()) }()
+
+	schema := "iam1b_drain_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+	identifier := pgx.Identifier{schema}.Sanitize()
+	if _, err := admin.Exec(ctx, "CREATE SCHEMA "+identifier); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		dropCtx, dropCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer dropCancel()
+		_, _ = admin.Exec(dropCtx, "DROP SCHEMA "+identifier+" CASCADE")
+	}()
+	testDSN, err := withSearchPath(adminDSN, schema)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.DatabaseConfig{
+		Enabled: true, Required: true, URL: testDSN,
+		MaxConns: 2, ConnectTimeoutSeconds: 10, HealthTimeoutSeconds: 2,
+	}
+	runner, err := migrations.NewRunner(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = runner.Close() }()
+	if _, err := runner.Provider().UpTo(ctx, 10); err != nil {
+		t.Fatal(err)
+	}
+	fixture, err := pgx.Connect(ctx, testDSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = fixture.Close(context.Background()) }()
+	jobID := uuid.New()
+	if _, err := fixture.Exec(ctx, `
+		INSERT INTO build_jobs (
+			id, project_id, package_atom, state, request, request_digest
+		) VALUES (
+			$1, (SELECT id FROM projects WHERE name = 'default'),
+			'app-misc/migration-drain', 'building', '{}'::jsonb, 'drain-fixture'
+		)
+	`, jobID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runner.Provider().Up(ctx); err == nil ||
+		!strings.Contains(err.Error(), "requires all active build attempts") {
+		t.Fatalf("schema v11 accepted an active job: %v", err)
+	}
+	if version, err := runner.Provider().GetDBVersion(ctx); err != nil || version != 10 {
+		t.Fatalf("failed migration version=%d err=%v", version, err)
+	}
+	if _, err := fixture.Exec(ctx, `
+		UPDATE build_jobs SET state = 'failed' WHERE id = $1
+	`, jobID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runner.Provider().UpTo(ctx, 11); err != nil {
+		t.Fatalf("schema v11 failed after drain: %v", err)
+	}
+	if version, err := runner.Provider().GetDBVersion(ctx); err != nil || version != 11 {
+		t.Fatalf("drained migration version=%d err=%v", version, err)
+	}
+	if _, err := fixture.Exec(ctx, `
+		UPDATE build_jobs SET state = 'collecting' WHERE id = $1
+	`, jobID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runner.Provider().Up(ctx); err == nil ||
+		!strings.Contains(err.Error(), "schema v12 requires all active build attempts") {
+		t.Fatalf("schema v12 accepted an active job: %v", err)
+	}
+	if version, err := runner.Provider().GetDBVersion(ctx); err != nil || version != 11 {
+		t.Fatalf("failed artifact migration version=%d err=%v", version, err)
+	}
+	if _, err := fixture.Exec(ctx, `
+		UPDATE build_jobs SET state = 'failed' WHERE id = $1
+	`, jobID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runner.Provider().UpTo(ctx, 12); err != nil {
+		t.Fatalf("schema v12 failed after drain: %v", err)
+	}
+	if version, err := runner.Provider().GetDBVersion(ctx); err != nil || version != 12 {
+		t.Fatalf("drained artifact migration version=%d err=%v", version, err)
+	}
+	if _, err := fixture.Exec(ctx, `
+		UPDATE build_jobs SET state = 'verifying' WHERE id = $1
+	`, jobID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runner.Provider().Up(ctx); err == nil ||
+		!strings.Contains(err.Error(), "schema v13 requires all active build attempts") {
+		t.Fatalf("schema v13 accepted an active job: %v", err)
+	}
+	if version, err := runner.Provider().GetDBVersion(ctx); err != nil || version != 12 {
+		t.Fatalf("failed phase-cap migration version=%d err=%v", version, err)
+	}
+	if _, err := fixture.Exec(ctx, `
+		UPDATE build_jobs SET state = 'failed' WHERE id = $1
+	`, jobID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runner.Provider().UpTo(ctx, 13); err != nil {
+		t.Fatalf("schema v13 failed after drain: %v", err)
+	}
+	if version, err := runner.Provider().GetDBVersion(ctx); err != nil || version != 13 {
+		t.Fatalf("drained phase-cap migration version=%d err=%v", version, err)
+	}
+	if _, err := fixture.Exec(ctx, `
+		UPDATE build_jobs SET state = 'publishing' WHERE id = $1
+	`, jobID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runner.Provider().Up(ctx); err == nil ||
+		!strings.Contains(err.Error(), "schema v14 requires all active build attempts") {
+		t.Fatalf("schema v14 accepted an active job: %v", err)
+	}
+	if version, err := runner.Provider().GetDBVersion(ctx); err != nil || version != 13 {
+		t.Fatalf("failed phase-work migration version=%d err=%v", version, err)
+	}
+	if _, err := fixture.Exec(ctx, `
+		UPDATE build_jobs SET state = 'failed' WHERE id = $1
+	`, jobID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runner.Provider().UpTo(ctx, 14); err != nil {
+		t.Fatalf("schema v14 failed after drain: %v", err)
+	}
+	if version, err := runner.Provider().GetDBVersion(ctx); err != nil || version != 14 {
+		t.Fatalf("drained phase-work migration version=%d err=%v", version, err)
+	}
+	if _, err := fixture.Exec(ctx, `
+		UPDATE build_jobs SET state = 'building' WHERE id = $1
+	`, jobID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runner.Provider().Up(ctx); err == nil ||
+		!strings.Contains(err.Error(), "schema v15 requires all active build attempts") {
+		t.Fatalf("schema v15 accepted an active job: %v", err)
+	}
+	if version, err := runner.Provider().GetDBVersion(ctx); err != nil || version != 14 {
+		t.Fatalf("failed gateway-spool migration version=%d err=%v", version, err)
+	}
+	if _, err := fixture.Exec(ctx, `
+		UPDATE build_jobs SET state = 'failed' WHERE id = $1
+	`, jobID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runner.Provider().UpTo(ctx, 15); err != nil {
+		t.Fatalf("schema v15 failed after drain: %v", err)
+	}
+	if version, err := runner.Provider().GetDBVersion(ctx); err != nil || version != 15 {
+		t.Fatalf("drained gateway-spool migration version=%d err=%v", version, err)
+	}
+	workerID, attemptID, leaseID := uuid.New(), uuid.New(), uuid.New()
+	if _, err := fixture.Exec(ctx, `
+		INSERT INTO workers (id, stable_name, max_slots, executor_protocol)
+		VALUES ($1, $2, 1, $3)
+	`, workerID, "v16-drain-"+uuid.NewString(),
+		builder.ExecutorProtocolVersion); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.Exec(ctx,
+		`UPDATE build_jobs SET state = 'claimed' WHERE id = $1`,
+		jobID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.Exec(ctx, `
+		INSERT INTO build_attempts (
+			id, job_id, attempt_no, state, worker_id, fence_token
+		) VALUES ($1, $2, 1, 'claimed', $3, 1)
+	`, attemptID, jobID, workerID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.Exec(ctx, `
+		INSERT INTO worker_leases (
+			id, worker_id, attempt_id, fence_token, expires_at
+		) VALUES ($1, $2, $3, 1, clock_timestamp() + interval '1 minute')
+	`, leaseID, workerID, attemptID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runner.Provider().Up(ctx); err == nil ||
+		!strings.Contains(err.Error(), "schema v16 requires active phase plans and worker leases") {
+		t.Fatalf("schema v16 accepted an active worker lease: %v", err)
+	}
+	if version, err := runner.Provider().GetDBVersion(ctx); err != nil || version != 15 {
+		t.Fatalf("failed active-phase migration version=%d err=%v", version, err)
+	}
+	if _, err := fixture.Exec(ctx,
+		`DELETE FROM worker_leases WHERE id = $1`, leaseID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.Exec(ctx, `
+		UPDATE build_attempts SET state = 'failed', finished_at = clock_timestamp()
+		WHERE id = $1
+	`, attemptID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.Exec(ctx,
+		`UPDATE build_jobs SET state = 'failed' WHERE id = $1`, jobID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runner.Provider().UpTo(ctx, 16); err != nil {
+		t.Fatalf("schema v16 failed after drain: %v", err)
+	}
+	if version, err := runner.Provider().GetDBVersion(ctx); err != nil || version != 16 {
+		t.Fatalf("drained active-phase migration version=%d err=%v", version, err)
+	}
+	if _, err := fixture.Exec(ctx,
+		`UPDATE build_jobs SET state = 'queued' WHERE id = $1`, jobID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runner.Provider().Up(ctx); err == nil ||
+		!strings.Contains(err.Error(), "schema v17 requires queued jobs") {
+		t.Fatalf("schema v17 accepted queued work: %v", err)
+	}
+	if version, err := runner.Provider().GetDBVersion(ctx); err != nil || version != 16 {
+		t.Fatalf("failed runtime-budget migration version=%d err=%v", version, err)
+	}
+	if _, err := fixture.Exec(ctx,
+		`UPDATE build_jobs SET state = 'failed' WHERE id = $1`, jobID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runner.Provider().UpTo(ctx, 17); err != nil {
+		t.Fatalf("schema v17 failed after drain: %v", err)
+	}
+	if version, err := runner.Provider().GetDBVersion(ctx); err != nil || version != 17 {
+		t.Fatalf("drained runtime-budget migration version=%d err=%v", version, err)
+	}
+	if _, err := runner.Provider().UpTo(ctx, 19); err != nil {
+		t.Fatalf("schema v18/v19 additive IAM migrations failed: %v", err)
+	}
+	if version, err := runner.Provider().GetDBVersion(ctx); err != nil || version != 19 {
+		t.Fatalf("IAM provider lifecycle migration version=%d err=%v", version, err)
+	}
+	if _, err := runner.Provider().UpTo(ctx, 20); err != nil {
+		t.Fatalf("schema v20 capability migration failed after drain: %v", err)
+	}
+	if version, err := runner.Provider().GetDBVersion(ctx); err != nil || version != 20 {
+		t.Fatalf("capability migration version=%d err=%v", version, err)
+	}
+	if _, err := fixture.Exec(ctx, `
+		INSERT INTO worker_gateway_sessions (
+			worker_id, project_id, job_id, attempt_id, attempt_fence, state
+		)
+		SELECT $2, project_id, id, $3, 1, 'active'
+		FROM build_jobs
+		WHERE id = $1
+	`, jobID, "v21-drain-"+uuid.NewString(), attemptID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runner.Provider().Up(ctx); err == nil ||
+		!strings.Contains(err.Error(), "schema v21 requires active worker gateway sessions") {
+		t.Fatalf("schema v21 accepted an active gateway session: %v", err)
+	}
+	if version, err := runner.Provider().GetDBVersion(ctx); err != nil || version != 20 {
+		t.Fatalf("failed workload issuer migration version=%d err=%v", version, err)
+	}
+	if _, err := fixture.Exec(ctx, `
+		DELETE FROM worker_gateway_sessions WHERE attempt_id = $1
+	`, attemptID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runner.Provider().UpTo(ctx, 21); err != nil {
+		t.Fatalf("schema v21 failed after gateway drain: %v", err)
+	}
+	if version, err := runner.Provider().GetDBVersion(ctx); err != nil || version != 21 {
+		t.Fatalf("workload issuer migration version=%d err=%v", version, err)
+	}
+	if _, err := runner.Provider().UpTo(ctx, 22); err != nil {
+		t.Fatalf("schema v22 fairness migration failed: %v", err)
+	}
+	if version, err := runner.Provider().GetDBVersion(ctx); err != nil || version != 22 {
+		t.Fatalf("scheduler fairness migration version=%d err=%v", version, err)
+	}
+	var fairnessRows int
+	if err := fixture.QueryRow(ctx, `
+		SELECT count(*) FROM project_scheduler_fairness
+	`).Scan(&fairnessRows); err != nil || fairnessRows == 0 {
+		t.Fatalf("scheduler fairness rows=%d err=%v", fairnessRows, err)
+	}
+	var priorityWeight, starvationSeconds int
+	if err := fixture.QueryRow(ctx, `
+		SELECT priority_weight, starvation_threshold_seconds
+		FROM project_policies
+		WHERE project_id = (SELECT id FROM projects WHERE name = 'default')
+	`).Scan(&priorityWeight, &starvationSeconds); err != nil ||
+		priorityWeight != 100 || starvationSeconds != 300 {
+		t.Fatalf(
+			"fairness policy weight=%d starvation=%d err=%v",
+			priorityWeight, starvationSeconds, err,
+		)
+	}
+	if _, err := runner.Provider().UpTo(ctx, 23); err != nil {
+		t.Fatalf("schema v23 capacity-pool migration failed: %v", err)
+	}
+	if version, err := runner.Provider().GetDBVersion(ctx); err != nil || version != 23 {
+		t.Fatalf("capacity-pool migration version=%d err=%v", version, err)
+	}
+	var poolTable string
+	if err := fixture.QueryRow(ctx, `
+		SELECT to_regclass('scheduler_capacity_pool_state')::text
+	`).Scan(&poolTable); err != nil ||
+		poolTable != "scheduler_capacity_pool_state" {
+		t.Fatalf("capacity-pool table=%q err=%v", poolTable, err)
+	}
+	if _, err := runner.Provider().UpTo(ctx, 24); err != nil {
+		t.Fatalf("schema v24 actuator-fence migration failed: %v", err)
+	}
+	if version, err := runner.Provider().GetDBVersion(ctx); err != nil || version != 24 {
+		t.Fatalf("actuator-fence migration version=%d err=%v", version, err)
+	}
+	var actionsTable, instancesTable string
+	if err := fixture.QueryRow(ctx, `
+		SELECT to_regclass('scheduler_capacity_actions')::text,
+		       to_regclass('scheduler_capacity_instances')::text
+	`).Scan(&actionsTable, &instancesTable); err != nil ||
+		actionsTable != "scheduler_capacity_actions" ||
+		instancesTable != "scheduler_capacity_instances" {
+		t.Fatalf(
+			"actuator tables actions=%q instances=%q err=%v",
+			actionsTable, instancesTable, err,
+		)
+	}
+	if _, err := runner.Provider().UpTo(ctx, 25); err != nil {
+		t.Fatalf("schema v25 worker-scoring migration failed: %v", err)
+	}
+	if version, err := runner.Provider().GetDBVersion(ctx); err != nil ||
+		version != 25 {
+		t.Fatalf("worker-scoring migration version=%d err=%v", version, err)
+	}
+	var decisionsTable string
+	if err := fixture.QueryRow(ctx, `
+		SELECT to_regclass('scheduler_worker_decisions')::text
+	`).Scan(&decisionsTable); err != nil ||
+		decisionsTable != "scheduler_worker_decisions" {
+		t.Fatalf("worker-scoring table=%q err=%v", decisionsTable, err)
+	}
+	if _, err := runner.Provider().UpTo(ctx, 26); err != nil {
+		t.Fatalf("schema v26 target-history migration failed: %v", err)
+	}
+	if version, err := runner.Provider().GetDBVersion(ctx); err != nil ||
+		version != 26 {
+		t.Fatalf("target-history migration version=%d err=%v", version, err)
+	}
+	var outcomesView string
+	if err := fixture.QueryRow(ctx, `
+		SELECT to_regclass('monitor_job_outcomes')::text
+	`).Scan(&outcomesView); err != nil ||
+		outcomesView != "monitor_job_outcomes" {
+		t.Fatalf("target-history view=%q err=%v", outcomesView, err)
+	}
+}
+
+func testDurableWorkerGatewaySpool(
+	t *testing.T,
+	ctx context.Context,
+	db *persistence.Database,
+	iamRepo *persistence.IAMRepository,
+	repoA *persistence.JobRepository,
+) {
+	t.Helper()
+	project, err := iamRepo.CreateProject(
+		ctx, "gateway-spool", "durable worker gateway fixture",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := &builder.BuildRequest{
+		ProjectID: project.ID, PackageName: "app-misc/gateway-spool",
+		Arch: "amd64", ResourceClass: "small",
+		MachineSpec: map[string]string{
+			"cores": "2", "memory": "2048", "disk_size": "20",
+		},
+		IdempotencyKey: "gateway-spool",
+	}
+	now := time.Now().UTC()
+	status := &builder.BuildStatus{
+		JobID: uuid.NewString(), ProjectID: project.ID, Status: "queued",
+		PackageName: request.PackageName, Arch: request.Arch,
+		CreatedAt: now, UpdatedAt: now, Request: request,
+	}
+	if result, createErr := repoA.CreateJob(ctx, request, status); createErr != nil ||
+		!result.Created {
+		t.Fatalf("create gateway fixture=%+v err=%v", result, createErr)
+	}
+	if _, err := db.Pool().Exec(
+		ctx, "UPDATE build_jobs SET priority = 10000 WHERE id = $1", status.JobID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	claim, err := repoA.ClaimNext(ctx, "gateway-spool-owner", time.Minute)
+	if err != nil || claim == nil || claim.Status.JobID != status.JobID {
+		t.Fatalf("claim gateway fixture=%+v err=%v", claim, err)
+	}
+	identity := workergateway.Identity{
+		WorkerID: uuid.NewString(), JobID: claim.Status.JobID,
+		AttemptID: claim.Status.AttemptID, FenceToken: claim.Status.FenceToken,
+	}
+	if err := repoA.RegisterWorkerSession(ctx, identity); err != nil {
+		t.Fatal(err)
+	}
+	certificateRecord := workergateway.CertificateRecord{
+		Fingerprint:       strings.Repeat("a", 64),
+		Serial:            "01",
+		IssuerID:          "postgres-integration",
+		IssuerProvider:    workergateway.IssuerProviderFile,
+		IssuerFingerprint: strings.Repeat("b", 64),
+		IssuerSubject:     "CN=postgres-integration-workload-ca",
+		IssuerSerial:      "ca01",
+		IssuerNotBefore:   now.Add(-time.Hour),
+		IssuerNotAfter:    now.Add(48 * time.Hour),
+		NotBefore:         now.Add(-time.Minute),
+		NotAfter:          now.Add(3 * time.Hour),
+	}
+	if err := repoA.RegisterWorkerCertificate(
+		ctx, identity, certificateRecord,
+	); err != nil {
+		t.Fatal(err)
+	}
+	presentedCertificate := workergateway.PresentedCertificate{
+		Fingerprint: certificateRecord.Fingerprint,
+		Serial:      certificateRecord.Serial,
+	}
+	if err := repoA.AuthorizeWorkerCertificate(
+		ctx, identity, presentedCertificate,
+	); err != nil {
+		t.Fatalf("registered workload certificate was rejected: %v", err)
+	}
+	wrongCertificate := presentedCertificate
+	wrongCertificate.Fingerprint = strings.Repeat("c", 64)
+	if err := repoA.AuthorizeWorkerCertificate(
+		ctx, identity, wrongCertificate,
+	); err == nil {
+		t.Fatal("unknown workload certificate was authorized")
+	}
+	repoB := persistence.NewJobRepository(db)
+	if _, err := repoB.ClaimWorkerCommand(
+		ctx, identity, 100*time.Millisecond,
+	); !errors.Is(err, workergateway.ErrNoWork) {
+		t.Fatalf("initial empty worker poll=%v", err)
+	}
+	if connected, err := repoA.WorkerSessionConnected(
+		ctx, identity,
+	); err != nil || !connected {
+		t.Fatalf("empty worker poll did not commit connection heartbeat: connected=%t err=%v",
+			connected, err)
+	}
+	task := workergateway.Task{
+		ID: uuid.NewString(), Action: workergateway.ActionBuild,
+		Payload: json.RawMessage(`{"package_name":"app-misc/gateway-spool"}`),
+	}
+	if err := repoA.EnqueueWorkerCommand(ctx, identity, task); err != nil {
+		t.Fatal(err)
+	}
+	if err := repoB.EnqueueWorkerCommand(ctx, identity, task); err != nil {
+		t.Fatalf("exact stable command replay was rejected: %v", err)
+	}
+	conflictingTask := task
+	conflictingTask.Payload = json.RawMessage(`{"package_name":"app-misc/other"}`)
+	if err := repoB.EnqueueWorkerCommand(
+		ctx, identity, conflictingTask,
+	); err == nil {
+		t.Fatal("stable command id accepted a different immutable request")
+	}
+	first, err := repoB.ClaimWorkerCommand(ctx, identity, 100*time.Millisecond)
+	if err != nil || first.DeliveryFence != 1 {
+		t.Fatalf("first durable delivery=%+v err=%v", first, err)
+	}
+	if _, err := db.Pool().Exec(ctx, `
+		UPDATE worker_gateway_commands
+		SET delivery_lease_expires_at = clock_timestamp() - interval '1 second'
+		WHERE id = $1
+	`, first.ID); err != nil {
+		t.Fatal(err)
+	}
+	second, err := repoA.ClaimWorkerCommand(ctx, identity, time.Minute)
+	if err != nil || second.ID != first.ID || second.DeliveryFence != 2 {
+		t.Fatalf("replayed durable delivery=%+v err=%v", second, err)
+	}
+	stale := workergateway.Completion{
+		TaskID: first.ID, DeliveryFence: first.DeliveryFence,
+		Payload: json.RawMessage(`{"status":"success"}`),
+	}
+	if err := repoB.CompleteWorkerCommand(ctx, identity, stale); !errors.Is(
+		err, workergateway.ErrStaleFence,
+	) {
+		t.Fatalf("stale completion was not fenced: %v", err)
+	}
+	current := stale
+	current.DeliveryFence = second.DeliveryFence
+	if err := repoB.CompleteWorkerCommand(ctx, identity, current); err != nil {
+		t.Fatal(err)
+	}
+	if err := repoA.CompleteWorkerCommand(ctx, identity, current); err != nil {
+		t.Fatalf("exact completion replay was rejected: %v", err)
+	}
+	conflictingCompletion := current
+	conflictingCompletion.Payload = json.RawMessage(`{"status":"different"}`)
+	if err := repoA.CompleteWorkerCommand(
+		ctx, identity, conflictingCompletion,
+	); !errors.Is(err, workergateway.ErrStaleFence) {
+		t.Fatalf("conflicting completion replay was not fenced: %v", err)
+	}
+	result, err := repoA.WorkerCommandResult(ctx, identity, task.ID)
+	if err != nil || result.DeliveryFence != 2 ||
+		string(result.Payload) != `{"status": "success"}` &&
+			string(result.Payload) != `{"status":"success"}` {
+		t.Fatalf("durable result=%+v err=%v", result, err)
+	}
+
+	brokerA := workergateway.NewBroker(nil)
+	brokerA.SetDurableStore(repoA)
+	if err := brokerA.Register(identity); err != nil {
+		t.Fatal(err)
+	}
+	dispatchDone := make(chan error, 1)
+	var dispatched map[string]string
+	go func() {
+		dispatchDone <- brokerA.Dispatch(
+			ctx, identity, workergateway.ActionVerify,
+			map[string]string{"probe": "two-replica"},
+			&dispatched,
+		)
+	}()
+	var crossReplica *workergateway.Task
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); {
+		crossReplica, err = repoB.ClaimWorkerCommand(ctx, identity, time.Minute)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, workergateway.ErrNoWork) {
+			t.Fatal(err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if crossReplica == nil {
+		t.Fatal("second repository did not observe broker command")
+	}
+	if err := repoB.CompleteWorkerCommand(ctx, identity, workergateway.Completion{
+		TaskID: crossReplica.ID, DeliveryFence: crossReplica.DeliveryFence,
+		Payload: json.RawMessage(`{"replica":"b"}`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-dispatchDone:
+		if err != nil || dispatched["replica"] != "b" {
+			t.Fatalf("cross-replica dispatch=%v result=%v", err, dispatched)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("durable broker dispatch did not observe second-replica completion")
+	}
+	restartedBroker := workergateway.NewBroker(nil)
+	restartedBroker.SetDurableStore(repoB)
+	if status := restartedBroker.Status(); status.Authority != "postgresql" ||
+		status.RegisteredSessions < 1 {
+		t.Fatalf("restarted broker did not recover durable status: %+v", status)
+	}
+
+	uploadID := uuid.NewString()
+	destination := "/tmp/gateway-spool-artifact"
+	if err := repoA.PrepareWorkerUpload(
+		ctx, identity, uploadID, destination, 1024,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := repoB.PrepareWorkerUpload(
+		ctx, identity, uploadID, destination, 1024,
+	); err != nil {
+		t.Fatalf("exact stable upload replay was rejected: %v", err)
+	}
+	if err := repoB.PrepareWorkerUpload(
+		ctx, identity, uploadID, destination, 2048,
+	); err == nil {
+		t.Fatal("stable upload id accepted a different immutable limit")
+	}
+	uploadOne, err := repoB.ClaimWorkerUpload(
+		ctx, identity, uploadID, 100*time.Millisecond,
+	)
+	if err != nil || uploadOne.Fence != 1 {
+		t.Fatalf("first upload claim=%+v err=%v", uploadOne, err)
+	}
+	if _, err := db.Pool().Exec(ctx, `
+		UPDATE worker_gateway_uploads
+		SET upload_lease_expires_at = clock_timestamp() - interval '1 second'
+		WHERE id = $1
+	`, uploadID); err != nil {
+		t.Fatal(err)
+	}
+	uploadTwo, err := repoA.ClaimWorkerUpload(
+		ctx, identity, uploadID, time.Minute,
+	)
+	if err != nil || uploadTwo.Fence != 2 {
+		t.Fatalf("second upload claim=%+v err=%v", uploadTwo, err)
+	}
+	digest := strings.Repeat("a", 64)
+	if err := repoB.CompleteWorkerUpload(
+		ctx, identity, uploadID, uploadOne.Fence, digest, 3,
+	); !errors.Is(err, workergateway.ErrStaleFence) {
+		t.Fatalf("stale upload completion was not fenced: %v", err)
+	}
+	if err := repoA.CompleteWorkerUpload(
+		ctx, identity, uploadID, uploadTwo.Fence, digest, 3,
+	); err != nil {
+		t.Fatal(err)
+	}
+	completed, err := repoB.ClaimWorkerUpload(
+		ctx, identity, uploadID, time.Minute,
+	)
+	if err != nil || !completed.Completed || completed.Fence != 2 ||
+		completed.Digest != digest || completed.Size != 3 {
+		t.Fatalf("completed upload replay=%+v err=%v", completed, err)
+	}
+	gatewayStatus, err := repoA.WorkerGatewayStatus(ctx)
+	if err != nil || gatewayStatus.Authority != "postgresql" ||
+		gatewayStatus.RegisteredSessions < 1 ||
+		gatewayStatus.PendingTasks != 0 || gatewayStatus.PendingUploads != 0 ||
+		gatewayStatus.ActiveIssuers != 1 ||
+		gatewayStatus.ActiveCertificates != 1 {
+		t.Fatalf("gateway status=%+v err=%v", gatewayStatus, err)
+	}
+	if err := repoB.RevokeWorkerSession(ctx, identity, "fixture complete"); err != nil {
+		t.Fatal(err)
+	}
+	if err := repoA.AuthorizeWorkerCertificate(
+		ctx, identity, presentedCertificate,
+	); err == nil {
+		t.Fatal("revoked workload certificate remained authorized")
+	}
+	issuers, certificates, err := repoA.WorkloadIdentityInventory(ctx)
+	if err != nil || len(issuers) == 0 || len(certificates) == 0 ||
+		certificates[0].State != "revoked" {
+		t.Fatalf(
+			"workload identity inventory issuers=%+v certificates=%+v err=%v",
+			issuers, certificates, err,
+		)
+	}
+}
+
+func testArtifactBudgetLifecycle(
+	t *testing.T,
+	ctx context.Context,
+	iamRepo *persistence.IAMRepository,
+	jobRepo *persistence.JobRepository,
+) {
+	t.Helper()
+	project, err := iamRepo.CreateProject(ctx, "artifact-budget", "artifact budget fixture")
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, err := iamRepo.GetProjectPolicy(ctx, project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, err = iamRepo.UpdateProjectPolicy(ctx, project.ID, persistence.ProjectPolicyUpdate{
+		Version: policy.Version, MaxQueuedJobs: policy.MaxQueuedJobs,
+		MaxActiveJobs:          policy.MaxActiveJobs,
+		MaxDailySubmissions:    policy.MaxDailySubmissions,
+		MaxActiveVCPUs:         policy.MaxActiveVCPUs,
+		MaxActiveMemoryMiB:     policy.MaxActiveMemoryMiB,
+		MaxActiveDiskGiB:       policy.MaxActiveDiskGiB,
+		MaxArtifactBytesPerJob: 1 << 35,
+	}, "artifact-budget-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if policy.MaxArtifactBytesPerJob != 1<<35 {
+		t.Fatalf("large artifact policy was truncated: %+v", policy)
+	}
+	policy, err = iamRepo.UpdateProjectPolicy(ctx, project.ID, persistence.ProjectPolicyUpdate{
+		Version: policy.Version, MaxQueuedJobs: policy.MaxQueuedJobs,
+		MaxActiveJobs:          policy.MaxActiveJobs,
+		MaxDailySubmissions:    policy.MaxDailySubmissions,
+		MaxActiveVCPUs:         policy.MaxActiveVCPUs,
+		MaxActiveMemoryMiB:     policy.MaxActiveMemoryMiB,
+		MaxActiveDiskGiB:       policy.MaxActiveDiskGiB,
+		MaxArtifactBytesPerJob: 100,
+	}, "artifact-budget-small-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := &builder.BuildRequest{
+		ProjectID: project.ID, PackageName: "app-misc/artifact-budget",
+		Arch: "amd64", ResourceClass: "small",
+		MachineSpec: map[string]string{
+			"cores": "2", "memory": "4096", "disk_size": "40",
+		},
+		IdempotencyKey: "artifact-budget",
+	}
+	now := time.Now().UTC()
+	status := &builder.BuildStatus{
+		JobID: uuid.NewString(), ProjectID: project.ID, Status: "queued",
+		PackageName: request.PackageName, Arch: "amd64",
+		CreatedAt: now, UpdatedAt: now, Request: request,
+	}
+	if result, err := jobRepo.CreateJob(ctx, request, status); err != nil || !result.Created {
+		t.Fatalf("create artifact budget job=%+v err=%v", result, err)
+	}
+	claim, err := jobRepo.ClaimNext(ctx, "artifact-budget-worker", time.Minute)
+	if err != nil || claim == nil || claim.Status.JobID != status.JobID {
+		t.Fatalf("claim artifact budget job=%+v err=%v", claim, err)
+	}
+	budget, err := jobRepo.SetArtifactGenerationBytes(
+		ctx, claim.Status, "collected", 60,
+	)
+	if err != nil || budget.ActiveBytes != 60 || budget.LimitBytes != 100 {
+		t.Fatalf("collected artifact budget=%+v err=%v", budget, err)
+	}
+	generations := [2]string{"signed-race-a", "signed-race-b"}
+	var raceErrs [2]error
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := range generations {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			_, raceErrs[i] = jobRepo.SetArtifactGenerationBytes(
+				ctx, claim.Status, generations[i], 40,
+			)
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+	successes := 0
+	for i, raceErr := range raceErrs {
+		if raceErr == nil {
+			successes++
+			if err := jobRepo.ReleaseArtifactGeneration(
+				ctx, claim.Status, generations[i], "race_test_complete",
+			); err != nil {
+				t.Fatal(err)
+			}
+		} else if !strings.Contains(raceErr.Error(), "budget exceeded") {
+			t.Fatalf("unexpected concurrent artifact error: %v", raceErr)
+		}
+	}
+	if successes != 1 {
+		t.Fatalf("concurrent artifact reservations successes=%d errors=%v", successes, raceErrs)
+	}
+	if _, err := jobRepo.SetArtifactGenerationBytes(
+		ctx, claim.Status, "signed", 41,
+	); err == nil || !strings.Contains(err.Error(), "budget exceeded") {
+		t.Fatalf("artifact budget accepted 101 bytes: %v", err)
+	}
+	budget, err = jobRepo.SetArtifactGenerationBytes(ctx, claim.Status, "signed", 40)
+	if err != nil || budget.ActiveBytes != 100 || budget.PeakBytes != 100 {
+		t.Fatalf("dual-generation artifact budget=%+v err=%v", budget, err)
+	}
+	if err := jobRepo.ReleaseArtifactGeneration(
+		ctx, claim.Status, "collected", "signed_adopted",
+	); err != nil {
+		t.Fatal(err)
+	}
+	policy, err = iamRepo.GetProjectPolicy(ctx, project.ID)
+	if err != nil || policy.QuarantineBytes != 40 || policy.ActiveArtifactBudgets != 1 {
+		t.Fatalf("active artifact policy usage=%+v err=%v", policy, err)
+	}
+	if _, err := iamRepo.UpdateProjectPolicy(ctx, project.ID, persistence.ProjectPolicyUpdate{
+		Version: policy.Version, MaxQueuedJobs: policy.MaxQueuedJobs,
+		MaxActiveJobs:          policy.MaxActiveJobs,
+		MaxDailySubmissions:    policy.MaxDailySubmissions,
+		MaxActiveVCPUs:         policy.MaxActiveVCPUs,
+		MaxActiveMemoryMiB:     policy.MaxActiveMemoryMiB,
+		MaxActiveDiskGiB:       policy.MaxActiveDiskGiB,
+		MaxArtifactBytesPerJob: 10,
+	}, "artifact-budget-lower"); err != nil {
+		t.Fatal(err)
+	}
+	budget, err = jobRepo.SetArtifactGenerationBytes(ctx, claim.Status, "signed", 90)
+	if err != nil || budget.LimitBytes != 100 || budget.ActiveBytes != 90 {
+		t.Fatalf("in-flight budget was preempted=%+v err=%v", budget, err)
+	}
+	releaseRace := make(chan struct{})
+	var setRaceErr, releaseRaceErr error
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		<-releaseRace
+		_, setRaceErr = jobRepo.SetArtifactGenerationBytes(
+			ctx, claim.Status, "signed", 95,
+		)
+	}()
+	go func() {
+		defer wg.Done()
+		<-releaseRace
+		releaseRaceErr = jobRepo.ReleaseArtifactGeneration(
+			ctx, claim.Status, "signed", "lock_order_test",
+		)
+	}()
+	close(releaseRace)
+	wg.Wait()
+	if setRaceErr != nil || releaseRaceErr != nil {
+		t.Fatalf(
+			"artifact set/release lock-order race failed: set=%v release=%v",
+			setRaceErr, releaseRaceErr,
+		)
+	}
+	if _, err := jobRepo.SetArtifactGenerationBytes(
+		ctx, claim.Status, "signed", 90,
+	); err != nil {
+		t.Fatalf("restore artifact generation after lock-order race: %v", err)
+	}
+	completed := *claim.Status
+	completed.Status = "completed"
+	completed.UpdatedAt = time.Now().UTC()
+	if err := jobRepo.RecordTransition(ctx, claim.Status, &completed); err != nil {
+		t.Fatal(err)
+	}
+	policy, err = iamRepo.GetProjectPolicy(ctx, project.ID)
+	if err != nil || policy.QuarantineBytes != 0 || policy.ActiveArtifactBudgets != 0 {
+		t.Fatalf("released artifact policy usage=%+v err=%v", policy, err)
+	}
+}
+
+func testProjectPhaseCaps(
+	t *testing.T,
+	ctx context.Context,
+	iamRepo *persistence.IAMRepository,
+	jobRepo *persistence.JobRepository,
+) {
+	t.Helper()
+	project, err := iamRepo.CreateProject(ctx, "phase-cap", "phase cap fixture")
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, err := iamRepo.GetProjectPolicy(ctx, project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, err = iamRepo.UpdateProjectPolicy(ctx, project.ID, persistence.ProjectPolicyUpdate{
+		Version: policy.Version, MaxQueuedJobs: 4, MaxActiveJobs: 4,
+		MaxDailySubmissions: 4, MaxActiveVCPUs: 16,
+		MaxActiveMemoryMiB: 32768, MaxActiveDiskGiB: 200,
+		MaxArtifactBytesPerJob: policy.MaxArtifactBytesPerJob,
+		MaxClaimedAttempts:     2, MaxProvisionAttempts: 1,
+		MaxBuildAttempts: 1, MaxVerifyAttempts: 1, MaxPublishAttempts: 1,
+	}, "phase-cap-test")
+	if err != nil || policy.MaxProvisionAttempts != 1 {
+		t.Fatalf("configure phase cap policy=%+v err=%v", policy, err)
+	}
+
+	claims := make([]*builder.SchedulerClaim, 0, 2)
+	jobIDs := make([]string, 0, 3)
+	for i := 0; i < 3; i++ {
+		request := &builder.BuildRequest{
+			ProjectID:   project.ID,
+			PackageName: fmt.Sprintf("app-misc/phase-cap-%d", i),
+			Arch:        "amd64", ResourceClass: "small",
+			IdempotencyKey: fmt.Sprintf("phase-cap-%d", i),
+			MachineSpec: map[string]string{
+				"cores": "2", "memory": "2048", "disk_size": "20",
+			},
+		}
+		now := time.Now().UTC().Add(time.Duration(i) * time.Millisecond)
+		status := &builder.BuildStatus{
+			JobID: uuid.NewString(), ProjectID: project.ID, Status: "queued",
+			PackageName: request.PackageName, Arch: "amd64",
+			CreatedAt: now, UpdatedAt: now, Request: request,
+		}
+		if result, err := jobRepo.CreateJob(ctx, request, status); err != nil || !result.Created {
+			t.Fatalf("create phase-cap job %d: result=%+v err=%v", i, result, err)
+		}
+		jobIDs = append(jobIDs, status.JobID)
+	}
+	for i := 0; i < 2; i++ {
+		claim, err := jobRepo.ClaimNext(
+			ctx, fmt.Sprintf("phase-cap-worker-%d", i), time.Minute,
+		)
+		if err != nil || claim == nil || claim.Status.ProjectID != project.ID {
+			t.Fatalf("claim phase-cap job %d: claim=%+v err=%v", i, claim, err)
+		}
+		claims = append(claims, claim)
+	}
+	if extra, err := jobRepo.ClaimNext(ctx, "phase-cap-worker-extra", time.Minute); err != nil || extra != nil {
+		t.Fatalf("claimed-cap accepted a third attempt: claim=%+v err=%v", extra, err)
+	}
+
+	firstProvision := *claims[0].Status
+	firstProvision.Status, firstProvision.UpdatedAt = "provisioning", time.Now().UTC()
+	if err := jobRepo.RecordTransition(ctx, claims[0].Status, &firstProvision); err != nil {
+		t.Fatal(err)
+	}
+	secondProvision := *claims[1].Status
+	secondProvision.Status, secondProvision.UpdatedAt = "provisioning", time.Now().UTC()
+	err = jobRepo.RecordTransition(ctx, claims[1].Status, &secondProvision)
+	capacity, ok := builder.AsPhaseCapacityError(err)
+	if !ok || capacity.Phase != "provision" || capacity.Limit != 1 || capacity.Used != 1 {
+		t.Fatalf("provision phase cap error=%+v raw=%v", capacity, err)
+	}
+
+	firstBuild := firstProvision
+	firstBuild.Status, firstBuild.UpdatedAt = "building", time.Now().UTC()
+	if err := jobRepo.RecordTransition(ctx, &firstProvision, &firstBuild); err != nil {
+		t.Fatal(err)
+	}
+	secondProvision.UpdatedAt = time.Now().UTC()
+	if err := jobRepo.RecordTransition(ctx, claims[1].Status, &secondProvision); err != nil {
+		t.Fatalf("provision phase was not admitted after release: %v", err)
+	}
+	for _, current := range []*builder.BuildStatus{&firstBuild, &secondProvision} {
+		failed := *current
+		failed.Status, failed.Error, failed.UpdatedAt = "failed", "phase cap fixture cleanup", time.Now().UTC()
+		if err := jobRepo.RecordTransition(ctx, current, &failed); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := jobRepo.CancelJob(ctx, jobIDs[2], "phase cap fixture cleanup"); err != nil {
+		t.Fatal(err)
+	}
+	policy, err = iamRepo.GetProjectPolicy(ctx, project.ID)
+	if err != nil || policy.ActiveJobs != 0 || policy.ClaimedReservations != 0 ||
+		policy.ProvisionReservations != 0 || policy.BuildReservations != 0 {
+		t.Fatalf("phase cap cleanup policy=%+v err=%v", policy, err)
+	}
+}
+
+func testExecutorCapabilityRouting(
+	t *testing.T,
+	ctx context.Context,
+	db *persistence.Database,
+	iamRepo *persistence.IAMRepository,
+	jobRepo *persistence.JobRepository,
+) {
+	t.Helper()
+	project, err := iamRepo.CreateProject(
+		ctx, "capability-routing", "executor capability routing fixture",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, err := iamRepo.GetProjectPolicy(ctx, project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := iamRepo.UpdateProjectPolicy(ctx, project.ID, persistence.ProjectPolicyUpdate{
+		Version: policy.Version, MaxQueuedJobs: 2, MaxActiveJobs: 2,
+		MaxDailySubmissions: 2, MaxActiveVCPUs: 4,
+		MaxActiveMemoryMiB: 8192, MaxActiveDiskGiB: 80,
+		MaxArtifactBytesPerJob: policy.MaxArtifactBytesPerJob,
+		MaxClaimedAttempts:     2, MaxProvisionAttempts: 2,
+		MaxBuildAttempts: 2, MaxVerifyAttempts: 2, MaxPublishAttempts: 2,
+	}, "capability-routing-test"); err != nil {
+		t.Fatal(err)
+	}
+
+	resolved := &catalog.ResolvedBuildContext{
+		ProfileID: "pe/amd64/capability-v1",
+		Arch:      "amd64", Provider: "pve", ExecutionZone: "lan-a",
+		BuildMode: "native-gentoo", ImageID: "pe/base-g6",
+		ImageGeneration: "g6", ResourceClass: "small",
+		MachineSpec: map[string]string{
+			"cores": "2", "memory": "2048", "disk_size": "20",
+		},
+		MaxRuntimeMinutes: 60, CloudCostMicrounitsPerMinute: 100,
+	}
+	request := &builder.BuildRequest{
+		ProjectID: project.ID, PackageName: "app-misc/capability-route",
+		Arch: "amd64", ResourceClass: "small",
+		MachineSpec:     resolved.MachineSpec,
+		ResolvedContext: resolved,
+		IdempotencyKey:  "capability-route-exact",
+	}
+	now := time.Now().UTC()
+	status := &builder.BuildStatus{
+		JobID: uuid.NewString(), ProjectID: project.ID, Status: "queued",
+		PackageName: request.PackageName, Arch: request.Arch,
+		CreatedAt: now, UpdatedAt: now, Request: request,
+		ResolvedContext: resolved,
+	}
+
+	var exactCapabilities []string
+	for _, phase := range []string{"provision", "build", "verify", "publish"} {
+		labels, requirementErr := builder.PhaseCapabilityRequirements(request, phase)
+		if requirementErr != nil {
+			t.Fatal(requirementErr)
+		}
+		exactCapabilities = append(exactCapabilities, labels...)
+	}
+	exactCapabilities, err = builder.NormalizeExecutorCapabilities(exactCapabilities)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrongCapabilities := append([]string(nil), exactCapabilities...)
+	for index, label := range wrongCapabilities {
+		if label == "zone:lan-a" {
+			wrongCapabilities[index] = "zone:lan-b"
+		}
+	}
+	wrongCapabilities, err = builder.NormalizeExecutorCapabilities(wrongCapabilities)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrongWorker := "capability-wrong-" + uuid.NewString()
+	if claim, err := jobRepo.ClaimPhaseWork(
+		ctx, wrongWorker, time.Minute, wrongCapabilities,
+	); err != nil || claim != nil {
+		t.Fatalf("register mismatched executor: claim=%+v err=%v", claim, err)
+	}
+	if result, err := jobRepo.CreateJob(ctx, request, status); err != nil || !result.Created {
+		t.Fatalf("create capability-routed job: result=%+v err=%v", result, err)
+	}
+	if claim, err := jobRepo.ClaimNext(
+		ctx, "capability-admission-wrong", time.Minute,
+	); err != nil || claim != nil {
+		t.Fatalf("mismatched executor admitted job: claim=%+v err=%v", claim, err)
+	}
+	runtimeStatus, err := jobRepo.RuntimeStatus(ctx)
+	if err != nil || runtimeStatus.UnschedulableTasks < 1 ||
+		runtimeStatus.CapabilityWorkers < 1 {
+		t.Fatalf("capability routing status=%+v err=%v", runtimeStatus, err)
+	}
+
+	exactWorker := "capability-exact-" + uuid.NewString()
+	if claim, err := jobRepo.ClaimPhaseWork(
+		ctx, exactWorker, time.Minute, exactCapabilities,
+	); err != nil || claim != nil {
+		t.Fatalf("register exact executor: claim=%+v err=%v", claim, err)
+	}
+	if claim, err := jobRepo.ClaimNext(
+		ctx, "capability-admission-still-wrong", time.Minute,
+	); err != nil || claim != nil {
+		t.Fatalf(
+			"current mismatched admission worker borrowed another worker's capability: claim=%+v err=%v",
+			claim, err,
+		)
+	}
+	schedulerClaim, err := jobRepo.ClaimNext(
+		ctx, "capability-admission-exact", time.Minute, exactCapabilities,
+	)
+	if err != nil || schedulerClaim == nil || schedulerClaim.Status.JobID != status.JobID {
+		t.Fatalf("exact executor did not admit job: claim=%+v err=%v", schedulerClaim, err)
+	}
+	if err := jobRepo.ActivatePhasePlan(ctx, schedulerClaim.Status); err != nil {
+		t.Fatal(err)
+	}
+	if claim, err := jobRepo.ClaimPhaseWork(
+		ctx, wrongWorker, time.Minute, wrongCapabilities, "provision",
+	); err != nil || claim != nil {
+		t.Fatalf("mismatched executor claimed phase: claim=%+v err=%v", claim, err)
+	}
+	phaseClaim, err := jobRepo.ClaimPhaseWork(
+		ctx, exactWorker, time.Minute, exactCapabilities, "provision",
+	)
+	if err != nil || phaseClaim == nil || phaseClaim.JobID != status.JobID {
+		t.Fatalf("exact executor did not claim phase: claim=%+v err=%v", phaseClaim, err)
+	}
+	if err := jobRepo.FailPhaseWork(ctx, phaseClaim, "capability fixture cleanup"); err != nil {
+		t.Fatal(err)
+	}
+	failed := *schedulerClaim.Status
+	failed.Status, failed.Error = "failed", "capability fixture cleanup"
+	failed.UpdatedAt = time.Now().UTC()
+	if err := jobRepo.RecordTransition(ctx, schedulerClaim.Status, &failed); err != nil {
+		t.Fatal(err)
+	}
+	var storedJobRequirements, storedPhaseRequirements []string
+	if err := db.Pool().QueryRow(ctx, `
+		SELECT j.required_capabilities, w.required_capabilities
+		FROM build_jobs j
+		JOIN phase_work_items w ON w.job_id = j.id AND w.phase = 'provision'
+		WHERE j.id = $1
+	`, status.JobID).Scan(&storedJobRequirements, &storedPhaseRequirements); err != nil {
+		t.Fatal(err)
+	}
+	expected, err := builder.PhaseCapabilityRequirements(request, "provision")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(storedJobRequirements, "\n") != strings.Join(expected, "\n") ||
+		strings.Join(storedPhaseRequirements, "\n") != strings.Join(expected, "\n") {
+		t.Fatalf(
+			"stored requirements job=%v phase=%v expected=%v",
+			storedJobRequirements, storedPhaseRequirements, expected,
+		)
+	}
+}
+
+func testDurablePhaseWorkQueue(
+	t *testing.T,
+	ctx context.Context,
+	db *persistence.Database,
+	iamRepo *persistence.IAMRepository,
+	jobRepo *persistence.JobRepository,
+) {
+	t.Helper()
+	project, err := iamRepo.CreateProject(ctx, "phase-work", "phase work fixture")
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, err := iamRepo.GetProjectPolicy(ctx, project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = iamRepo.UpdateProjectPolicy(ctx, project.ID, persistence.ProjectPolicyUpdate{
+		Version: policy.Version, MaxQueuedJobs: 4, MaxActiveJobs: 4,
+		MaxDailySubmissions: 4, MaxActiveVCPUs: 16,
+		MaxActiveMemoryMiB: 32768, MaxActiveDiskGiB: 200,
+		MaxArtifactBytesPerJob: policy.MaxArtifactBytesPerJob,
+		MaxClaimedAttempts:     2, MaxProvisionAttempts: 1,
+		MaxBuildAttempts: 1, MaxVerifyAttempts: 1, MaxPublishAttempts: 1,
+	}, "phase-work-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	claims := make([]*builder.SchedulerClaim, 0, 2)
+	for i := 0; i < 2; i++ {
+		request := &builder.BuildRequest{
+			ProjectID:   project.ID,
+			PackageName: fmt.Sprintf("app-misc/phase-work-%d", i),
+			Arch:        "amd64", ResourceClass: "small",
+			IdempotencyKey: fmt.Sprintf("phase-work-%d", i),
+			MachineSpec: map[string]string{
+				"cores": "2", "memory": "2048", "disk_size": "20",
+			},
+		}
+		now := time.Now().UTC().Add(time.Duration(i) * time.Millisecond)
+		status := &builder.BuildStatus{
+			JobID: uuid.NewString(), ProjectID: project.ID, Status: "queued",
+			PackageName: request.PackageName, Arch: "amd64",
+			CreatedAt: now, UpdatedAt: now, Request: request,
+		}
+		if result, err := jobRepo.CreateJob(ctx, request, status); err != nil || !result.Created {
+			t.Fatalf("create phase work job %d: result=%+v err=%v", i, result, err)
+		}
+		claim, err := jobRepo.ClaimNext(
+			ctx, fmt.Sprintf("phase-work-attempt-%d", i), time.Minute,
+		)
+		if err != nil || claim == nil || claim.Status.ProjectID != project.ID {
+			t.Fatalf("claim phase work attempt %d: claim=%+v err=%v", i, claim, err)
+		}
+		claims = append(claims, claim)
+	}
+	for _, claim := range claims {
+		if err := jobRepo.ActivatePhasePlan(ctx, claim.Status); err != nil {
+			t.Fatalf("activate phase plan: %v", err)
+		}
+	}
+	status, err := jobRepo.PhaseWorkStatus(ctx, project.ID)
+	if err != nil || status.Shadow != 0 || status.Active != 8 ||
+		status.Ready != 2 || status.Blocked != 6 {
+		t.Fatalf("initial phase work status=%+v err=%v", status, err)
+	}
+
+	first, err := jobRepo.ClaimPhaseWork(
+		ctx, "phase-executor-a", 100*time.Millisecond,
+		legacyExecutorCapabilities, "provision",
+	)
+	if err != nil || first == nil || first.Phase != "provision" {
+		latest, statusErr := jobRepo.PhaseWorkStatus(ctx, project.ID)
+		policyNow, policyErr := iamRepo.GetProjectPolicy(ctx, project.ID)
+		t.Fatalf(
+			"first phase claim=%+v err=%v status=%+v statusErr=%v policy=%+v policyErr=%v",
+			first, err, latest, statusErr, policyNow, policyErr,
+		)
+	}
+	if blocked, err := jobRepo.ClaimPhaseWork(
+		ctx, "phase-executor-b", time.Minute,
+		legacyExecutorCapabilities, "provision",
+	); err != nil || blocked != nil {
+		t.Fatalf("provision cap oversold: claim=%+v err=%v", blocked, err)
+	}
+	if _, err := db.Pool().Exec(ctx, `
+		UPDATE phase_work_items
+		SET lease_expires_at = clock_timestamp() - interval '1 second'
+		WHERE id = $1
+	`, first.ID); err != nil {
+		t.Fatal(err)
+	}
+	reclaimed, err := jobRepo.ClaimPhaseWork(
+		ctx, "phase-executor-c", time.Minute,
+		legacyExecutorCapabilities, "provision",
+	)
+	if err != nil || reclaimed == nil || reclaimed.ID != first.ID ||
+		reclaimed.ClaimFence <= first.ClaimFence {
+		var workState, reservationPhase string
+		var workExpires *time.Time
+		var attemptLease time.Time
+		diagErr := db.Pool().QueryRow(ctx, `
+			SELECT w.state, w.lease_expires_at, r.phase, l.expires_at
+			FROM phase_work_items w
+			JOIN project_resource_reservations r ON r.attempt_id = w.attempt_id
+			JOIN worker_leases l ON l.attempt_id = w.attempt_id
+			WHERE w.id = $1
+		`, first.ID).Scan(
+			&workState, &workExpires, &reservationPhase, &attemptLease,
+		)
+		t.Fatalf(
+			"reclaimed phase work=%+v first=%+v err=%v state=%s workExpiry=%s reservation=%s attemptExpiry=%s diagErr=%v",
+			reclaimed, first, err, workState, workExpires, reservationPhase,
+			attemptLease, diagErr,
+		)
+	}
+	if err := jobRepo.CompletePhaseWork(ctx, first); err == nil ||
+		!strings.Contains(err.Error(), "lock claimed phase work") {
+		t.Fatalf("stale phase fence completed reclaimed work: %v", err)
+	}
+	if err := jobRepo.RenewPhaseWork(ctx, reclaimed, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if err := jobRepo.CompletePhaseWork(ctx, reclaimed); err != nil {
+		t.Fatal(err)
+	}
+	second, err := jobRepo.ClaimPhaseWork(
+		ctx, "phase-executor-b", time.Minute,
+		legacyExecutorCapabilities, "provision",
+	)
+	if err != nil || second == nil || second.ID == first.ID {
+		rows, rowsErr := db.Pool().Query(ctx, `
+			SELECT w.id::text, w.state, w.available_at, r.phase,
+			       l.expires_at, j.state, a.state
+			FROM phase_work_items w
+			JOIN project_resource_reservations r ON r.attempt_id = w.attempt_id
+			JOIN worker_leases l ON l.attempt_id = w.attempt_id
+			JOIN build_jobs j ON j.id = w.job_id
+			JOIN build_attempts a ON a.id = w.attempt_id
+			WHERE w.project_id = $1 AND w.phase = 'provision'
+			ORDER BY w.id
+		`, project.ID)
+		var diagnostics []string
+		if rowsErr == nil {
+			for rows.Next() {
+				var id, state, phase, jobState, attemptState string
+				var available, lease time.Time
+				if scanErr := rows.Scan(
+					&id, &state, &available, &phase, &lease, &jobState, &attemptState,
+				); scanErr != nil {
+					diagnostics = append(diagnostics, scanErr.Error())
+					break
+				}
+				diagnostics = append(diagnostics, fmt.Sprintf(
+					"%s:%s:available=%s:reservation=%s:lease=%s:job=%s:attempt=%s",
+					id, state, available, phase, lease, jobState, attemptState,
+				))
+			}
+			rows.Close()
+		}
+		t.Fatalf(
+			"second provision claim=%+v err=%v rowsErr=%v diagnostics=%v",
+			second, err, rowsErr, diagnostics,
+		)
+	}
+	if err := jobRepo.CompletePhaseWork(ctx, second); err != nil {
+		t.Fatal(err)
+	}
+	status, err = jobRepo.PhaseWorkStatus(ctx, project.ID)
+	if err != nil || status.Completed != 2 || status.Ready != 2 ||
+		status.Claimed != 0 {
+		t.Fatalf("completed phase work status=%+v err=%v", status, err)
+	}
+	for _, claim := range claims {
+		if _, err := jobRepo.CancelJob(
+			ctx, claim.Status.JobID, "phase work fixture cleanup",
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func testResourceReservationReleasePaths(
+	t *testing.T,
+	ctx context.Context,
+	db *persistence.Database,
+	iamRepo *persistence.IAMRepository,
+	jobRepo *persistence.JobRepository,
+) {
+	t.Helper()
+	createAndClaim := func(
+		projectName, packageName, worker string,
+		lease time.Duration,
+	) (*builder.SchedulerClaim, string) {
+		t.Helper()
+		project, err := iamRepo.CreateProject(ctx, projectName, "resource release fixture")
+		if err != nil {
+			t.Fatal(err)
+		}
+		request := &builder.BuildRequest{
+			ProjectID: project.ID, PackageName: packageName, Arch: "amd64",
+			ResourceClass: "small",
+			MachineSpec: map[string]string{
+				"cores": "2", "memory": "4096", "disk_size": "40",
+			},
+			IdempotencyKey: projectName,
+		}
+		now := time.Now().UTC()
+		status := &builder.BuildStatus{
+			JobID: uuid.NewString(), ProjectID: project.ID, Status: "queued",
+			PackageName: packageName, Arch: "amd64", CreatedAt: now,
+			UpdatedAt: now, Request: request,
+		}
+		if result, err := jobRepo.CreateJob(ctx, request, status); err != nil || !result.Created {
+			t.Fatalf("create resource release job=%+v err=%v", result, err)
+		}
+		claim, err := jobRepo.ClaimNext(ctx, worker, lease)
+		if err != nil || claim == nil || claim.Status.JobID != status.JobID {
+			t.Fatalf("claim resource release job=%+v err=%v", claim, err)
+		}
+		return claim, status.JobID
+	}
+	assertReleased := func(attemptID, reason string) {
+		t.Helper()
+		var state, actualReason string
+		var released bool
+		if err := db.Pool().QueryRow(ctx, `
+			SELECT state, release_reason, released_at IS NOT NULL
+			FROM project_resource_reservations
+			WHERE attempt_id = $1
+		`, attemptID).Scan(&state, &actualReason, &released); err != nil {
+			t.Fatal(err)
+		}
+		if state != "released" || actualReason != reason || !released {
+			t.Fatalf("reservation %s state=%s reason=%s released=%v",
+				attemptID, state, actualReason, released)
+		}
+	}
+
+	cancelClaim, cancelJobID := createAndClaim(
+		"resource-cancel", "app-misc/cancel-resource", "resource-cancel-worker", time.Minute,
+	)
+	if _, err := jobRepo.CancelJob(ctx, cancelJobID, "integration cancellation"); err != nil {
+		t.Fatal(err)
+	}
+	assertReleased(cancelClaim.Status.AttemptID, "job_canceled")
+
+	completeClaim, _ := createAndClaim(
+		"resource-complete", "app-misc/complete-resource", "resource-complete-worker", time.Minute,
+	)
+	completed := *completeClaim.Status
+	completed.Status = "completed"
+	completed.UpdatedAt = time.Now().UTC()
+	if err := jobRepo.RecordTransition(ctx, completeClaim.Status, &completed); err != nil {
+		t.Fatal(err)
+	}
+	assertReleased(completeClaim.Status.AttemptID, "job_completed")
+
+	expiryClaim, expiryJobID := createAndClaim(
+		"resource-expiry", "app-misc/expire-resource", "resource-expiry-worker", 100*time.Millisecond,
+	)
+	if _, err := db.Pool().Exec(ctx, `
+		UPDATE build_jobs SET max_attempts = 1 WHERE id = $1
+	`, expiryJobID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Pool().Exec(ctx, `
+		UPDATE worker_leases
+		SET expires_at = clock_timestamp() - interval '1 second'
+		WHERE attempt_id = $1
+	`, expiryClaim.Status.AttemptID); err != nil {
+		t.Fatal(err)
+	}
+	if claim, err := jobRepo.ClaimNext(ctx, "resource-recovery-worker", time.Minute); err != nil || claim != nil {
+		t.Fatalf("lease recovery unexpectedly claimed=%+v err=%v", claim, err)
+	}
+	assertReleased(expiryClaim.Status.AttemptID, "lease_expired")
+}
+
+func testConcurrentIdempotentAdmission(
+	t *testing.T,
+	ctx context.Context,
+	db *persistence.Database,
+	iamRepo *persistence.IAMRepository,
+	jobRepo *persistence.JobRepository,
+) {
+	t.Helper()
+	project, err := iamRepo.CreateProject(ctx, "idempotency-race", "admission race fixture")
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, err := iamRepo.GetProjectPolicy(ctx, project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := iamRepo.UpdateProjectPolicy(ctx, project.ID, persistence.ProjectPolicyUpdate{
+		Version: policy.Version, MaxQueuedJobs: 1, MaxActiveJobs: 1,
+		MaxDailySubmissions: 1, MaxActiveVCPUs: policy.MaxActiveVCPUs,
+		MaxActiveMemoryMiB: policy.MaxActiveMemoryMiB,
+		MaxActiveDiskGiB:   policy.MaxActiveDiskGiB,
+	}, "integration-test"); err != nil {
+		t.Fatal(err)
+	}
+
+	requests := [2]*builder.BuildRequest{}
+	statuses := [2]*builder.BuildStatus{}
+	now := time.Now().UTC()
+	for i := range requests {
+		requests[i] = &builder.BuildRequest{
+			ProjectID: project.ID, PackageName: "app-misc/race",
+			Arch: "amd64", IdempotencyKey: "same-key",
+		}
+		statuses[i] = &builder.BuildStatus{
+			JobID: uuid.NewString(), ProjectID: project.ID, Status: "queued",
+			PackageName: requests[i].PackageName, Arch: "amd64",
+			CreatedAt: now, UpdatedAt: now, Request: requests[i],
+		}
+	}
+	var (
+		wg      sync.WaitGroup
+		start   = make(chan struct{})
+		results [2]builder.LedgerCreateResult
+		errs    [2]error
+	)
+	for i := range requests {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			results[i], errs[i] = jobRepo.CreateJob(ctx, requests[i], statuses[i])
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+	if errs[0] != nil || errs[1] != nil {
+		t.Fatalf("concurrent idempotent admission errors=%v", errs)
+	}
+	if results[0].JobID != results[1].JobID || results[0].Created == results[1].Created {
+		t.Fatalf("concurrent idempotent results=%+v", results)
+	}
+
+	var count int
+	if err := db.Pool().QueryRow(ctx, `
+		SELECT count(*) FROM build_jobs WHERE project_id = $1
+	`, project.ID).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("concurrent idempotent durable rows=%d", count)
+	}
+}
+
 func TestSigningQueueDigestFenceConcurrencyAndReclaim(t *testing.T) {
 	adminDSN := os.Getenv("PORTAGE_TEST_DATABASE_URL")
 	if adminDSN == "" {
@@ -151,7 +2430,7 @@ func TestSigningQueueDigestFenceConcurrencyAndReclaim(t *testing.T) {
 			t.Logf("drop signing schema: %v", err)
 		}
 	}()
-	testDSN, err := withQueryValue(adminDSN, "search_path", schema)
+	testDSN, err := withSearchPath(adminDSN, schema)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,14 +2462,19 @@ func TestSigningQueueDigestFenceConcurrencyAndReclaim(t *testing.T) {
 	relative := "app-misc/hello-2.12.2.gpkg.tar"
 	if err := db.WithTx(ctx, pgx.TxOptions{}, func(q persistence.Querier) error {
 		if _, err := q.Exec(ctx, `
-			INSERT INTO workers (id, stable_name, max_slots)
-			VALUES ($1, 'signing-build-worker', 1)
-		`, workerID); err != nil {
+			INSERT INTO workers (
+				id, stable_name, max_slots, executor_protocol
+			)
+			VALUES ($1, 'signing-build-worker', 1, $2)
+		`, workerID, builder.ExecutorProtocolVersion); err != nil {
 			return err
 		}
 		if _, err := q.Exec(ctx, `
-			INSERT INTO build_jobs (id, package_atom, state, request, request_digest)
-			VALUES ($1, 'app-misc/hello', 'signing', '{}'::jsonb, 'fixture')
+			INSERT INTO build_jobs (id, project_id, package_atom, state, request, request_digest)
+			VALUES (
+				$1, (SELECT id FROM projects WHERE name = 'default'),
+				'app-misc/hello', 'signing', '{}'::jsonb, 'fixture'
+			)
 		`, jobID); err != nil {
 			return err
 		}
@@ -219,6 +2503,7 @@ func TestSigningQueueDigestFenceConcurrencyAndReclaim(t *testing.T) {
 	request := signing.Request{
 		JobID: jobID.String(), AttemptID: attemptID.String(), AttemptFence: 1,
 		LeaseOwner: "signing-build-worker", SourceToken: sourceToken, Architecture: "amd64",
+		MaxOutputBytes: 1 << 20,
 		Artifacts: []signing.Artifact{{
 			RelativePath: relative, InputDigest: digest, InputSize: 123,
 		}},
@@ -301,8 +2586,11 @@ func TestSigningQueueDigestFenceConcurrencyAndReclaim(t *testing.T) {
 	staleToken := strings.Repeat("b", 32)
 	if err := db.WithTx(ctx, pgx.TxOptions{}, func(q persistence.Querier) error {
 		if _, err := q.Exec(ctx, `
-			INSERT INTO build_jobs (id, package_atom, state, request, request_digest)
-			VALUES ($1, 'app-misc/hello', 'signing', '{}'::jsonb, 'stale-fixture')
+			INSERT INTO build_jobs (id, project_id, package_atom, state, request, request_digest)
+			VALUES (
+				$1, (SELECT id FROM projects WHERE name = 'default'),
+				'app-misc/hello', 'signing', '{}'::jsonb, 'stale-fixture'
+			)
 		`, staleJobID); err != nil {
 			return err
 		}
@@ -379,7 +2667,7 @@ func TestJobLedgerIdempotencyTransitionsOutboxAndReconcile(t *testing.T) {
 		}
 	}()
 
-	testDSN, err := withQueryValue(adminDSN, "search_path", schema)
+	testDSN, err := withSearchPath(adminDSN, schema)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -415,7 +2703,10 @@ func TestJobLedgerIdempotencyTransitionsOutboxAndReconcile(t *testing.T) {
 			Metadata: builder.BundleMetadata{CreatedAt: now.Format(time.RFC3339)},
 		},
 		ResolvedContext: &catalog.ResolvedBuildContext{
-			ProfileID: "pe/amd64/base", ImageGeneration: "img-42", ResolvedAt: now,
+			ProfileID: "pe/amd64/base",
+			Arch:      "amd64", Provider: "pve", ExecutionZone: "default",
+			BuildMode: "native-gentoo", ImageID: "pe/amd64/base-img-42",
+			ImageGeneration: "img-42", ResolvedAt: now,
 		},
 	}
 	queued := &builder.BuildStatus{
@@ -551,6 +2842,18 @@ func testDurableScheduler(t *testing.T, ctx context.Context, db *persistence.Dat
 		first.Status.AttemptID == "" || first.Status.FenceToken != 1 {
 		t.Fatalf("first claim=%+v err=%v", first, err)
 	}
+	var leaseRemainingNanos int64
+	if err := db.Pool().QueryRow(ctx, `
+		SELECT (extract(epoch FROM expires_at - clock_timestamp()) * 1000000000)::bigint
+		FROM worker_leases
+		WHERE attempt_id = $1
+	`, first.Status.AttemptID).Scan(&leaseRemainingNanos); err != nil {
+		t.Fatal(err)
+	}
+	leaseRemaining := time.Duration(leaseRemainingNanos)
+	if leaseRemaining > 500*time.Millisecond {
+		t.Fatalf("lease deadline used a non-database clock: %v", leaseRemaining)
+	}
 	if second, err := repo.ClaimNext(ctx, "db2-worker-b", time.Second); err != nil || second != nil {
 		t.Fatalf("concurrent duplicate claim=%+v err=%v", second, err)
 	}
@@ -638,6 +2941,13 @@ func testDurableScheduler(t *testing.T, ctx context.Context, db *persistence.Dat
 func testConcurrentClaims(t *testing.T, ctx context.Context, db *persistence.Database, repo *persistence.JobRepository, now time.Time) {
 	t.Helper()
 	const jobCount = 24
+	if _, err := db.Pool().Exec(ctx, `
+		UPDATE project_policies
+		SET max_failures_per_hour = $1
+		WHERE project_id = (SELECT id FROM projects WHERE name = 'default')
+	`, jobCount*4); err != nil {
+		t.Fatal(err)
+	}
 	jobIDs := make(map[string]struct{}, jobCount)
 	for i := 0; i < jobCount; i++ {
 		req := &builder.BuildRequest{
@@ -1067,13 +3377,13 @@ func testRuntimeMetadata(t *testing.T, ctx context.Context, db *persistence.Data
 	}
 }
 
-func withQueryValue(dsn, key, value string) (string, error) {
+func withSearchPath(dsn, value string) (string, error) {
 	parsed, err := url.Parse(dsn)
 	if err != nil {
 		return "", fmt.Errorf("parse test database URL: %w", err)
 	}
 	query := parsed.Query()
-	query.Set(key, value)
+	query.Set("search_path", value)
 	parsed.RawQuery = query.Encode()
 	return parsed.String(), nil
 }

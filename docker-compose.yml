@@ -25,6 +25,7 @@ services:
       PORTAGE_POSTGRES_APP_USER: ${PORTAGE_POSTGRES_APP_USER:-portage_app}
       PORTAGE_POSTGRES_APP_PASSWORD: ${PORTAGE_POSTGRES_APP_PASSWORD:-portage-app-local}
       PORTAGE_POSTGRES_SIGNER_PASSWORD: ${PORTAGE_POSTGRES_SIGNER_PASSWORD:-portage-signer-local}
+      PORTAGE_POSTGRES_ACTUATOR_PASSWORD: ${PORTAGE_POSTGRES_ACTUATOR_PASSWORD:-portage-actuator-local}
       OTEL_POSTGRES_PASSWORD: ${PORTAGE_OTEL_POSTGRES_PASSWORD:-portage-otel-local}
     ports:
       - "127.0.0.1:${PORTAGE_POSTGRES_PORT:-25432}:5432"
@@ -229,15 +230,21 @@ services:
       PGUSER: ${PORTAGE_POSTGRES_USER:-portage}
       PGPASSWORD: ${PORTAGE_POSTGRES_PASSWORD:-portage-postgres-local}
       SIGNER_PASSWORD: ${PORTAGE_POSTGRES_SIGNER_PASSWORD:-portage-signer-local}
+      ACTUATOR_PASSWORD: ${PORTAGE_POSTGRES_ACTUATOR_PASSWORD:-portage-actuator-local}
     command:
       - /bin/sh
       - -ec
       - |
-        psql --set=ON_ERROR_STOP=1 --set=signer_password="$${SIGNER_PASSWORD}" <<'EOSQL'
+        psql --set=ON_ERROR_STOP=1 --set=signer_password="$${SIGNER_PASSWORD}" --set=actuator_password="$${ACTUATOR_PASSWORD}" <<'EOSQL'
         SELECT format('CREATE ROLE portage_signer LOGIN PASSWORD %L', :'signer_password')
         WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'portage_signer')
         \gexec
         SELECT format('ALTER ROLE portage_signer LOGIN PASSWORD %L', :'signer_password')
+        \gexec
+        SELECT format('CREATE ROLE portage_actuator LOGIN PASSWORD %L', :'actuator_password')
+        WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'portage_actuator')
+        \gexec
+        SELECT format('ALTER ROLE portage_actuator LOGIN PASSWORD %L', :'actuator_password')
         \gexec
         SELECT format('GRANT CONNECT ON DATABASE %I TO portage_signer', current_database())
         \gexec
@@ -248,10 +255,59 @@ services:
         SELECT 'GRANT SELECT ON build_jobs, build_attempts, worker_leases, workers, artifacts, goose_db_version TO portage_signer'
         WHERE to_regclass('public.signing_tasks') IS NOT NULL
         \gexec
+        SELECT format('GRANT CONNECT ON DATABASE %I TO portage_actuator', current_database())
+        \gexec
+        GRANT USAGE ON SCHEMA public TO portage_actuator;
+        SELECT 'GRANT SELECT ON scheduler_capacity_pool_state, workers, worker_leases, phase_work_items, goose_db_version TO portage_actuator'
+        WHERE to_regclass('public.scheduler_capacity_actions') IS NOT NULL
+        \gexec
+        SELECT 'GRANT UPDATE (desired_state, updated_at) ON workers TO portage_actuator'
+        WHERE to_regclass('public.scheduler_capacity_actions') IS NOT NULL
+        \gexec
+        SELECT 'GRANT SELECT, INSERT, UPDATE, DELETE ON scheduler_capacity_actions, scheduler_capacity_instances TO portage_actuator'
+        WHERE to_regclass('public.scheduler_capacity_actions') IS NOT NULL
+        \gexec
         EOSQL
     depends_on:
       postgres:
         condition: service_healthy
+    networks:
+      - portage-net
+    logging: *default-logging
+
+  # Opt-in only: this daemon can create/delete PVE VMs. It has no listener,
+  # uses a dedicated database role, and accepts credentials only from env.
+  portage-capacity-actuator:
+    profiles: ["capacity-actuator"]
+    image: portage-engine-control-plane:local
+    build:
+      context: .
+    restart: unless-stopped
+    command:
+      - /usr/local/bin/portage-capacity-actuator
+      - -config
+      - /etc/portage-engine/capacity-actuator.json
+      - -server-config
+      - /nonexistent.conf
+    environment:
+      DATABASE_ENABLED: "true"
+      DATABASE_REQUIRED: "true"
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGDATABASE: ${PORTAGE_POSTGRES_DB:-portage_engine}
+      PGUSER: portage_actuator
+      PGPASSWORD: ${PORTAGE_POSTGRES_ACTUATOR_PASSWORD:-portage-actuator-local}
+      PGSSLMODE: disable
+      CLOUD_PVE_TOKEN_ID: ${PORTAGE_CAPACITY_PVE_TOKEN_ID:-}
+      CLOUD_PVE_TOKEN_SECRET: ${PORTAGE_CAPACITY_PVE_TOKEN_SECRET:-}
+      CLOUD_PVE_USERNAME: ${PORTAGE_CAPACITY_PVE_USERNAME:-}
+      CLOUD_PVE_PASSWORD: ${PORTAGE_CAPACITY_PVE_PASSWORD:-}
+    volumes:
+      - ${PORTAGE_CAPACITY_CONFIG_PATH:-./configs/capacity-actuator.example.json}:/etc/portage-engine/capacity-actuator.json:ro
+      - capacity-terraform:/var/lib/portage-engine/capacity-terraform
+    depends_on:
+      portage-migrate:
+        condition: service_completed_successfully
     networks:
       - portage-net
     logging: *default-logging
@@ -286,6 +342,7 @@ services:
       REDIS_KEY_PREFIX: portage-engine-local
       RATE_LIMIT_PER_MINUTE: ${PORTAGE_RATE_LIMIT_PER_MINUTE:-120}
       RATE_LIMIT_BURST: ${PORTAGE_RATE_LIMIT_BURST:-30}
+      CLOUD_DEFAULT_PROVIDER: ${PORTAGE_CLOUD_DEFAULT_PROVIDER:-gcp}
       OTEL_SERVICE_NAME: portage-server
       OTEL_RESOURCE_ATTRIBUTES: deployment.environment.name=local,service.namespace=portage-engine
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
@@ -293,11 +350,64 @@ services:
       GPG_ENABLED: "true"
       GPG_PUBLIC_KEY_PATH: /var/lib/portage-engine/signing/public.asc
       SIGNER_WAIT_TIMEOUT_SECONDS: "600"
+      AUTH_MODE: ${PORTAGE_AUTH_MODE:-legacy}
+      AUTH_PROVIDERS_PATH: ${PORTAGE_AUTH_PROVIDERS_PATH:-}
+      AUTH_ADMIN_IDENTITIES: ${PORTAGE_AUTH_ADMIN_IDENTITIES:-}
+      PORTAGE_AUTHENTIK_CLIENT_SECRET: ${PORTAGE_AUTHENTIK_CLIENT_SECRET:-}
+      PORTAGE_GOOGLE_CLIENT_SECRET: ${PORTAGE_GOOGLE_CLIENT_SECRET:-}
+      PORTAGE_GITHUB_CLIENT_SECRET: ${PORTAGE_GITHUB_CLIENT_SECRET:-}
+      API_KEY: ${PORTAGE_API_KEY:-}
+      STEP_UP_API_KEY: ${PORTAGE_STEP_UP_API_KEY:-}
+      OIDC_ISSUER_URL: ${PORTAGE_OIDC_ISSUER_URL:-}
+      OIDC_AUDIENCE: ${PORTAGE_OIDC_AUDIENCE:-}
+      OIDC_ADMIN_SUBJECTS: ${PORTAGE_OIDC_ADMIN_SUBJECTS:-}
+      OIDC_ALLOW_INSECURE_HTTP: ${PORTAGE_OIDC_ALLOW_INSECURE_HTTP:-false}
+      OIDC_SESSION_IDLE_MINUTES: ${PORTAGE_OIDC_SESSION_IDLE_MINUTES:-60}
+      OIDC_SESSION_MAX_MINUTES: ${PORTAGE_OIDC_SESSION_MAX_MINUTES:-720}
+      OIDC_STEP_UP_MAX_AGE_MINUTES: ${PORTAGE_OIDC_STEP_UP_MAX_AGE_MINUTES:-10}
+      OIDC_STEP_UP_AMR_VALUES: ${PORTAGE_OIDC_STEP_UP_AMR_VALUES:-}
+      OIDC_STEP_UP_ACR_VALUES: ${PORTAGE_OIDC_STEP_UP_ACR_VALUES:-}
+      WORKER_GATEWAY_ENABLED: ${PORTAGE_WORKER_GATEWAY_ENABLED:-false}
+      WORKER_GATEWAY_PORT: "9443"
+      WORKER_GATEWAY_ADVERTISE_URL: ${PORTAGE_WORKER_GATEWAY_ADVERTISE_URL:-}
+      WORKER_GATEWAY_TLS_CERT: /run/worker-pki/server.crt
+      WORKER_GATEWAY_TLS_KEY: /run/worker-pki/server.key
+      WORKER_GATEWAY_SERVER_CA: /run/worker-pki/ca.crt
+      WORKER_GATEWAY_CLIENT_CA: /run/worker-pki/ca.crt
+      WORKER_GATEWAY_ISSUER_ID: ${PORTAGE_WORKER_GATEWAY_ISSUER_ID:-compose-local}
+      WORKER_GATEWAY_ISSUER_PROVIDER: ${PORTAGE_WORKER_GATEWAY_ISSUER_PROVIDER:-file}
+      WORKER_GATEWAY_ISSUER_CERT: /run/worker-pki/ca.crt
+      WORKER_GATEWAY_ISSUER_KEY: /run/worker-pki/ca.key
+      WORKER_GATEWAY_VAULT_ADDRESS: ${PORTAGE_WORKER_GATEWAY_VAULT_ADDRESS:-}
+      WORKER_GATEWAY_VAULT_MOUNT: ${PORTAGE_WORKER_GATEWAY_VAULT_MOUNT:-pki}
+      WORKER_GATEWAY_VAULT_ROLE: ${PORTAGE_WORKER_GATEWAY_VAULT_ROLE:-portage-worker}
+      WORKER_GATEWAY_VAULT_TOKEN_FILE: ${PORTAGE_WORKER_GATEWAY_VAULT_TOKEN_FILE:-/run/worker-secrets/vault-token}
+      WORKER_GATEWAY_VAULT_NAMESPACE: ${PORTAGE_WORKER_GATEWAY_VAULT_NAMESPACE:-}
+      WORKER_GATEWAY_VAULT_SERVER_CA: ${PORTAGE_WORKER_GATEWAY_VAULT_SERVER_CA:-}
+      WORKER_GATEWAY_VAULT_TIMEOUT_SECONDS: ${PORTAGE_WORKER_GATEWAY_VAULT_TIMEOUT_SECONDS:-15}
+      PHASE_EXECUTOR_MODE: ${PORTAGE_PHASE_EXECUTOR_MODE:-shadow}
+      EXECUTOR_ZONES: ${PORTAGE_EXECUTOR_ZONES:-default}
+      EXECUTOR_CAPABILITIES: ${PORTAGE_EXECUTOR_CAPABILITIES:-}
+      WORKER_CERTIFICATE_TTL_MINUTES: ${PORTAGE_WORKER_CERTIFICATE_TTL_MINUTES:-180}
+      SCHEDULER_AUTOSCALE_MODE: ${PORTAGE_SCHEDULER_AUTOSCALE_MODE:-observe}
+      SCHEDULER_AUTOSCALE_MIN_SLOTS: ${PORTAGE_SCHEDULER_AUTOSCALE_MIN_SLOTS:-1}
+      SCHEDULER_AUTOSCALE_MAX_SLOTS: ${PORTAGE_SCHEDULER_AUTOSCALE_MAX_SLOTS:-64}
+      SCHEDULER_AUTOSCALE_PROVIDER_MAX_SLOTS: ${PORTAGE_SCHEDULER_AUTOSCALE_PROVIDER_MAX_SLOTS:-pve:64}
+      SCHEDULER_AUTOSCALE_TARGET_READY_PER_SLOT: ${PORTAGE_SCHEDULER_AUTOSCALE_TARGET_READY_PER_SLOT:-2}
+      SCHEDULER_AUTOSCALE_COOLDOWN_SECONDS: ${PORTAGE_SCHEDULER_AUTOSCALE_COOLDOWN_SECONDS:-60}
+      SCHEDULER_AUTOSCALE_SCALE_DOWN_SECONDS: ${PORTAGE_SCHEDULER_AUTOSCALE_SCALE_DOWN_SECONDS:-600}
+      SCHEDULER_AUTOSCALE_INTERVAL_SECONDS: ${PORTAGE_SCHEDULER_AUTOSCALE_INTERVAL_SECONDS:-15}
     ports:
       - "127.0.0.1:${PORTAGE_SERVER_PORT:-18080}:8080"
+      # mTLS makes this safe to expose to the builder VLAN when explicitly
+      # enabled. Keep the default loopback bind for local-only development.
+      - "${PORTAGE_WORKER_GATEWAY_BIND:-127.0.0.1}:${PORTAGE_WORKER_GATEWAY_PORT:-19444}:9443"
     volumes:
       - portage-logs:/var/log/portage-engine
       - portage-state:/var/lib/portage-engine
+      - ./configs:/etc/portage-engine/configs:ro
+      - ${PORTAGE_WORKER_PKI_DIR:-./.local/worker-pki}:/run/worker-pki:ro
+      - ${PORTAGE_WORKER_SECRETS_DIR:-./.local/worker-secrets}:/run/worker-secrets:ro
     depends_on:
       portage-migrate:
         condition: service_completed_successfully
@@ -373,11 +483,25 @@ services:
       rotating-log-tee /var/log/portage-engine/dashboard.log"
     environment:
       SERVER_URL: http://portage-server:8080
+      SERVER_API_KEY: ${PORTAGE_API_KEY:-}
+      SERVER_STEP_UP_API_KEY: ${PORTAGE_STEP_UP_API_KEY:-}
       AUTH_ENABLED: "true"
       JWT_SECRET: ${PORTAGE_DASHBOARD_JWT_SECRET:-compose-demo-jwt-secret-0123456789abcdef}
       ADMIN_USER: ${PORTAGE_DASHBOARD_USER:-admin}
       ADMIN_PASSWORD: ${PORTAGE_DASHBOARD_PASSWORD:-portage-demo}
       ALLOW_ANONYMOUS: "false"
+      COOKIE_SECURE: ${PORTAGE_DASHBOARD_COOKIE_SECURE:-false}
+      AUTH_PROVIDERS_PATH: ${PORTAGE_AUTH_PROVIDERS_PATH:-}
+      PORTAGE_AUTHENTIK_CLIENT_SECRET: ${PORTAGE_AUTHENTIK_CLIENT_SECRET:-}
+      PORTAGE_GOOGLE_CLIENT_SECRET: ${PORTAGE_GOOGLE_CLIENT_SECRET:-}
+      PORTAGE_GITHUB_CLIENT_SECRET: ${PORTAGE_GITHUB_CLIENT_SECRET:-}
+      OIDC_ENABLED: ${PORTAGE_DASHBOARD_OIDC_ENABLED:-false}
+      OIDC_ISSUER_URL: ${PORTAGE_OIDC_ISSUER_URL:-}
+      # Legacy single-OIDC compatibility.
+      OIDC_CLIENT_ID: ${PORTAGE_DASHBOARD_OIDC_CLIENT_ID:-}
+      OIDC_CLIENT_SECRET: ${PORTAGE_DASHBOARD_OIDC_CLIENT_SECRET:-}
+      OIDC_REDIRECT_URL: ${PORTAGE_DASHBOARD_OIDC_REDIRECT_URL:-}
+      OIDC_ALLOW_INSECURE_HTTP: ${PORTAGE_OIDC_ALLOW_INSECURE_HTTP:-false}
       OTEL_SERVICE_NAME: portage-dashboard
       OTEL_RESOURCE_ATTRIBUTES: deployment.environment.name=local,service.namespace=portage-engine
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
@@ -386,6 +510,7 @@ services:
       - "127.0.0.1:${PORTAGE_DASHBOARD_PORT:-18081}:8081"
     volumes:
       - portage-logs:/var/log/portage-engine
+      - ./configs:/etc/portage-engine/configs:ro
     depends_on:
       portage-server:
         condition: service_healthy
@@ -407,5 +532,6 @@ volumes:
   portage-logs:
   portage-state:
   portage-signer-key:
+  capacity-terraform:
   gomod-cache:
   gobuild-cache:

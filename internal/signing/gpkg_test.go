@@ -253,8 +253,8 @@ func TestVerifyGPKGRejectsManifestOnlyMember(t *testing.T) {
 		t.Fatal(err)
 	}
 	members := readGPKGMembers(t, path)
-	var payloadMembers []gpkgMember
-	var records []string
+	payloadMembers := make([]gpkgMember, 0, len(members))
+	records := make([]string, 0, len(members)+1)
 	prefix := ""
 	for _, member := range members {
 		if prefix == "" {

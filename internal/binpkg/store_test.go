@@ -27,8 +27,11 @@ func TestPromoteStagedPublishesFilesAndIndexTogether(t *testing.T) {
 	if len(paths) != 1 || paths[0] != filepath.Join(store.BasePath(), filepath.FromSlash(rel)) {
 		t.Fatalf("unexpected promoted paths: %#v", paths)
 	}
-	if _, err := os.Stat(source); !os.IsNotExist(err) {
-		t.Fatalf("staged source still exists after promotion: %v", err)
+	if _, err := os.Stat(source); err != nil {
+		t.Fatalf("staged replay source was removed before durable commit: %v", err)
+	}
+	if _, err := store.PromoteStaged(staging, []string{rel}, "amd64"); err != nil {
+		t.Fatalf("exact promotion replay: %v", err)
 	}
 	index, err := os.ReadFile(filepath.Join(store.BasePath(), "Packages"))
 	if err != nil {
