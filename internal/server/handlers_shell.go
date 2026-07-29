@@ -3,6 +3,7 @@ package server
 import (
 	"log"
 	"net/http"
+	"net/url"
 	"os/exec"
 	"strings"
 
@@ -11,14 +12,6 @@ import (
 
 // handlers_shell.go bridges a WebSocket to an SSH session on a build instance
 // so operators can inspect a node straight from the dashboard (web shell).
-
-var shellUpgrader = websocket.Upgrader{
-	ReadBufferSize:  4096,
-	WriteBufferSize: 4096,
-	// The dashboard proxies this endpoint; the server itself is API-key
-	// protected, so cross-origin checks add nothing here.
-	CheckOrigin: func(*http.Request) bool { return true },
-}
 
 // handleInstanceShell upgrades to a WebSocket and pipes it to an interactive
 // SSH session on the requested instance (GET /api/v1/instances/shell?id=...).
@@ -51,7 +44,12 @@ func (s *Server) handleInstanceShell(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	conn, err := shellUpgrader.Upgrade(w, r, nil)
+	upgrader := websocket.Upgrader{
+		ReadBufferSize:  4096,
+		WriteBufferSize: 4096,
+		CheckOrigin:     s.shellOriginAllowed,
+	}
+	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		return
 	}
@@ -113,4 +111,22 @@ func (s *Server) handleInstanceShell(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = cmd.Wait()
 	log.Printf("shell session to %q (%q) closed", instanceID, strings.TrimSpace(ip)) // #nosec G706 -- values are safely quoted.
+}
+
+func (s *Server) shellOriginAllowed(request *http.Request) bool {
+	origin := strings.TrimSpace(request.Header.Get("Origin"))
+	if origin == "" {
+		// The dashboard's server-side proxy is not a browser and does not send
+		// Origin. Authentication and system-admin RBAC still apply before the
+		// shell handler is reached.
+		return true
+	}
+	parsed, err := url.Parse(origin)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return false
+	}
+	if strings.EqualFold(parsed.Host, request.Host) {
+		return true
+	}
+	return s.isOriginAllowed(origin)
 }

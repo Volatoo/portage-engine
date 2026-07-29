@@ -57,7 +57,9 @@ func New(cfg *config.DashboardConfig) *Dashboard {
 	template.Must(tmpl.New("monitor").Parse(monitorHTML))
 	template.Must(tmpl.New("image-factory").Parse(imageFactoryHTML))
 	template.Must(tmpl.New("settings").Parse(settingsHTML))
+	template.Must(tmpl.New("packages").Parse(packagesHTML))
 	template.Must(tmpl.New("docs").Parse(docsHTML))
+	template.Must(tmpl.New("status").Parse(statusHTML))
 	template.Must(tmpl.New("shell").Parse(shellHTML))
 
 	return &Dashboard{
@@ -127,10 +129,15 @@ func (d *Dashboard) Router() http.Handler {
 	mux.HandleFunc("/monitor", d.handleBuildersMonitor)
 	mux.HandleFunc("/image-factory", d.handleImageFactoryPage)
 	mux.HandleFunc("/settings", d.handleSettingsPage)
+	mux.HandleFunc("/packages", d.handlePackagesPage)
 	mux.HandleFunc("/docs", d.handleDocs)
+	mux.HandleFunc("/status", d.handlePublicStatusPage)
 
 	// API endpoints
 	mux.HandleFunc("/api/status", d.handleStatus)
+	mux.HandleFunc("/api/public/binhosts", d.handlePublicBinhosts)
+	mux.HandleFunc("/api/public/packages", d.handlePublicPackages)
+	mux.HandleFunc("/api/public/status", d.handlePublicStatus)
 	mux.HandleFunc("/api/settings/cloud", d.handleCloudSettingsProxy)
 	mux.HandleFunc("/api/settings/cloud/test", d.handleCloudSettingsTestProxy)
 	mux.HandleFunc("/api/builds", d.handleBuilds)
@@ -609,11 +616,11 @@ func (d *Dashboard) handleShellProxy(w http.ResponseWriter, r *http.Request) {
 
 // handleBinpkgProxy streams a binhost artifact through the dashboard.
 func (d *Dashboard) handleBinpkgProxy(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	d.proxyServer(w, r, http.MethodGet, d.config.ServerURL+r.URL.Path)
+	d.proxyPublicRead(w, r, strings.TrimRight(d.config.ServerURL, "/")+r.URL.Path)
 }
 
 // handleCloudSettingsTestProxy forwards POST /api/settings/cloud/test.
@@ -684,6 +691,76 @@ func (d *Dashboard) handleStatus(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(status)
+}
+
+func (d *Dashboard) handlePublicPackages(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	query := url.Values{}
+	for _, name := range []string{"q", "profile_id", "arch", "limit", "offset"} {
+		if value := r.URL.Query().Get(name); value != "" {
+			query.Set(name, value)
+		}
+	}
+	target := strings.TrimRight(d.config.ServerURL, "/") + "/api/v1/public/packages"
+	if encoded := query.Encode(); encoded != "" {
+		target += "?" + encoded
+	}
+	d.proxyPublicRead(w, r, target)
+}
+
+func (d *Dashboard) handlePublicBinhosts(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	d.proxyPublicRead(
+		w, r,
+		strings.TrimRight(d.config.ServerURL, "/")+"/api/v1/binhosts",
+	)
+}
+
+func (d *Dashboard) handlePublicStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	d.proxyPublicRead(
+		w, r,
+		strings.TrimRight(d.config.ServerURL, "/")+"/api/v1/public/status",
+	)
+}
+
+// proxyPublicRead calls one of the backend's explicitly public read-only
+// endpoints without forwarding cookies, bearer tokens, API keys, or project
+// identity.
+func (d *Dashboard) proxyPublicRead(w http.ResponseWriter, r *http.Request, target string) {
+	// #nosec G704 -- target is assembled from the startup-validated backend
+	// origin and fixed public paths in the handlers above.
+	req, err := http.NewRequestWithContext(r.Context(), r.Method, target, nil)
+	if err != nil {
+		writeBackendError(w, err)
+		return
+	}
+	// #nosec G704 -- see target construction above.
+	resp, err := d.httpClient.Do(req)
+	if err != nil {
+		writeBackendError(w, err)
+		return
+	}
+	defer func() { _ = resp.Body.Close() }()
+	for _, name := range []string{
+		"Content-Type", "Content-Length", "Content-Disposition",
+		"Cache-Control", "ETag", "Last-Modified",
+	} {
+		if value := resp.Header.Get(name); value != "" {
+			w.Header().Set(name, value)
+		}
+	}
+	w.WriteHeader(resp.StatusCode)
+	_, _ = io.Copy(w, resp.Body)
 }
 
 // handleBuilds returns the list of builds from the server.
@@ -803,6 +880,14 @@ func (d *Dashboard) handleBuildersMonitor(w http.ResponseWriter, _ *http.Request
 // handleDocs serves the documentation page.
 func (d *Dashboard) handleDocs(w http.ResponseWriter, _ *http.Request) {
 	d.renderPage(w, "docs", nil)
+}
+
+func (d *Dashboard) handlePackagesPage(w http.ResponseWriter, _ *http.Request) {
+	d.renderPage(w, "packages", nil)
+}
+
+func (d *Dashboard) handlePublicStatusPage(w http.ResponseWriter, _ *http.Request) {
+	d.renderPage(w, "status", nil)
 }
 
 // fetchServerPublicKey retrieves the server's real GPG public key (armored).
@@ -1129,10 +1214,16 @@ func (d *Dashboard) fetchClusterStatus(r *http.Request) (*ClusterStatus, error) 
 // API requests get a plain 401.
 func (d *Dashboard) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Public: landing, login, logout, and static assets.
+		// Public: community pages and their intentionally narrow read APIs.
 		if r.URL.Path == "/" || r.URL.Path == "/login" || r.URL.Path == "/logout" ||
+			r.URL.Path == "/packages" || r.URL.Path == "/docs" ||
+			r.URL.Path == "/status" ||
+			r.URL.Path == "/api/public/binhosts" ||
+			r.URL.Path == "/api/public/packages" ||
+			r.URL.Path == "/api/public/status" ||
 			r.URL.Path == "/auth/oidc/start" || r.URL.Path == "/auth/oidc/callback" ||
 			strings.HasPrefix(r.URL.Path, "/auth/provider/") ||
+			strings.HasPrefix(r.URL.Path, "/binpkgs/") ||
 			strings.HasPrefix(r.URL.Path, "/static/") {
 			next.ServeHTTP(w, r)
 			return

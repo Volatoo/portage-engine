@@ -2,11 +2,14 @@
 package builder
 
 import (
+	"math"
 	"os"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 )
 
 // SystemInfo represents system resource usage.
@@ -19,6 +22,70 @@ type SystemInfo struct {
 	MemoryUsed  uint64  `json:"memory_used"`  // bytes
 	DiskTotal   uint64  `json:"disk_total"`   // bytes
 	DiskUsed    uint64  `json:"disk_used"`    // bytes
+}
+
+// ExecutorTelemetry is a bounded, non-authoritative scheduling observation.
+// Capability labels remain the hard compatibility boundary; pressure and
+// cache keys are only soft-scoring inputs and operational evidence.
+type ExecutorTelemetry struct {
+	ObservedAt     time.Time `json:"observed_at"`
+	Available      bool      `json:"available"`
+	CPUPressure    int       `json:"cpu_pressure"`
+	MemoryPressure int       `json:"memory_pressure"`
+	DiskPressure   int       `json:"disk_pressure"`
+	PressureScore  int       `json:"pressure_score"`
+	CacheKeys      []string  `json:"cache_keys,omitempty"`
+}
+
+// CaptureExecutorTelemetry samples the executor host and derives bounded
+// cache-locality keys from already validated capability labels.
+func CaptureExecutorTelemetry(labels []string) ExecutorTelemetry {
+	return executorTelemetryFromSystemInfo(GetSystemInfo(), labels, time.Now().UTC())
+}
+
+func executorTelemetryFromSystemInfo(
+	info *SystemInfo,
+	labels []string,
+	observedAt time.Time,
+) ExecutorTelemetry {
+	telemetry := ExecutorTelemetry{
+		ObservedAt: observedAt.UTC(),
+		// /proc memory plus statfs are required to distinguish a genuinely
+		// idle Linux worker from a platform on which sampling is unavailable.
+		Available: info != nil && info.MemoryTotal > 0 && info.DiskTotal > 0,
+	}
+	if info != nil {
+		telemetry.CPUPressure = pressurePermille(info.CPUUsage)
+		telemetry.MemoryPressure = pressurePermille(info.MemoryUsage)
+		telemetry.DiskPressure = pressurePermille(info.DiskUsage)
+	}
+	if telemetry.Available {
+		telemetry.PressureScore = max(
+			telemetry.CPUPressure,
+			telemetry.MemoryPressure,
+			telemetry.DiskPressure,
+		)
+	} else {
+		// Unknown is neutral, not idle. This keeps unsupported/misconfigured
+		// telemetry from winning soft-scoring decisions.
+		telemetry.PressureScore = 500
+	}
+	for _, label := range labels {
+		if strings.HasPrefix(label, "capacity-pool:") ||
+			strings.HasPrefix(label, "profile:") ||
+			strings.HasPrefix(label, "image:") {
+			telemetry.CacheKeys = append(telemetry.CacheKeys, label)
+		}
+	}
+	sort.Strings(telemetry.CacheKeys)
+	return telemetry
+}
+
+func pressurePermille(value float64) int {
+	if math.IsNaN(value) || math.IsInf(value, 0) || value <= 0 {
+		return 0
+	}
+	return min(1000, int(math.Round(value*10)))
 }
 
 // GetSystemInfo returns current system resource usage.

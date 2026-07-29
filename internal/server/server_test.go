@@ -145,8 +145,13 @@ func TestRouter(t *testing.T) {
 
 func TestIAMRouteClassification(t *testing.T) {
 	for _, path := range []string{
-		"/health",
+		"/readyz",
+		"/livez",
+		"/metrics/prometheus",
 		"/api/v1/binhosts",
+		"/api/v1/gpg/public-key",
+		"/api/v1/public/packages",
+		"/api/v1/public/status",
 		"/api/v1/iam/exchange",
 		"/api/v1/iam/providers/authentik/backchannel-logout",
 		"/binpkgs/releases/amd64/binpackages/23.0/Packages",
@@ -179,6 +184,7 @@ func TestIAMRouteClassification(t *testing.T) {
 		"/api/v1/settings/cloud",
 		"/api/v1/instances",
 		"/api/v1/worker-gateway/status",
+		"/health",
 	} {
 		if !systemAdminPath(path) {
 			t.Errorf("systemAdminPath(%q) = false", path)
@@ -1289,7 +1295,8 @@ func TestHandleSubmitBuildWithConfig_RejectsOversizedBody(t *testing.T) {
 
 // TestAPIKeyAuthMiddleware verifies the API-key auth layer via the real Router:
 // missing/wrong keys are rejected (constant-time compare), the correct key is
-// accepted, and public endpoints (/health, /binpkgs/) bypass auth.
+// accepted, and minimal probes/binhost endpoints bypass auth. The detailed
+// /health inventory is system-admin-only.
 func TestAPIKeyAuthMiddleware(t *testing.T) {
 	cfg := &config.ServerConfig{
 		BinpkgPath: t.TempDir(),
@@ -1320,9 +1327,16 @@ func TestAPIKeyAuthMiddleware(t *testing.T) {
 	if got := do(http.MethodGet, "/api/v1/builds/list", "s3cr3t-key"); got == http.StatusUnauthorized {
 		t.Errorf("correct key: unexpectedly 401")
 	}
-	// Public health endpoint bypasses auth.
-	if got := do(http.MethodGet, "/health", ""); got == http.StatusUnauthorized {
-		t.Errorf("/health should bypass auth, got 401")
+	// Detailed health is operational inventory and requires system-admin auth.
+	if got := do(http.MethodGet, "/health", ""); got != http.StatusUnauthorized {
+		t.Errorf("/health without credentials: expected 401, got %d", got)
+	}
+	if got := do(http.MethodGet, "/health", "s3cr3t-key"); got == http.StatusUnauthorized {
+		t.Errorf("/health with administrator key unexpectedly returned 401")
+	}
+	// Load-balancer probes remain intentionally public.
+	if got := do(http.MethodGet, "/livez", ""); got != http.StatusOK {
+		t.Errorf("/livez should bypass auth, got %d", got)
 	}
 	// Binhost bypasses auth (emerge can't present a key).
 	if got := do(http.MethodGet, "/binpkgs/Packages", ""); got == http.StatusUnauthorized {
@@ -1333,6 +1347,39 @@ func TestAPIKeyAuthMiddleware(t *testing.T) {
 	}
 	if got := do(http.MethodGet, "/verify-binhost/unknown/Packages", ""); got != http.StatusNotFound {
 		t.Errorf("unknown verification capability should bypass API auth and fail as 404, got %d", got)
+	}
+}
+
+func TestShellOriginPolicy(t *testing.T) {
+	s := New(&config.ServerConfig{
+		BinpkgPath: t.TempDir(),
+		MaxWorkers: 1,
+		CORSAllowedOrigins: []string{
+			"https://dashboard.example.test",
+		},
+	})
+	for _, test := range []struct {
+		name   string
+		host   string
+		origin string
+		want   bool
+	}{
+		{name: "server-side proxy", host: "api.internal", want: true},
+		{name: "same origin", host: "api.example.test", origin: "https://api.example.test", want: true},
+		{name: "configured dashboard", host: "api.internal", origin: "https://dashboard.example.test", want: true},
+		{name: "foreign browser", host: "api.internal", origin: "https://evil.example.test", want: false},
+		{name: "malformed", host: "api.internal", origin: "not a URL", want: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodGet, "http://"+test.host+"/api/v1/instances/shell", nil)
+			request.Host = test.host
+			if test.origin != "" {
+				request.Header.Set("Origin", test.origin)
+			}
+			if got := s.shellOriginAllowed(request); got != test.want {
+				t.Fatalf("shell origin allowed=%t, want %t", got, test.want)
+			}
+		})
 	}
 }
 

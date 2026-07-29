@@ -1,0 +1,205 @@
+# Reference public-role split. Apply on top of docker-compose.yml only after
+# supplying real PostgreSQL/Redis/S3/Vault/IdP secrets and an HTTPS edge:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.public.yml up -d
+#
+# This overlay is a topology and startup-Gate reference, not a substitute for
+# production network policy, workload identity, or an HA object/database tier.
+
+services:
+  portage-server:
+    image: portage-engine-api:local
+    build:
+      context: .
+      target: api-runtime
+    command: ["/usr/local/bin/portage-server", "-config", "/nonexistent.conf"]
+    user: "65532:65532"
+    read_only: true
+    tmpfs:
+      - /tmp:size=1g,mode=1777
+    environment:
+      DEPLOYMENT_MODE: public
+      SERVER_RUNTIME_ROLE: api
+      CONTROL_PLANE_ID: ${PORTAGE_PUBLIC_API_ID:?set PORTAGE_PUBLIC_API_ID}
+      CATALOG_PATH: /etc/portage-engine/configs/catalog.json
+      STORAGE_TYPE: s3
+      STORAGE_S3_ALLOW_DELETE: "false"
+      DATABASE_REQUIRED: "true"
+      REDIS_REQUIRED: "true"
+      AUTH_MODE: oidc
+      AUTH_PROVIDERS_PATH: /etc/portage-engine/configs/auth-providers.json
+      AUTH_ADMIN_IDENTITIES: ${PORTAGE_AUTH_ADMIN_IDENTITIES:?set immutable provider:subject admins}
+      API_KEY: ""
+      STEP_UP_API_KEY: ""
+      CORS_ALLOWED_ORIGINS: ${PORTAGE_CORS_ALLOWED_ORIGINS:?set HTTPS origins}
+      GPG_ENABLED: "true"
+      GPG_AUTO_CREATE: "false"
+      GPG_KEY_ID: ${PORTAGE_SIGNER_GPG_KEY_ID:?set approved release key}
+      WORKER_GATEWAY_ENABLED: "true"
+      WORKER_GATEWAY_ISSUER_PROVIDER: vault
+      PHASE_EXECUTOR_MODE: active
+      METRICS_PASSWORD: ${PORTAGE_METRICS_PASSWORD:?set metrics password}
+      CLOUD_PVE_TOKEN_ID: ""
+      CLOUD_PVE_TOKEN_SECRET: ""
+      CLOUD_PVE_USERNAME: ""
+      CLOUD_PVE_PASSWORD: ""
+      CLOUD_SSH_KEY_PATH: ""
+      CLOUD_PVE_INSECURE: "false"
+      CLOUD_SSH_INSECURE_HOST_KEY: "false"
+
+  portage-executor:
+    image: portage-engine-executor:local
+    build:
+      context: .
+      target: executor-runtime
+    restart: unless-stopped
+    command: ["/usr/local/bin/portage-server", "-config", "/nonexistent.conf"]
+    user: "65532:65532"
+    read_only: true
+    tmpfs:
+      - /tmp:size=4g,mode=1777
+    environment:
+      DEPLOYMENT_MODE: public
+      SERVER_RUNTIME_ROLE: executor
+      CONTROL_PLANE_ID: ${PORTAGE_PUBLIC_EXECUTOR_ID:?set PORTAGE_PUBLIC_EXECUTOR_ID}
+      DATA_DIR: /var/lib/portage-engine/executor
+      BINPKG_PATH: /var/lib/portage-engine/compat-binpkgs
+      CATALOG_PATH: /etc/portage-engine/configs/catalog.json
+      STORAGE_TYPE: s3
+      STORAGE_S3_BUCKET: ${PORTAGE_STORAGE_S3_BUCKET:?set artifact bucket}
+      STORAGE_S3_REGION: ${PORTAGE_STORAGE_S3_REGION:?set artifact region}
+      STORAGE_S3_PREFIX: ${PORTAGE_STORAGE_S3_PREFIX:-}
+      STORAGE_S3_ENDPOINT: ${PORTAGE_STORAGE_S3_ENDPOINT:-}
+      STORAGE_S3_USE_PATH_STYLE: ${PORTAGE_STORAGE_S3_USE_PATH_STYLE:-false}
+      STORAGE_S3_ALLOW_DELETE: "true"
+      AWS_ACCESS_KEY_ID: ${PORTAGE_EXECUTOR_S3_ACCESS_KEY:-}
+      AWS_SECRET_ACCESS_KEY: ${PORTAGE_EXECUTOR_S3_SECRET_KEY:-}
+      AWS_SESSION_TOKEN: ${PORTAGE_EXECUTOR_S3_SESSION_TOKEN:-}
+      DATABASE_ENABLED: "true"
+      DATABASE_REQUIRED: "true"
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGDATABASE: ${PORTAGE_POSTGRES_DB:-portage_engine}
+      PGUSER: ${PORTAGE_POSTGRES_APP_USER:-portage_app}
+      PGPASSWORD: ${PORTAGE_POSTGRES_APP_PASSWORD:?set executor DB password}
+      PGSSLMODE: ${PORTAGE_POSTGRES_SSLMODE:-verify-full}
+      REDIS_ENABLED: "true"
+      REDIS_REQUIRED: "true"
+      REDIS_HOST: redis
+      REDIS_PASSWORD: ${PORTAGE_REDIS_PASSWORD:?set Redis password}
+      GPG_ENABLED: "true"
+      GPG_AUTO_CREATE: "false"
+      GPG_KEY_ID: ${PORTAGE_SIGNER_GPG_KEY_ID:?set approved release key}
+      GPG_PUBLIC_KEY_PATH: /var/lib/portage-engine/signing/public.asc
+      WORKER_GATEWAY_ENABLED: "true"
+      WORKER_GATEWAY_ISSUER_PROVIDER: vault
+      WORKER_GATEWAY_VAULT_ADDRESS: ${PORTAGE_WORKER_GATEWAY_VAULT_ADDRESS:?set Vault HTTPS address}
+      WORKER_GATEWAY_VAULT_TOKEN_FILE: /run/worker-secrets/vault-token
+      WORKER_GATEWAY_VAULT_SERVER_CA: /run/worker-secrets/vault-ca.pem
+      PHASE_EXECUTOR_MODE: active
+      EXECUTOR_CAPABILITIES: ${PORTAGE_EXECUTOR_CAPABILITIES:?set exact immutable pool labels}
+      EXECUTOR_CAPACITY_INSTANCE_ID: ${PORTAGE_EXECUTOR_CAPACITY_INSTANCE_ID:?set lowercase UUID}
+      CLOUD_DEFAULT_PROVIDER: pve
+      CLOUD_PVE_ENDPOINT: ${PORTAGE_EXECUTOR_PVE_ENDPOINT:?set verified PVE endpoint}
+      CLOUD_PVE_TOKEN_ID: ${PORTAGE_EXECUTOR_PVE_TOKEN_ID:-}
+      CLOUD_PVE_TOKEN_SECRET: ${PORTAGE_EXECUTOR_PVE_TOKEN_SECRET:-}
+      CLOUD_PVE_USERNAME: ${PORTAGE_EXECUTOR_PVE_USERNAME:-}
+      CLOUD_PVE_PASSWORD: ${PORTAGE_EXECUTOR_PVE_PASSWORD:-}
+      CLOUD_PVE_INSECURE: "false"
+      CLOUD_SSH_KEY_PATH: /run/executor-secrets/id_ed25519
+      CLOUD_SSH_KNOWN_HOSTS_PATH: /run/executor-secrets/known_hosts
+      CLOUD_SSH_INSECURE_HOST_KEY: "false"
+    volumes:
+      - portage-state:/var/lib/portage-engine
+      - ./configs:/etc/portage-engine/configs:ro
+      - ${PORTAGE_WORKER_SECRETS_DIR:?set worker secret directory}:/run/worker-secrets:ro
+      - ${PORTAGE_EXECUTOR_SECRETS_DIR:?set executor secret directory}:/run/executor-secrets:ro
+    depends_on:
+      portage-migrate:
+        condition: service_completed_successfully
+      portage-signer:
+        condition: service_started
+    networks:
+      - portage-net
+
+  portage-signer:
+    image: portage-engine-signer:local
+    build:
+      context: .
+      target: signer-runtime
+    user: "65532:65532"
+    read_only: true
+    tmpfs:
+      - /tmp:size=4g,mode=1777
+    environment:
+      STORAGE_S3_ALLOW_DELETE: "true"
+      AWS_ACCESS_KEY_ID: ${PORTAGE_SIGNER_S3_ACCESS_KEY:-}
+      AWS_SECRET_ACCESS_KEY: ${PORTAGE_SIGNER_S3_SECRET_KEY:-}
+      AWS_SESSION_TOKEN: ${PORTAGE_SIGNER_S3_SESSION_TOKEN:-}
+      GPG_AUTO_CREATE: "false"
+
+  portage-dashboard:
+    image: portage-engine-dashboard:local
+    build:
+      context: .
+      target: dashboard-runtime
+    command: ["/usr/local/bin/portage-dashboard", "-config", "/nonexistent.conf"]
+    user: "65532:65532"
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    environment:
+      DEPLOYMENT_MODE: public
+      ALLOW_ANONYMOUS: "false"
+      COOKIE_SECURE: "true"
+      ADMIN_USER: ""
+      ADMIN_PASSWORD: ""
+      SERVER_API_KEY: ""
+      SERVER_STEP_UP_API_KEY: ""
+
+  artifact-audit:
+    profiles: ["artifact-ops"]
+    image: portage-engine-artifact-lifecycle:local
+    build:
+      context: .
+      target: artifact-lifecycle-runtime
+    command:
+      - -operation
+      - audit
+      - -binhost-path
+      - ${PORTAGE_LIFECYCLE_BINHOST_PATH:?set lifecycle binhost path}
+      - -arch
+      - ${PORTAGE_LIFECYCLE_ARCH:-amd64}
+    read_only: true
+    user: "65532:65532"
+    tmpfs:
+      - /tmp:size=8g,mode=1777
+    environment:
+      STORAGE_S3_BUCKET: ${PORTAGE_STORAGE_S3_BUCKET:?set artifact bucket}
+      STORAGE_S3_REGION: ${PORTAGE_STORAGE_S3_REGION:?set artifact region}
+      STORAGE_S3_PREFIX: ${PORTAGE_STORAGE_S3_PREFIX:-}
+      STORAGE_S3_ENDPOINT: ${PORTAGE_STORAGE_S3_ENDPOINT:-}
+      STORAGE_S3_USE_PATH_STYLE: ${PORTAGE_STORAGE_S3_USE_PATH_STYLE:-false}
+      AWS_ACCESS_KEY_ID: ${PORTAGE_AUDITOR_S3_ACCESS_KEY:-}
+      AWS_SECRET_ACCESS_KEY: ${PORTAGE_AUDITOR_S3_SECRET_KEY:-}
+      AWS_SESSION_TOKEN: ${PORTAGE_AUDITOR_S3_SESSION_TOKEN:-}
+    networks:
+      - portage-net
+
+  artifact-gc:
+    profiles: ["artifact-ops"]
+    extends: artifact-audit
+    command:
+      - -operation
+      - gc
+      - -retention
+      - ${PORTAGE_ARTIFACT_RETENTION:-336h}
+      - -binhost-path
+      - ${PORTAGE_LIFECYCLE_BINHOST_PATH:?set lifecycle binhost path}
+      - -arch
+      - ${PORTAGE_LIFECYCLE_ARCH:-amd64}
+    environment:
+      STORAGE_S3_ALLOW_DELETE: "true"
+      AWS_ACCESS_KEY_ID: ${PORTAGE_LIFECYCLE_S3_ACCESS_KEY:-}
+      AWS_SECRET_ACCESS_KEY: ${PORTAGE_LIFECYCLE_S3_SECRET_KEY:-}
+      AWS_SESSION_TOKEN: ${PORTAGE_LIFECYCLE_S3_SESSION_TOKEN:-}

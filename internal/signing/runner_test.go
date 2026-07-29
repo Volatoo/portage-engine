@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	artifactstorage "github.com/slchris/portage-engine/internal/storage"
 )
 
 type testQueue struct {
@@ -166,5 +168,66 @@ func TestRunnerRejectsSymlinkedInput(t *testing.T) {
 	}
 	if !strings.Contains(queue.failed, "symlink") {
 		t.Fatalf("symlink input was not rejected: %q", queue.failed)
+	}
+}
+
+func TestRunnerSignsObjectBackedGeneration(t *testing.T) {
+	gpg := testGPG(t)
+	root := t.TempDir()
+	store, err := artifactstorage.NewLocalStorage(filepath.Join(root, "objects"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceToken := strings.Repeat("d", 32)
+	relative := "app-misc/hello-2.12.2.gpkg.tar"
+	source := filepath.Join(root, "unsigned.gpkg.tar")
+	writeUnsignedGPKG(t, source)
+	digest, size, err := fileDigest(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceKey, _ := artifactstorage.QuarantineGenerationKey(sourceToken, relative)
+	if err := store.Upload(source, sourceKey); err != nil {
+		t.Fatal(err)
+	}
+	task := &Task{
+		ID: uuid.NewString(), JobID: uuid.NewString(), AttemptID: uuid.NewString(),
+		AttemptFence: 1, State: "claimed", SourceToken: sourceToken,
+		Architecture: "amd64", Owner: "signer-1", ClaimFence: 1,
+		Artifacts: []Artifact{{RelativePath: relative, InputDigest: digest, InputSize: size}},
+	}
+	queue := &testQueue{task: task}
+	runner := &Runner{
+		Queue: queue, Storage: store, ScratchDir: filepath.Join(root, "scratch"),
+		Owner: "signer-1", Lease: time.Minute, GPG: gpg,
+	}
+	worked, err := runner.RunOnce(context.Background())
+	if err != nil || !worked || queue.failed != "" || len(queue.completed) != 1 {
+		t.Fatalf("worked=%v err=%v failed=%q completed=%+v",
+			worked, err, queue.failed, queue.completed)
+	}
+	outputToken, _ := OutputToken(task.ID)
+	outputKey, _ := artifactstorage.QuarantineGenerationKey(outputToken, relative)
+	output := filepath.Join(root, "signed.gpkg.tar")
+	if err := store.Download(outputKey, output); err != nil {
+		t.Fatal(err)
+	}
+	if err := gpg.VerifyGPKG(output); err != nil {
+		t.Fatal(err)
+	}
+	capabilityKey, _ := artifactstorage.QuarantineCapabilityKey(outputToken)
+	document, err := artifactstorage.DownloadBytes(
+		store, capabilityKey, filepath.Join(root, "read"), 1<<20,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := artifactstorage.ParseQuarantineManifest(document, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manifest.Generation != "signed" || len(manifest.Artifacts) != 1 ||
+		manifest.Artifacts[0].SHA256 != queue.completed[0].OutputDigest {
+		t.Fatalf("unexpected signed object manifest: %#v", manifest)
 	}
 }

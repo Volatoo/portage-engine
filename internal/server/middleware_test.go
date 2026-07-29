@@ -65,6 +65,8 @@ func TestAuthenticationRateLimitedRequest(t *testing.T) {
 		{http.MethodGet, "/api/v1/builds/status", true},
 		{http.MethodPost, "/api/v1/builds/submit", true},
 		{http.MethodGet, "/api/v1/binhosts", false},
+		{http.MethodGet, "/api/v1/public/packages", false},
+		{http.MethodGet, "/api/v1/public/status", false},
 		{http.MethodGet, "/health", false},
 		{http.MethodOptions, "/api/v1/builds/submit", false},
 	}

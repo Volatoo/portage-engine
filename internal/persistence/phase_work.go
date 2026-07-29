@@ -375,10 +375,14 @@ func registerCapabilityWorker(
 	stableName string,
 	labels []string,
 ) (uuid.UUID, error) {
+	telemetry := builder.CaptureExecutorTelemetry(labels)
 	capabilities, err := json.Marshal(map[string]any{
 		"role":              "phase-executor",
 		"executor_protocol": builder.ExecutorProtocolVersion,
 		"labels":            labels,
+		"pressure_score":    telemetry.PressureScore,
+		"cache_keys":        telemetry.CacheKeys,
+		"telemetry":         telemetry,
 	})
 	if err != nil {
 		return uuid.Nil, fmt.Errorf("marshal executor capabilities: %w", err)
@@ -398,7 +402,12 @@ func registerCapabilityWorker(
 			capabilities = EXCLUDED.capabilities,
 			executor_protocol = EXCLUDED.executor_protocol,
 			generation = workers.generation + CASE
-			  WHEN workers.capabilities IS DISTINCT FROM EXCLUDED.capabilities
+			  WHEN workers.capabilities -> 'labels' IS DISTINCT FROM
+			       EXCLUDED.capabilities -> 'labels'
+			    OR workers.capabilities ->> 'role' IS DISTINCT FROM
+			       EXCLUDED.capabilities ->> 'role'
+			    OR workers.executor_protocol IS DISTINCT FROM
+			       EXCLUDED.executor_protocol
 			  THEN 1 ELSE 0 END,
 			updated_at = clock_timestamp()
 		RETURNING id

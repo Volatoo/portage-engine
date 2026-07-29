@@ -236,10 +236,14 @@ explanations.
 
 ## Current limits
 
-- Fairness remains project-wide; capacity pools are hard routing and
-  observability boundaries, not independent fairness subqueues.
-- Runtime pressure has an extensible score field and an explainable ledger,
-  but no OS telemetry producer or cache-locality signal is implemented yet.
+- Fairness is intentionally project-wide for v1 because project is the policy
+  and quota boundary. Capacity pools are hard routing and observability
+  boundaries, not independent fairness subqueues. Add hierarchical
+  target/provider fairness only if production queue evidence shows starvation;
+  doing it pre-emptively would fragment small pools and idle compatible slots.
+- Executor heartbeat records bounded CPU, memory and disk pressure plus warm
+  capacity-pool/profile/image cache keys. Telemetry changes update the
+  snapshot without incrementing worker identity generation.
 - Provider limits are deployment-wide per provider; per-project/provider
   billing limits still use the existing admission budget rather than a
   provider invoice feed.
@@ -248,4 +252,5 @@ explanations.
   separately built and reviewed persistent-executor template; the existing
   disposable job-builder template is deliberately rejected.
 - Estimated and settled internal cloud cost is visible per target; provider
-  invoice ingestion and reconciliation are not implemented.
+  invoice ingestion and reconciliation require an operator-selected billing
+  export and are not implemented.

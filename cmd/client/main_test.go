@@ -6,7 +6,9 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/slchris/portage-engine/internal/builder"
 )
@@ -70,6 +72,34 @@ func TestFetchBinhostProfile(t *testing.T) {
 	}
 	if _, err := fetchBinhostProfile(server.Client(), server.URL, "pe/missing"); err == nil {
 		t.Fatal("unknown profile was accepted")
+	}
+}
+
+func TestNormalizeFingerprintRequiresFullHex(t *testing.T) {
+	input := "0123 4567 89ab cdef 0123 4567 89ab cdef 0123 4567"
+	got, err := normalizeFingerprint(input)
+	if err != nil || got != "0123456789ABCDEF0123456789ABCDEF01234567" {
+		t.Fatalf("fingerprint=%q err=%v", got, err)
+	}
+	for _, invalid := range []string{"DEADBEEF", strings.Repeat("Z", 40)} {
+		if _, err := normalizeFingerprint(invalid); err == nil {
+			t.Errorf("invalid fingerprint %q accepted", invalid)
+		}
+	}
+}
+
+func TestFetchReleasePublicKeyIsBounded(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(
+		w http.ResponseWriter, _ *http.Request,
+	) {
+		_, _ = w.Write([]byte("PUBLIC KEY"))
+	}))
+	defer server.Close()
+	document, err := fetchReleasePublicKey(
+		&http.Client{Timeout: time.Second}, server.URL,
+	)
+	if err != nil || string(document) != "PUBLIC KEY" {
+		t.Fatalf("document=%q err=%v", document, err)
 	}
 }
 

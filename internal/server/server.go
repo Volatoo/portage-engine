@@ -4,11 +4,13 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -21,6 +23,7 @@ import (
 	"github.com/slchris/portage-engine/internal/metrics"
 	"github.com/slchris/portage-engine/internal/persistence"
 	"github.com/slchris/portage-engine/internal/runtimecache"
+	artifactstorage "github.com/slchris/portage-engine/internal/storage"
 	"github.com/slchris/portage-engine/internal/workergateway"
 	"github.com/slchris/portage-engine/pkg/config"
 )
@@ -34,37 +37,43 @@ var (
 
 // Server represents the Portage Engine server.
 type Server struct {
-	config            *config.ServerConfig
-	binpkgRoot        string
-	binpkgStore       *binpkg.Store
-	binpkgMu          sync.RWMutex
-	binpkgStores      map[string]*binpkg.Store
-	binhostProfiles   map[string]binhostProfile
-	defaultBinhost    string
-	builder           *builder.Manager
-	builderRegistry   *builder.Registry
-	metrics           *metrics.Metrics
-	startTime         time.Time
-	store             *ServerStore
-	persister         *ServerPersister
-	database          *persistence.Database
-	jobLedger         *persistence.JobRepository
-	iamRepository     *persistence.IAMRepository
-	oidcVerifier      iam.Verifier
-	identityVerifiers map[string]iam.IdentityVerifier
-	oidcVerifiers     map[string]iam.Verifier
-	providerIssuers   map[string]string
-	providerConfigs   map[string]config.IdentityProviderConfig
-	identityAdmins    map[string]struct{}
-	databaseInitErr   string
-	cache             *runtimecache.Client
-	cacheInitErr      string
-	cacheStop         context.CancelFunc
-	cacheWG           sync.WaitGroup
-	ledgerStop        chan struct{}
-	ledgerWG          sync.WaitGroup
-	binhostStop       chan struct{}
-	settingsMu        sync.Mutex // serializes settings updates + persistence
+	config             *config.ServerConfig
+	binpkgRoot         string
+	binpkgStore        *binpkg.Store
+	binpkgMu           sync.RWMutex
+	binpkgStores       map[string]*binpkg.Store
+	binhostProfiles    map[string]binhostProfile
+	defaultBinhost     string
+	builder            *builder.Manager
+	builderRegistry    *builder.Registry
+	metrics            *metrics.Metrics
+	startTime          time.Time
+	store              *ServerStore
+	persister          *ServerPersister
+	database           *persistence.Database
+	jobLedger          *persistence.JobRepository
+	iamRepository      *persistence.IAMRepository
+	oidcVerifier       iam.Verifier
+	identityVerifiers  map[string]iam.IdentityVerifier
+	oidcVerifiers      map[string]iam.Verifier
+	providerIssuers    map[string]string
+	providerConfigs    map[string]config.IdentityProviderConfig
+	identityAdmins     map[string]struct{}
+	databaseInitErr    string
+	cache              *runtimecache.Client
+	cacheInitErr       string
+	cacheStop          context.CancelFunc
+	cacheWG            sync.WaitGroup
+	artifactStorage    artifactstorage.Storage
+	artifactStorageMu  sync.RWMutex
+	artifactStorageErr string
+	publicStatusMu     sync.Mutex
+	publicStatusCache  publicServiceStatus
+	publicStatusUntil  time.Time
+	ledgerStop         chan struct{}
+	ledgerWG           sync.WaitGroup
+	binhostStop        chan struct{}
+	settingsMu         sync.Mutex // serializes settings updates + persistence
 }
 
 // New creates a new Server instance.
@@ -224,6 +233,7 @@ func (s *Server) SetWorkerIssuer(issuer workergateway.Issuer) error {
 // Initialize initializes the server, including GPG key setup and state persistence.
 func (s *Server) Initialize() error {
 	executorOnly := s.config.RuntimeRole == "executor"
+	apiOnly := s.config.RuntimeRole == "api"
 	// Validate an explicitly configured control-plane catalog before GPG,
 	// persistence, or any other side effect. Compatibility mode is loaded later
 	// because it must reflect dashboard-persisted cloud settings.
@@ -231,6 +241,14 @@ func (s *Server) Initialize() error {
 		if err := s.loadBuildCatalog(); err != nil {
 			return err
 		}
+	}
+	if err := s.initArtifactStorage(); err != nil {
+		if s.config.DeploymentMode == config.DeploymentModePublic {
+			return err
+		}
+		log.Printf("Warning: artifact storage initialization failed: %v", err)
+	} else {
+		s.builder.SetArtifactStorage(s.artifactStorage)
 	}
 
 	if err := s.initDatabase(); err != nil {
@@ -264,6 +282,15 @@ func (s *Server) Initialize() error {
 	if err := s.configureBinhostStores(); err != nil {
 		return err
 	}
+	if s.config.StorageType == "s3" && s.artifactStorage != nil {
+		if err := s.validateObjectBinhostChannels(); err != nil {
+			s.setArtifactStorageError(err)
+			if s.config.DeploymentMode == config.DeploymentModePublic {
+				return fmt.Errorf("validate object binhost channels: %w", err)
+			}
+			log.Printf("Warning: object binhost validation failed: %v", err)
+		}
+	}
 	if !executorOnly {
 		if err := s.syncFactoryStatus(); err != nil {
 			log.Printf("Warning: image-factory status was not persisted: %v", err)
@@ -279,10 +306,17 @@ func (s *Server) Initialize() error {
 	// fresh in the background as new packages appear in PKGDIR.
 	if !executorOnly {
 		s.refreshBinhostIndexes("startup")
-		if err := s.reconcileArtifacts(); err != nil {
-			log.Printf("Warning: artifact metadata reconciliation failed: %v", err)
+		if s.config.StorageType != "s3" {
+			if err := s.reconcileArtifacts(); err != nil {
+				log.Printf("Warning: artifact metadata reconciliation failed: %v", err)
+			}
 		}
 		s.startBinhostRefresher(5 * time.Minute)
+	}
+	// The public API role never receives provider/SSH credentials and therefore
+	// cannot own Terraform cleanup. Combined trusted mode retains the legacy
+	// behavior; separated executors own cleanup in the public topology.
+	if !apiOnly {
 		s.builder.StartInfrastructureCleanup()
 	}
 	if s.config.PhaseExecutorMode == "active" {
@@ -299,9 +333,59 @@ func (s *Server) Initialize() error {
 		log.Printf(
 			"Persistent executor role started without control-plane or Worker Gateway listeners",
 		)
+	} else if apiOnly {
+		log.Printf(
+			"API role started admission and Worker Gateway without provider phase execution",
+		)
 	}
 
 	return nil
+}
+
+func (s *Server) initArtifactStorage() error {
+	store, err := artifactstorage.NewStorage(&artifactstorage.Config{
+		Type:            s.config.StorageType,
+		LocalDir:        firstNonEmpty(s.config.StorageLocalDir, s.config.BinpkgPath),
+		S3Bucket:        s.config.StorageS3Bucket,
+		S3Region:        s.config.StorageS3Region,
+		S3Prefix:        s.config.StorageS3Prefix,
+		S3Endpoint:      s.config.StorageS3Endpoint,
+		S3UsePathStyle:  s.config.StorageS3UsePathStyle,
+		S3PublicBaseURL: s.config.StorageS3PublicBaseURL,
+		S3AllowDelete:   s.config.StorageS3AllowDelete,
+	})
+	if err != nil {
+		s.setArtifactStorageError(err)
+		return fmt.Errorf("initialize artifact storage: %w", err)
+	}
+	s.artifactStorage = store
+	s.setArtifactStorageError(nil)
+	return nil
+}
+
+func (s *Server) setArtifactStorageError(err error) {
+	s.artifactStorageMu.Lock()
+	defer s.artifactStorageMu.Unlock()
+	if err == nil {
+		s.artifactStorageErr = ""
+		return
+	}
+	s.artifactStorageErr = err.Error()
+}
+
+func (s *Server) artifactStorageError() string {
+	s.artifactStorageMu.RLock()
+	defer s.artifactStorageMu.RUnlock()
+	return s.artifactStorageErr
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func (s *Server) initCache() error {
@@ -528,8 +612,30 @@ func (s *Server) refreshBinhostIndexes(reason string) {
 		}
 		return
 	}
+	var objectRefreshErr error
 	for _, profile := range profiles {
 		store := stores[profile.BinhostPath]
+		if s.config.StorageType == "s3" && s.artifactStorage != nil {
+			n, err := s.refreshObjectBinhostIndex(store, profile)
+			if err != nil {
+				channelKey, keyErr := artifactstorage.StableChannelKey(
+					profile.BinhostPath, profile.Arch,
+				)
+				if keyErr == nil {
+					if exists, existsErr := s.artifactStorage.Exists(channelKey); existsErr == nil && !exists {
+						continue
+					}
+				}
+				objectRefreshErr = errors.Join(objectRefreshErr,
+					fmt.Errorf("profile %s: %w", profile.ID, err))
+				log.Printf("Warning: object binhost refresh (%s) failed for profile %s: %v",
+					reason, profile.ID, err)
+				continue
+			}
+			log.Printf("Object binhost refreshed (%s): profile=%s packages=%d",
+				reason, profile.ID, n)
+			continue
+		}
 		n, err := store.RegenerateIndex(profile.Arch)
 		if err != nil {
 			log.Printf("Warning: binhost index refresh (%s) failed for profile %s: %v", reason, profile.ID, err)
@@ -538,6 +644,68 @@ func (s *Server) refreshBinhostIndexes(reason string) {
 		log.Printf("Binhost index refreshed (%s): profile=%s packages=%d path=%s/Packages",
 			reason, profile.ID, n, store.BasePath())
 	}
+	if s.config.StorageType == "s3" {
+		s.setArtifactStorageError(objectRefreshErr)
+	}
+}
+
+func (s *Server) refreshObjectBinhostIndex(
+	store *binpkg.Store,
+	profile binhostProfile,
+) (int, error) {
+	pointer, _, err := s.loadObjectChannel(profile.BinhostPath, profile.Arch)
+	if err != nil {
+		return 0, err
+	}
+	packagesKey, err := artifactstorage.PublishedGenerationKey(
+		profile.BinhostPath, profile.Arch, pointer.GenerationID, "Packages",
+	)
+	if err != nil {
+		return 0, err
+	}
+	document, err := artifactstorage.DownloadBytes(
+		s.artifactStorage, packagesKey, s.objectReadScratch(), 64<<20,
+	)
+	if err != nil {
+		return 0, err
+	}
+	if digestDocument(document) != pointer.PackagesSHA256 {
+		return 0, fmt.Errorf("published Packages digest mismatch")
+	}
+	return store.LoadPackagesIndex(document, profile.Arch)
+}
+
+func (s *Server) validateObjectBinhostChannels() error {
+	s.binpkgMu.RLock()
+	profiles := make([]binhostProfile, 0, len(s.binhostProfiles))
+	for _, profile := range s.binhostProfiles {
+		profiles = append(profiles, profile)
+	}
+	s.binpkgMu.RUnlock()
+	for _, profile := range profiles {
+		channelKey, err := artifactstorage.StableChannelKey(
+			profile.BinhostPath, profile.Arch,
+		)
+		if err != nil {
+			return err
+		}
+		exists, err := s.artifactStorage.Exists(channelKey)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			continue
+		}
+		store, _, ok := s.binhostStoreByPath(profile.BinhostPath)
+		if !ok {
+			return fmt.Errorf("catalog binhost %q has no query store", profile.BinhostPath)
+		}
+		if _, err := s.refreshObjectBinhostIndex(store, profile); err != nil {
+			return fmt.Errorf("profile %s: %w", profile.ID, err)
+		}
+	}
+	s.setArtifactStorageError(nil)
+	return nil
 }
 
 // startBinhostRefresher periodically regenerates the binhost index so packages
@@ -553,8 +721,10 @@ func (s *Server) startBinhostRefresher(interval time.Duration) {
 				return
 			case <-ticker.C:
 				s.refreshBinhostIndexes("periodic")
-				if err := s.reconcileArtifacts(); err != nil {
-					log.Printf("Warning: artifact metadata reconciliation failed: %v", err)
+				if s.config.StorageType != "s3" {
+					if err := s.reconcileArtifacts(); err != nil {
+						log.Printf("Warning: artifact metadata reconciliation failed: %v", err)
+					}
 				}
 			}
 		}
@@ -700,6 +870,8 @@ func (s *Server) Router() http.Handler {
 	mux.HandleFunc("/api/v1/packages/query", s.handlePackageQuery)
 	mux.HandleFunc("/api/v1/packages/request-build", s.handleBuildRequest)
 	mux.HandleFunc("/api/v1/packages/status", s.handleBuildStatus)
+	mux.HandleFunc("/api/v1/public/packages", s.handlePublicPackages)
+	mux.HandleFunc("/api/v1/public/status", s.handlePublicStatus)
 	mux.HandleFunc("/api/v1/binhosts", s.handleBinhostInventory)
 
 	// Build management endpoints
@@ -747,8 +919,12 @@ func (s *Server) Router() http.Handler {
 	// Binhost: serve the PKGDIR (including the Packages index) so a stock
 	// `emerge --getbinpkg` can consume this server. This is intentionally public
 	// (emerge cannot present the API key) and read-only.
-	binhostFS := http.FileServer(http.Dir(s.binpkgRoot))
-	mux.Handle("/binpkgs/", http.StripPrefix("/binpkgs/", s.binhostReadOnly(binhostFS)))
+	if s.config.StorageType == "s3" && s.artifactStorage != nil {
+		mux.Handle("/binpkgs/", s.objectBinhostHandler())
+	} else {
+		binhostFS := http.FileServer(http.Dir(s.binpkgRoot))
+		mux.Handle("/binpkgs/", http.StripPrefix("/binpkgs/", s.binhostReadOnly(binhostFS)))
+	}
 	mux.HandleFunc("/verify-binhost/", s.builder.ServeVerificationBinhost)
 
 	// GPG endpoint
@@ -1162,18 +1338,28 @@ func (s *Server) handleLivez(w http.ResponseWriter, _ *http.Request) {
 
 // checkStorageHealth verifies the storage backend is accessible.
 func (s *Server) checkStorageHealth() bool {
-	switch s.config.StorageType {
-	case "local":
-		dir := s.config.StorageLocalDir
-		if dir == "" {
-			dir = s.config.BinpkgPath
+	if s.artifactStorage == nil {
+		// Handler-focused tests and embedded trusted callers may construct a
+		// Server without Initialize. Preserve the historical local check while
+		// requiring initialized clients for every remote authority.
+		if s.config.StorageType == "" || s.config.StorageType == "local" {
+			dir := firstNonEmpty(s.config.StorageLocalDir, s.config.BinpkgPath)
+			if dir == "" {
+				return true
+			}
+			info, err := os.Stat(dir)
+			return err == nil && info.IsDir()
 		}
-		info, err := os.Stat(dir)
-		return err == nil && info.IsDir()
-	default:
-		// For non-local storage, assume OK (actual check would require SDK calls)
-		return true
+		return false
 	}
+	if s.artifactStorageError() != "" {
+		return false
+	}
+	// A missing sentinel is healthy: Exists still authenticates, resolves the
+	// bucket, and performs a real backend request. Permission, endpoint, or
+	// bucket failures are returned as errors.
+	_, err := s.artifactStorage.Exists(".portage-engine-health")
+	return err == nil
 }
 
 // checkBuildersHealth returns (online, total) counts of configured remote builders.

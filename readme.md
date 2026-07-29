@@ -30,6 +30,10 @@ GPKG artifacts and publishes a standard Portage binhost.
 | Developer | Submit an explicit remote build, then install with `emerge` | `portage-client` |
 | Infra operator | Manage builders, images, signing, storage and release policy | Server/dashboard tools |
 
+The dashboard exposes `/packages`, `/docs`, and `/status` without an account.
+Those pages use narrow, redacted read APIs; builds, logs, detailed health and
+all administrative operations remain authenticated.
+
 Consume a published package with native Portage:
 
 ```bash
@@ -68,6 +72,20 @@ and break-glass path in `legacy`/`hybrid` mode. Trusted-LAN bring-up may use
 HTTP, but API keys and bearer tokens are plaintext on the wire. Add HTTPS
 before crossing an untrusted network.
 
+`DEPLOYMENT_MODE=public` is a separate fail-closed contract for a
+community-facing installation. It requires provider-only identity, explicit
+HTTPS browser origins, Vault-issued worker identities, protected operational
+endpoints and an S3-compatible artifact authority. The Go API/dashboard may
+still use private HTTP behind a TLS-terminating edge. See
+[Production boundary](docs/PRODUCTION_BOUNDARY.md).
+The immutable adapter, key layout, role-specific permissions, and local MinIO
+Gate are documented in [Object storage contract](docs/OBJECT_STORAGE.md).
+The anonymous HTTP contract is published as
+[OpenAPI 3.1](docs/openapi.yaml). Compatibility and community operations are
+covered by [the compatibility policy](docs/COMPATIBILITY.md),
+[security policy](SECURITY.md), [governance](GOVERNANCE.md), and
+[maintainer list](MAINTAINERS.md).
+
 The consumer path needs neither the CLI nor an overlay. An overlay is useful
 only for distributing the optional client/service ebuilds; it must not own the
 published binpkg trust key or image/profile policy.
@@ -97,6 +115,15 @@ flowchart LR
 - `portage-client`: optional developer CLI.
 - `portage-desktop-runner`: deterministic native-GUI verification.
 - `image-factory/`: offline Packer/Catalyst image and release gates.
+
+The default Docker target is the combined trusted-LAN runtime. Public
+deployments select the non-root `api-runtime`, `executor-runtime`,
+`signer-runtime`, `dashboard-runtime`, `migrate-runtime`, and
+`actuator-runtime` and `artifact-lifecycle-runtime` targets so the
+internet-facing API never receives PVE/SSH credentials or phase-execution
+tooling. Docker base images are pinned by multi-platform digest. CI exports an
+SPDX SBOM, BuildKit provenance and SHA-256 checksums for every production
+runtime target; binary artifacts also include per-platform checksums.
 
 ## Development quick start
 
@@ -171,6 +198,22 @@ target SLO/latency/cost history are visible in Monitor. Autoscaling can remain
 observe-only or write globally and per-provider budgeted single-slot actions
 for the separate, listener-free `portage-capacity-actuator`; provider calls
 never occur in a scheduler transaction.
+
+To exercise the real S3-compatible adapter locally, start the opt-in MinIO
+profile and run its integration Gate:
+
+```bash
+docker compose --env-file .env.compose.example \
+  --profile object-storage up -d minio minio-init
+
+PORTAGE_S3_INTEGRATION=1 \
+STORAGE_S3_ENDPOINT=http://127.0.0.1:29000 \
+STORAGE_S3_BUCKET=portage-engine-artifacts \
+STORAGE_S3_REGION=us-east-1 \
+AWS_ACCESS_KEY_ID=portage-minio-local \
+AWS_SECRET_ACCESS_KEY=portage-minio-secret-local \
+go test ./internal/storage -run TestS3StorageIntegration -v
+```
 
 Run a second local control-plane replica on port `18082`:
 
@@ -265,6 +308,8 @@ logs containing secrets.
 - [Profiles and immutable build catalog](docs/CATALOG.md)
 - [Offline Packer/Catalyst image factory](image-factory/README.md)
 - [Desktop E2E](docs/DESKTOP_E2E.md)
+- [Trusted-LAN and public production boundaries](docs/PRODUCTION_BOUNDARY.md)
+- [Immutable S3 object-storage contract](docs/OBJECT_STORAGE.md)
 - [Roadmap, security architecture and release gates](docs/ROADMAP_AND_DESKTOP_E2E.html)
 
 Useful development checks:

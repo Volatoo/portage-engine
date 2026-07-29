@@ -1,0 +1,145 @@
+openapi: 3.1.0
+info:
+  title: Portage Engine public API
+  version: 0.1.0
+  description: >
+    Stable anonymous consumer surface. Build, job, log, project, scheduler,
+    health-detail and administrative APIs are intentionally outside this
+    public contract until their pre-1.0 schemas are finalized.
+servers:
+  - url: https://portage.example.org
+paths:
+  /api/v1/binhosts:
+    get:
+      summary: List published catalog binhosts
+      operationId: listBinhosts
+      responses:
+        "200":
+          description: Published binhost inventory
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [binhosts]
+                properties:
+                  binhosts:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Binhost"
+  /api/v1/public/packages:
+    get:
+      summary: Search published packages
+      operationId: searchPackages
+      parameters:
+        - {name: q, in: query, schema: {type: string, maxLength: 200}}
+        - {name: profile_id, in: query, schema: {type: string}}
+        - {name: arch, in: query, schema: {type: string}}
+        - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 200, default: 50}}
+        - {name: offset, in: query, schema: {type: integer, minimum: 0, maximum: 1000000, default: 0}}
+      responses:
+        "200":
+          description: Redacted published package page
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PackagePage"
+        "400": {description: Invalid filter or paging value}
+  /api/v1/public/status:
+    get:
+      summary: Read coarse public service status
+      operationId: publicStatus
+      responses:
+        "200":
+          description: Status without topology or dependency details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PublicStatus"
+  /api/v1/gpg/public-key:
+    get:
+      summary: Download the binpkg signing public key
+      description: >
+        This endpoint is not a trust anchor. Consumers must compare the full
+        primary fingerprint with an independent operator channel.
+      operationId: downloadSigningKey
+      responses:
+        "200":
+          description: ASCII-armored OpenPGP public key
+          content:
+            application/pgp-keys:
+              schema: {type: string}
+        "503": {description: Signing public key is unavailable}
+  /binpkgs/{path}:
+    get:
+      summary: Download a stable Packages index or GPKG object
+      operationId: downloadBinpkgObject
+      parameters:
+        - name: path
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        "200": {description: Digest-validated published object}
+        "304": {description: ETag matched}
+        "404": {description: Path is not selected by the active generation}
+    head:
+      summary: Inspect a stable published object
+      operationId: headBinpkgObject
+      parameters:
+        - name: path
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        "200": {description: Published object metadata}
+        "304": {description: ETag matched}
+        "404": {description: Path is not selected by the active generation}
+components:
+  schemas:
+    Binhost:
+      type: object
+      required: [id, arch, profile_path, binhost_path, sync_path]
+      properties:
+        id: {type: string}
+        arch: {type: string}
+        profile_path: {type: string}
+        channel: {type: string}
+        binhost_path: {type: string}
+        sync_path: {type: string}
+        default: {type: boolean}
+    PublicPackage:
+      type: object
+      required: [name, version, arch, profile_id, profile_path, binhost_path, download_path]
+      properties:
+        name: {type: string}
+        version: {type: string}
+        arch: {type: string}
+        use_flags: {type: array, items: {type: string}}
+        profile_id: {type: string}
+        profile_path: {type: string}
+        channel: {type: string}
+        binhost_path: {type: string}
+        download_path: {type: string}
+    PackagePage:
+      type: object
+      required: [packages, total, limit, offset]
+      properties:
+        packages: {type: array, items: {$ref: "#/components/schemas/PublicPackage"}}
+        total: {type: integer, minimum: 0}
+        limit: {type: integer}
+        offset: {type: integer}
+    PublicStatus:
+      type: object
+      required: [status, version, updated_at, components]
+      properties:
+        status: {type: string, enum: [operational, degraded]}
+        version: {type: string}
+        updated_at: {type: string, format: date-time}
+        components:
+          type: array
+          items:
+            type: object
+            required: [name, status]
+            properties:
+              name: {type: string}
+              status: {type: string, enum: [operational, degraded]}

@@ -15,6 +15,19 @@ type StorageUploader struct {
 
 // NewStorageUploader creates a new storage uploader.
 func NewStorageUploader(storageType, _ /* localDir */, s3Bucket, s3Region, s3Prefix, httpBase string) (*StorageUploader, error) {
+	return NewStorageUploaderWithConfig(storage.Config{
+		Type:     storageType,
+		S3Bucket: s3Bucket,
+		S3Region: s3Region,
+		S3Prefix: s3Prefix,
+		HTTPBase: httpBase,
+	})
+}
+
+// NewStorageUploaderWithConfig creates an uploader with the full backend
+// configuration, including S3-compatible endpoints.
+func NewStorageUploaderWithConfig(cfg storage.Config) (*StorageUploader, error) {
+	storageType := cfg.Type
 	if storageType == "" || storageType == "local" {
 		// Local storage - no upload needed
 		return &StorageUploader{
@@ -27,18 +40,18 @@ func NewStorageUploader(storageType, _ /* localDir */, s3Bucket, s3Region, s3Pre
 
 	switch storageType {
 	case "s3":
-		if s3Bucket == "" {
+		if cfg.S3Bucket == "" {
 			return nil, fmt.Errorf("S3 bucket not configured")
 		}
-		st, err = storage.NewS3Storage(s3Bucket, s3Region, s3Prefix)
+		st, err = storage.NewStorage(&cfg)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create S3 storage: %w", err)
 		}
 	case "http":
-		if httpBase == "" {
+		if cfg.HTTPBase == "" {
 			return nil, fmt.Errorf("HTTP base URL not configured")
 		}
-		st, err = storage.NewHTTPStorage(httpBase)
+		st, err = storage.NewStorage(&cfg)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create HTTP storage: %w", err)
 		}

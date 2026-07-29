@@ -460,14 +460,120 @@ func TestAuthMiddleware(t *testing.T) {
 		t.Errorf("valid token: expected 200, got %d", got)
 	}
 
-	// The login and index paths must stay reachable without a token.
-	for _, p := range []string{"/login", "/"} {
+	// Public community pages and their narrow read APIs stay reachable without
+	// a console session.
+	for _, p := range []string{
+		"/login", "/", "/packages", "/docs", "/status",
+		"/api/public/binhosts", "/api/public/packages", "/api/public/status",
+		"/binpkgs/releases/amd64/binpackages/23.0/target/Packages",
+	} {
 		req = httptest.NewRequest(http.MethodGet, p, nil)
 		w = httptest.NewRecorder()
 		handler.ServeHTTP(w, req)
 		if got := w.Result().StatusCode; got != http.StatusOK {
 			t.Errorf("public path %s: expected 200, got %d", p, got)
 		}
+	}
+}
+
+func TestPublicCommunityPagesUseAnonymousShell(t *testing.T) {
+	dashboard := New(&config.DashboardConfig{
+		ServerURL: "http://127.0.0.1:1", AuthEnabled: true,
+		JWTSecret: strings.Repeat("x", 32),
+	})
+	router := dashboard.Router()
+	for _, target := range []string{"/packages", "/docs", "/status"} {
+		response := httptest.NewRecorder()
+		router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, target, nil))
+		if response.Code != http.StatusOK {
+			t.Fatalf("%s status=%d body=%s", target, response.Code, response.Body.String())
+		}
+		body := response.Body.String()
+		if !strings.Contains(body, `class="public-main"`) {
+			t.Errorf("%s did not render the public page shell", target)
+		}
+		if strings.Contains(body, "/api/iam/me") ||
+			strings.Contains(body, "project-switcher") {
+			t.Errorf("%s included authenticated console bootstrap", target)
+		}
+	}
+}
+
+func TestPublicProxyForwardsOnlySafeQueryAndNoCredentials(t *testing.T) {
+	var captured *http.Request
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		captured = r.Clone(r.Context())
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "public, max-age=30")
+		_, _ = w.Write([]byte(`{"packages":[],"total":0,"limit":10,"offset":0}`))
+	}))
+	defer backend.Close()
+
+	dashboard := New(&config.DashboardConfig{
+		ServerURL: backend.URL, ServerAPIKey: "dashboard-server-secret",
+		AuthEnabled: true, JWTSecret: strings.Repeat("x", 32),
+	})
+	request := httptest.NewRequest(
+		http.MethodGet,
+		"/api/public/packages?q=app-misc%2Fjq&limit=10&ignored=secret",
+		nil,
+	)
+	request.Header.Set("Authorization", "Bearer browser-secret")
+	request.Header.Set("X-API-Key", "browser-api-key")
+	request.Header.Set("X-Project-ID", "private-project")
+	request.AddCookie(&http.Cookie{Name: sessionCookie, Value: "private-session"})
+	response := httptest.NewRecorder()
+	dashboard.Router().ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	if captured == nil {
+		t.Fatal("backend did not receive public request")
+	}
+	if captured.URL.Path != "/api/v1/public/packages" ||
+		captured.URL.Query().Get("q") != "app-misc/jq" ||
+		captured.URL.Query().Get("limit") != "10" ||
+		captured.URL.Query().Has("ignored") {
+		t.Fatalf("unexpected backend request: %s", captured.URL.String())
+	}
+	for _, name := range []string{
+		"Authorization", "X-API-Key", "X-Project-ID", "Cookie",
+	} {
+		if value := captured.Header.Get(name); value != "" {
+			t.Errorf("public proxy forwarded %s=%q", name, value)
+		}
+	}
+	if response.Header().Get("Cache-Control") != "public, max-age=30" {
+		t.Errorf("cache policy was not relayed: %q", response.Header().Get("Cache-Control"))
+	}
+}
+
+func TestPublicBinpkgProxyAllowsAnonymousHEAD(t *testing.T) {
+	var method string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		method = r.Method
+		w.Header().Set("Content-Length", "123")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+	dashboard := New(&config.DashboardConfig{
+		ServerURL: backend.URL, ServerAPIKey: "must-not-be-forwarded",
+		AuthEnabled: true, JWTSecret: strings.Repeat("x", 32),
+	})
+	response := httptest.NewRecorder()
+	dashboard.Router().ServeHTTP(
+		response,
+		httptest.NewRequest(
+			http.MethodHead,
+			"/binpkgs/releases/amd64/binpackages/23.0/target/Packages",
+			nil,
+		),
+	)
+	if response.Code != http.StatusOK || method != http.MethodHead {
+		t.Fatalf("status=%d backend method=%q", response.Code, method)
+	}
+	if response.Header().Get("Content-Length") != "123" {
+		t.Fatalf("content length was not relayed: %q", response.Header().Get("Content-Length"))
 	}
 }
 

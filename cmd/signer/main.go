@@ -19,6 +19,7 @@ import (
 	"github.com/slchris/portage-engine/internal/gpg"
 	"github.com/slchris/portage-engine/internal/persistence"
 	"github.com/slchris/portage-engine/internal/signing"
+	artifactstorage "github.com/slchris/portage-engine/internal/storage"
 	"github.com/slchris/portage-engine/pkg/config"
 )
 
@@ -50,8 +51,9 @@ func main() {
 	if !cfg.GPGEnabled {
 		log.Fatal("isolated signer requires GPG_ENABLED=true")
 	}
-	if cfg.BinpkgPath == "" || cfg.GPGHome == "" || cfg.GPGPublicKeyPath == "" {
-		log.Fatal("BINPKG_PATH, GPG_HOME, and GPG_PUBLIC_KEY_PATH are required")
+	if (cfg.BinpkgPath == "" && cfg.StorageType != "s3") ||
+		cfg.GPGHome == "" || cfg.GPGPublicKeyPath == "" {
+		log.Fatal("an artifact source, GPG_HOME, and GPG_PUBLIC_KEY_PATH are required")
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -102,8 +104,25 @@ func main() {
 	hostname, _ := os.Hostname()
 	owner := "signer/" + hostname + "/" + uuid.NewString()
 	repository := persistence.NewJobRepository(db)
+	var objectStore artifactstorage.Storage
+	if cfg.StorageType == "s3" {
+		objectStore, err = artifactstorage.NewStorage(&artifactstorage.Config{
+			Type:            cfg.StorageType,
+			S3Bucket:        cfg.StorageS3Bucket,
+			S3Region:        cfg.StorageS3Region,
+			S3Prefix:        cfg.StorageS3Prefix,
+			S3Endpoint:      cfg.StorageS3Endpoint,
+			S3UsePathStyle:  cfg.StorageS3UsePathStyle,
+			S3PublicBaseURL: cfg.StorageS3PublicBaseURL,
+			S3AllowDelete:   cfg.StorageS3AllowDelete,
+		})
+		if err != nil {
+			log.Fatalf("initialize signer object storage: %v", err)
+		}
+	}
 	runner := &signing.Runner{
 		Queue: repository, BinpkgPath: cfg.BinpkgPath, Owner: owner,
+		Storage: objectStore, ScratchDir: filepath.Join(cfg.DataDir, "signer-cache"),
 		Lease: 5 * time.Minute,
 		GPG:   signing.GPG{Home: cfg.GPGHome, KeyID: key.KeyID()},
 	}

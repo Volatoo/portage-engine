@@ -61,11 +61,17 @@ type identityProviderDocument struct {
 	Providers []IdentityProviderConfig `json:"providers"`
 }
 
+const (
+	DeploymentModeTrusted = "trusted"
+	DeploymentModePublic  = "public"
+)
+
 // ServerConfig represents the server configuration.
 type ServerConfig struct {
+	DeploymentMode           string // trusted or public
 	Port                     int
 	ControlPlaneID           string
-	RuntimeRole              string // control-plane or executor
+	RuntimeRole              string // control-plane (combined), api, or executor
 	BinpkgPath               string
 	MaxWorkers               int
 	BuildMode                string
@@ -74,6 +80,10 @@ type ServerConfig struct {
 	StorageS3Bucket          string
 	StorageS3Region          string
 	StorageS3Prefix          string
+	StorageS3Endpoint        string
+	StorageS3UsePathStyle    bool
+	StorageS3PublicBaseURL   string
+	StorageS3AllowDelete     bool
 	StorageHTTPBase          string
 	GPGEnabled               bool
 	GPGKeyID                 string
@@ -249,10 +259,10 @@ type CacheConfig struct {
 func (c *ServerConfig) Validate() []string {
 	var warnings []string
 	if c.RuntimeRole != "" && c.RuntimeRole != "control-plane" &&
-		c.RuntimeRole != "executor" {
+		c.RuntimeRole != "api" && c.RuntimeRole != "executor" {
 		warnings = append(
 			warnings,
-			"CONFIG: SERVER_RUNTIME_ROLE must be control-plane or executor",
+			"CONFIG: SERVER_RUNTIME_ROLE must be control-plane, api, or executor",
 		)
 	}
 	if c.RuntimeRole == "executor" {
@@ -300,6 +310,162 @@ func (c *ServerConfig) Validate() []string {
 	warnings = append(warnings, c.validateDatabaseAndCache()...)
 	warnings = append(warnings, c.validateWorkerGateway()...)
 	return warnings
+}
+
+// ValidateStartup enforces deployment-boundary requirements that must stop the
+// process instead of being emitted as advisory warnings. Trusted mode preserves
+// the self-hosted/LAN compatibility surface. Public mode is intentionally
+// strict: it is a readiness contract, not a shortcut for exposing the
+// development Compose topology.
+func (c *ServerConfig) ValidateStartup() error {
+	mode := strings.ToLower(strings.TrimSpace(c.DeploymentMode))
+	if mode == "" {
+		mode = DeploymentModeTrusted
+	}
+	if mode != DeploymentModeTrusted && mode != DeploymentModePublic {
+		return fmt.Errorf(
+			"DEPLOYMENT_MODE must be %q or %q",
+			DeploymentModeTrusted, DeploymentModePublic,
+		)
+	}
+	if mode != DeploymentModePublic {
+		return nil
+	}
+
+	violations := c.validatePublicRuntimeBoundary()
+	violations = append(violations, c.validatePublicStorageBoundary()...)
+	if c.RuntimeRole != "executor" {
+		violations = append(violations, c.validatePublicAPIBoundary()...)
+	}
+	if len(violations) > 0 {
+		return fmt.Errorf(
+			"public deployment configuration rejected: %s",
+			strings.Join(violations, "; "),
+		)
+	}
+	return nil
+}
+
+func (c *ServerConfig) validatePublicRuntimeBoundary() []string {
+	var violations []string
+	addViolation(&violations, !c.Database.Enabled || !c.Database.Required,
+		"PostgreSQL must be enabled and required")
+	addViolation(&violations, strings.TrimSpace(c.CatalogPath) == "",
+		"CATALOG_PATH must select an operator-owned immutable build catalog")
+	addViolation(&violations, c.CloudPVEInsecure,
+		"CLOUD_PVE_INSECURE must be false")
+	addViolation(&violations, c.CloudSSHInsecureHostKey,
+		"CLOUD_SSH_INSECURE_HOST_KEY must be false")
+	addViolation(&violations, len(c.RemoteBuilders) != 0,
+		"REMOTE_BUILDERS legacy push compatibility must be disabled")
+	addViolation(&violations, c.BuilderToken != "",
+		"BUILDER_TOKEN legacy shared credentials must be disabled")
+	addViolation(&violations, c.RuntimeRole == "control-plane" || c.RuntimeRole == "",
+		"SERVER_RUNTIME_ROLE must separate the public api from executor processes")
+	return violations
+}
+
+func (c *ServerConfig) validatePublicStorageBoundary() []string {
+	var violations []string
+	addViolation(&violations, c.StorageType != "s3",
+		"STORAGE_TYPE must be s3; shared local/NFS publication is not a public-service authority")
+	addViolation(&violations, strings.TrimSpace(c.StorageS3Bucket) == "",
+		"STORAGE_S3_BUCKET must select the artifact bucket")
+	addViolation(&violations, strings.TrimSpace(c.StorageS3Region) == "",
+		"STORAGE_S3_REGION must be explicit")
+	addViolation(&violations, c.RuntimeRole == "executor" && !c.StorageS3AllowDelete,
+		"executor STORAGE_S3_ALLOW_DELETE must be true for capability revocation; restrict its IAM DeleteObject grant to .quarantine/*")
+	addViolation(&violations, c.RuntimeRole == "api" && c.StorageS3AllowDelete,
+		"api STORAGE_S3_ALLOW_DELETE must be false; the public read path must not receive DeleteObject capability")
+	endpoint := strings.TrimSpace(c.StorageS3Endpoint)
+	addViolation(&violations, endpoint != "" && !validHTTPOrigin(endpoint),
+		"STORAGE_S3_ENDPOINT must be an absolute HTTP(S) origin without credentials, path, query, or fragment")
+	publicBaseURL := strings.TrimSpace(c.StorageS3PublicBaseURL)
+	addViolation(&violations,
+		publicBaseURL != "" && validateHTTPSEndpoint(publicBaseURL) != nil,
+		"STORAGE_S3_PUBLIC_BASE_URL must be an absolute HTTPS URL")
+	return violations
+}
+
+func (c *ServerConfig) validatePublicAPIBoundary() []string {
+	var violations []string
+	addViolation(&violations, c.RuntimeRole != "api",
+		"the public listener process must use SERVER_RUNTIME_ROLE=api")
+	addViolation(&violations, strings.TrimSpace(c.ControlPlaneID) == "",
+		"CONTROL_PLANE_ID must be stable and non-empty")
+	addViolation(&violations, c.hasProviderCredentials(),
+		"the public api process must not receive provider or SSH credentials")
+	addViolation(&violations, c.AuthMode != "oidc", "AUTH_MODE must be oidc")
+	providerConfigured := len(c.IdentityProviders) > 0 ||
+		(c.OIDCIssuerURL != "" && c.OIDCAudience != "")
+	addViolation(&violations, !providerConfigured,
+		"at least one OIDC or GitHub identity provider must be configured")
+	addViolation(&violations,
+		len(c.IdentityAdminSubjects) == 0 && len(c.OIDCAdminSubjects) == 0,
+		"at least one immutable bootstrap administrator identity must be configured")
+	addViolation(&violations, c.APIKey != "" || c.StepUpAPIKey != "",
+		"legacy API_KEY and STEP_UP_API_KEY credentials must be unset")
+	addViolation(&violations, !c.Cache.Enabled || !c.Cache.Required,
+		"Redis must be enabled and required; edge rate limiting is still required independently")
+	addViolation(&violations, len(c.CORSAllowedOrigins) == 0,
+		"CORS_ALLOWED_ORIGINS must contain explicit HTTPS origins")
+	for _, origin := range c.CORSAllowedOrigins {
+		addViolation(&violations, !validPublicCORSOrigin(origin),
+			"CORS_ALLOWED_ORIGINS must contain only absolute HTTPS origins without wildcards")
+	}
+	addViolation(&violations, c.OIDCAllowInsecureHTTP,
+		"OIDC_ALLOW_INSECURE_HTTP must be false")
+	for _, provider := range c.IdentityProviders {
+		addViolation(&violations, provider.AllowInsecureHTTP,
+			"identity provider "+provider.ID+" must not allow HTTP")
+		if err := validateIdentityProvider(provider); err != nil {
+			violations = append(violations,
+				"identity provider "+provider.ID+": "+err.Error())
+		}
+	}
+	addViolation(&violations, !c.GPGEnabled,
+		"GPG_ENABLED must be true for the isolated signing queue")
+	addViolation(&violations, c.GPGAutoCreate,
+		"GPG_AUTO_CREATE must be false and an operator-approved release key must be selected")
+	addViolation(&violations, strings.TrimSpace(c.GPGKeyID) == "",
+		"GPG_KEY_ID must select the operator-approved release key")
+	addViolation(&violations, !c.WorkerGatewayEnabled,
+		"WORKER_GATEWAY_ENABLED must be true")
+	addViolation(&violations, c.WorkerGatewayIssuerProvider != "vault",
+		"WORKER_GATEWAY_ISSUER_PROVIDER must be vault")
+	addViolation(&violations, c.PhaseExecutorMode != "active",
+		"PHASE_EXECUTOR_MODE must be active")
+	addViolation(&violations, c.MetricsEnabled && c.MetricsPassword == "",
+		"METRICS_PASSWORD is required when metrics are enabled")
+	return append(violations, c.validateWorkerGateway()...)
+}
+
+func (c *ServerConfig) hasProviderCredentials() bool {
+	values := []string{
+		c.CloudPVETokenID, c.CloudPVETokenSecret,
+		c.CloudPVEUsername, c.CloudPVEPassword,
+		c.CloudAliyunAK, c.CloudAliyunSK, c.CloudGCPKeyFile,
+		c.CloudAWSAccessKey, c.CloudAWSSecretKey, c.CloudSSHKeyPath,
+	}
+	for _, value := range values {
+		if value != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func validPublicCORSOrigin(origin string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(origin))
+	return err == nil && origin != "*" && parsed.Scheme == "https" &&
+		parsed.Host != "" && parsed.User == nil && parsed.RawQuery == "" &&
+		parsed.Fragment == ""
+}
+
+func addViolation(violations *[]string, condition bool, message string) {
+	if condition {
+		*violations = append(*violations, message)
+	}
 }
 
 func (c *ServerConfig) validateAuth() []string {
@@ -567,6 +733,7 @@ func (c *ServerConfig) workerGatewayTLSIncomplete() bool {
 
 // DashboardConfig represents the dashboard configuration.
 type DashboardConfig struct {
+	DeploymentMode        string
 	Port                  int
 	ServerURL             string
 	ServerAPIKey          string // API key forwarded to the backend server (empty = none)
@@ -598,6 +765,9 @@ func (c *DashboardConfig) Validate() error {
 		return fmt.Errorf("SERVER_URL must be an HTTP or HTTPS origin without credentials, path, query, or fragment")
 	}
 	providerLoginEnabled := c.OIDCEnabled || len(c.IdentityProviders) > 0
+	if err := c.validateDashboardDeployment(providerLoginEnabled); err != nil {
+		return err
+	}
 	if providerLoginEnabled && !c.AuthEnabled {
 		return fmt.Errorf("identity provider login requires AUTH_ENABLED=true")
 	}
@@ -624,6 +794,64 @@ func (c *DashboardConfig) Validate() error {
 	}
 	if c.OIDCEnabled {
 		return c.validateDashboardOIDC()
+	}
+	return nil
+}
+
+func (c *DashboardConfig) validateDashboardDeployment(providerLoginEnabled bool) error {
+	mode := strings.ToLower(strings.TrimSpace(c.DeploymentMode))
+	if mode == "" {
+		mode = DeploymentModeTrusted
+	}
+	if mode != DeploymentModeTrusted && mode != DeploymentModePublic {
+		return fmt.Errorf(
+			"DEPLOYMENT_MODE must be %q or %q",
+			DeploymentModeTrusted, DeploymentModePublic,
+		)
+	}
+	if mode != DeploymentModePublic {
+		return nil
+	}
+
+	var violations []string
+	add := func(condition bool, message string) {
+		if condition {
+			violations = append(violations, message)
+		}
+	}
+	add(!c.AuthEnabled, "AUTH_ENABLED must be true")
+	add(c.AllowAnonymous, "ALLOW_ANONYMOUS must be false")
+	add(!providerLoginEnabled, "at least one OIDC or GitHub identity provider is required")
+	add(!c.CookieSecure, "COOKIE_SECURE must be true behind the public TLS edge")
+	add(c.OIDCAllowInsecureHTTP, "OIDC_ALLOW_INSECURE_HTTP must be false")
+	add(c.AdminUser != "" || c.AdminPassword != "",
+		"local ADMIN_USER and ADMIN_PASSWORD login must be disabled")
+	add(c.ServerAPIKey != "" || c.ServerStepUpAPIKey != "",
+		"dashboard legacy server API keys must be unset")
+	add(c.MetricsEnabled && c.MetricsPassword == "",
+		"METRICS_PASSWORD is required when metrics are enabled")
+
+	for _, provider := range c.IdentityProviders {
+		add(provider.AllowInsecureHTTP,
+			"identity provider "+provider.ID+" must not allow HTTP")
+		redirect, err := url.Parse(provider.RedirectURL)
+		add(err != nil || redirect.Scheme != "https",
+			"identity provider "+provider.ID+" must use an HTTPS redirect URL")
+	}
+	if c.OIDCEnabled {
+		issuer, issuerErr := url.Parse(c.OIDCIssuerURL)
+		redirect, redirectErr := url.Parse(c.OIDCRedirectURL)
+		add(issuerErr != nil || issuer.Scheme != "https",
+			"OIDC_ISSUER_URL must use HTTPS")
+		add(redirectErr != nil || redirect.Scheme != "https",
+			"OIDC_REDIRECT_URL must use HTTPS")
+	}
+
+	if len(violations) > 0 {
+		return fmt.Errorf(
+			"public dashboard configuration rejected: %s",
+			strings.Join(violations, "; "),
+		)
 	}
 	return nil
 }
@@ -805,14 +1033,17 @@ type BuilderConfig struct {
 	// unsigned packages; portage-signer owns OpenPGP signing.
 	BinpkgFormat string
 	// BuildFeatures is appended to the native build root's make.conf FEATURES.
-	BuildFeatures   string
-	StorageType     string
-	StorageLocalDir string
-	StorageS3Bucket string
-	StorageS3Region string
-	StorageS3Prefix string
-	StorageHTTPBase string
-	ServerURL       string
+	BuildFeatures          string
+	StorageType            string
+	StorageLocalDir        string
+	StorageS3Bucket        string
+	StorageS3Region        string
+	StorageS3Prefix        string
+	StorageS3Endpoint      string
+	StorageS3UsePathStyle  bool
+	StorageS3PublicBaseURL string
+	StorageHTTPBase        string
+	ServerURL              string
 	// ServerAPIKey is the central server's API key, attached to registration
 	// and heartbeat calls (required when the server sets API_KEY).
 	ServerAPIKey string
@@ -960,6 +1191,7 @@ func getEnvBool(env map[string]string, key string, defaultValue bool) bool {
 func LoadServerConfig(path string) (*ServerConfig, error) {
 	// Set defaults
 	config := &ServerConfig{
+		DeploymentMode:                     DeploymentModeTrusted,
 		Port:                               8080,
 		RuntimeRole:                        "control-plane",
 		BinpkgPath:                         "/var/cache/binpkgs",
@@ -1004,6 +1236,9 @@ func LoadServerConfig(path string) (*ServerConfig, error) {
 	}
 
 	config.Port = getEnvInt(env, "SERVER_PORT", config.Port)
+	config.DeploymentMode = strings.ToLower(getEnvString(
+		env, "DEPLOYMENT_MODE", config.DeploymentMode,
+	))
 	config.ControlPlaneID = getEnvString(env, "CONTROL_PLANE_ID", "")
 	config.RuntimeRole = strings.ToLower(getEnvString(
 		env, "SERVER_RUNTIME_ROLE", config.RuntimeRole,
@@ -1017,6 +1252,10 @@ func LoadServerConfig(path string) (*ServerConfig, error) {
 	config.StorageS3Bucket = getEnvString(env, "STORAGE_S3_BUCKET", "")
 	config.StorageS3Region = getEnvString(env, "STORAGE_S3_REGION", "")
 	config.StorageS3Prefix = getEnvString(env, "STORAGE_S3_PREFIX", "")
+	config.StorageS3Endpoint = getEnvString(env, "STORAGE_S3_ENDPOINT", "")
+	config.StorageS3UsePathStyle = getEnvBool(env, "STORAGE_S3_USE_PATH_STYLE", false)
+	config.StorageS3PublicBaseURL = getEnvString(env, "STORAGE_S3_PUBLIC_BASE_URL", "")
+	config.StorageS3AllowDelete = getEnvBool(env, "STORAGE_S3_ALLOW_DELETE", false)
 	config.StorageHTTPBase = getEnvString(env, "STORAGE_HTTP_BASE", "")
 
 	config.GPGEnabled = getEnvBool(env, "GPG_ENABLED", config.GPGEnabled)
@@ -1234,6 +1473,7 @@ func LoadServerConfig(path string) (*ServerConfig, error) {
 func LoadDashboardConfig(path string) (*DashboardConfig, error) {
 	// Set defaults
 	config := &DashboardConfig{
+		DeploymentMode:  DeploymentModeTrusted,
 		Port:            8081,
 		ServerURL:       "http://localhost:8080",
 		AuthEnabled:     true,
@@ -1255,6 +1495,9 @@ func LoadDashboardConfig(path string) (*DashboardConfig, error) {
 	}
 
 	config.Port = getEnvInt(env, "DASHBOARD_PORT", config.Port)
+	config.DeploymentMode = strings.ToLower(getEnvString(
+		env, "DEPLOYMENT_MODE", config.DeploymentMode,
+	))
 	config.ServerURL = getEnvString(env, "SERVER_URL", config.ServerURL)
 	config.ServerAPIKey = getEnvString(env, "SERVER_API_KEY", "")
 	config.ServerStepUpAPIKey = getEnvString(env, "SERVER_STEP_UP_API_KEY", "")
@@ -1408,6 +1651,9 @@ func LoadBuilderConfig(path string) (*BuilderConfig, error) {
 	config.StorageS3Bucket = getEnvString(env, "STORAGE_S3_BUCKET", "")
 	config.StorageS3Region = getEnvString(env, "STORAGE_S3_REGION", "")
 	config.StorageS3Prefix = getEnvString(env, "STORAGE_S3_PREFIX", "")
+	config.StorageS3Endpoint = getEnvString(env, "STORAGE_S3_ENDPOINT", "")
+	config.StorageS3UsePathStyle = getEnvBool(env, "STORAGE_S3_USE_PATH_STYLE", false)
+	config.StorageS3PublicBaseURL = getEnvString(env, "STORAGE_S3_PUBLIC_BASE_URL", "")
 	config.StorageHTTPBase = getEnvString(env, "STORAGE_HTTP_BASE", "")
 
 	config.ServerURL = getEnvString(env, "SERVER_URL", "")

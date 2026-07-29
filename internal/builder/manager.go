@@ -32,6 +32,7 @@ import (
 	"github.com/slchris/portage-engine/internal/catalog"
 	"github.com/slchris/portage-engine/internal/iac"
 	"github.com/slchris/portage-engine/internal/signing"
+	artifactstorage "github.com/slchris/portage-engine/internal/storage"
 	"github.com/slchris/portage-engine/internal/workergateway"
 	"github.com/slchris/portage-engine/pkg/config"
 )
@@ -251,10 +252,10 @@ type PhaseInstanceContext struct {
 	TTL             time.Duration     `json:"ttl"`
 }
 
-// PhaseExecutionContext is the durable hand-off document. It contains only
-// identities, paths on the shared DATA_DIR/BINPKG_PATH volumes and immutable
-// artifact references; certificate private keys and cloud credentials are
-// deliberately absent.
+// PhaseExecutionContext is the durable hand-off document. In object-storage
+// mode StagingRoot is deliberately empty: token plus immutable relative paths
+// are the hand-off authority and each replica creates its own scratch path.
+// Certificate private keys and cloud credentials are deliberately absent.
 type PhaseExecutionContext struct {
 	Instance          *PhaseInstanceContext `json:"instance,omitempty"`
 	WorkerID          string                `json:"worker_id,omitempty"`
@@ -645,6 +646,7 @@ type Manager struct {
 	buildCatalog  atomic.Pointer[catalog.Catalog]
 	workerBroker  *workergateway.Broker
 	workerIssuer  workergateway.Issuer
+	artifactStore artifactstorage.Storage
 }
 
 // SetArtifactStoredHook registers a callback invoked after an artifact has
@@ -656,6 +658,16 @@ func (m *Manager) SetArtifactStoredHook(f func()) {
 // SetArtifactPromotionHook installs the verified artifact promotion callback.
 func (m *Manager) SetArtifactPromotionHook(f func(string, []string, string, string) ([]string, error)) {
 	m.promoteArtifacts = f
+}
+
+// SetArtifactStorage installs the cross-replica artifact authority. S3 mode
+// keeps only disposable process-local scratch; every phase hand-off is
+// rematerialized from immutable, token-scoped objects.
+func (m *Manager) SetArtifactStorage(store artifactstorage.Storage) {
+	m.artifactStore = store
+	if m.objectQuarantineEnabled() {
+		m.workerBroker.SetUploadRoot(m.artifactQuarantineBase())
+	}
 }
 
 // SetGPGKeyProvider registers the isolated signer's public identity for
@@ -827,6 +839,9 @@ func (m *Manager) artifactQuarantineCleanupLoop() {
 }
 
 func (m *Manager) cleanupExpiredArtifactQuarantines() {
+	if m.objectQuarantineEnabled() {
+		m.cleanupExpiredObjectQuarantines()
+	}
 	base := m.artifactQuarantineBase()
 	entries, err := os.ReadDir(base)
 	if err != nil {
@@ -853,6 +868,55 @@ func (m *Manager) cleanupExpiredArtifactQuarantines() {
 	}
 }
 
+func (m *Manager) cleanupExpiredObjectQuarantines() {
+	keys, err := m.artifactStore.List(".quarantine/")
+	if err != nil {
+		return
+	}
+	tokens := make(map[string]bool)
+	for _, key := range keys {
+		parts := strings.Split(key, "/")
+		if len(parts) >= 3 && parts[0] == ".quarantine" &&
+			capabilityTokenRegex.MatchString(parts[1]) {
+			if len(parts) == 3 && parts[2] == verificationCapabilityFile {
+				tokens[parts[1]] = true
+			} else if _, exists := tokens[parts[1]]; !exists {
+				tokens[parts[1]] = false
+			}
+		}
+	}
+	active := make(map[string]struct{})
+	m.jobsMu.RLock()
+	for _, job := range m.jobs {
+		if capabilityTokenRegex.MatchString(job.VerificationToken) &&
+			job.Status != "completed" && job.Status != "failed" &&
+			job.Status != "canceled" {
+			active[job.VerificationToken] = struct{}{}
+		}
+	}
+	m.jobsMu.RUnlock()
+	now := time.Now()
+	for token, hasCapability := range tokens {
+		if !hasCapability {
+			if _, isActive := active[token]; !isActive {
+				_ = m.deleteObjectQuarantine(token)
+			}
+			continue
+		}
+		key, keyErr := artifactstorage.QuarantineCapabilityKey(token)
+		if keyErr != nil {
+			continue
+		}
+		document, downloadErr := artifactstorage.DownloadBytes(
+			m.artifactStore, key, m.artifactQuarantineBase(), 1<<20,
+		)
+		manifest, parseErr := artifactstorage.ParseQuarantineManifest(document, time.Time{})
+		if downloadErr != nil || parseErr != nil || !now.Before(manifest.ExpiresAt) {
+			_ = m.deleteObjectQuarantine(token)
+		}
+	}
+}
+
 // SetEphemeralHooks connects optional Redis acceleration. These callbacks must
 // never be used to decide build correctness; PostgreSQL polling remains active.
 func (m *Manager) SetEphemeralHooks(wake func(), event func(BuildStatus)) {
@@ -864,6 +928,10 @@ func (m *Manager) SetEphemeralHooks(wake func(), event func(BuildStatus)) {
 // its catalog, signing state, and persisted projection.
 func (m *Manager) StartWorkers() {
 	m.workersOnce.Do(func() {
+		runtimeRole := strings.TrimSpace(m.config.RuntimeRole)
+		if runtimeRole == "" {
+			runtimeRole = "control-plane"
+		}
 		if m.config.PhaseExecutorMode == "active" {
 			if m.phaseQueue == nil || m.scheduler == nil ||
 				!m.config.WorkerGatewayEnabled || len(m.remoteBuilders()) > 0 {
@@ -878,25 +946,46 @@ func (m *Manager) StartWorkers() {
 				return
 			}
 			m.executorCaps = capabilities
-			if observer, ok := m.scheduler.(DurableAutoscaleObserver); ok &&
-				m.config.SchedulerAutoscaleMode != "" {
-				go m.autoscaleObservationLoop(observer)
+			if runtimeRunsAdmission(runtimeRole) {
+				if observer, ok := m.scheduler.(DurableAutoscaleObserver); ok &&
+					m.config.SchedulerAutoscaleMode != "" {
+					go m.autoscaleObservationLoop(observer)
+				}
 			}
 		}
 		if m.config.PhaseExecutorMode == "active" {
 			// Admission is deliberately separate from execution. Capacity-
 			// blocked phase work stays in PostgreSQL and consumes no executor
 			// goroutine or VM slot.
-			go m.durablePhaseAdmissionLoop()
-			for i := 0; i < m.config.MaxWorkers; i++ {
-				go m.durablePhaseWorker(i)
+			if runtimeRunsAdmission(runtimeRole) {
+				go m.durablePhaseAdmissionLoop()
 			}
+			if runtimeRunsPhaseExecution(runtimeRole) {
+				for i := 0; i < m.config.MaxWorkers; i++ {
+					go m.durablePhaseWorker(i)
+				}
+			}
+			return
+		}
+		if runtimeRole == "api" || runtimeRole == "executor" {
+			fmt.Printf(
+				"Warning: separated runtime role %q requires active phase execution; no legacy worker was started\n",
+				runtimeRole,
+			)
 			return
 		}
 		for i := 0; i < m.config.MaxWorkers; i++ {
 			go m.worker(i)
 		}
 	})
+}
+
+func runtimeRunsAdmission(role string) bool {
+	return role != "executor"
+}
+
+func runtimeRunsPhaseExecution(role string) bool {
+	return role != "api"
 }
 
 func (m *Manager) autoscaleObservationLoop(observer DurableAutoscaleObserver) {
@@ -1963,7 +2052,9 @@ func (m *Manager) verifyAndPublish(jobID, builderEndpoint, instanceID string, re
 		if err := m.verifyUnsignedRejectedOnBuilder(jobID, builderEndpoint, req, verifyBinhost); err != nil {
 			return "verify", fmt.Errorf("unsigned negative-control verification failed: %w", err)
 		}
-		m.revokeArtifactCapability(jobID)
+		if err := m.revokeArtifactCapability(jobID); err != nil {
+			return "sign", fmt.Errorf("revoke unsigned verification capability: %w", err)
+		}
 		if !m.updateStatus(jobID, "signing", instanceID, "") {
 			return "sign", fmt.Errorf("durable signing phase transition was rejected")
 		}
@@ -2011,17 +2102,32 @@ func (m *Manager) verifyAndPublish(jobID, builderEndpoint, instanceID string, re
 	return "", nil
 }
 
-func (m *Manager) revokeArtifactCapability(jobID string) {
+func (m *Manager) revokeArtifactCapability(jobID string) error {
 	m.jobsMu.RLock()
 	job := m.jobs[jobID]
-	root := ""
+	root, token := "", ""
 	if job != nil {
 		root = job.StagingRoot
+		token = job.VerificationToken
 	}
 	m.jobsMu.RUnlock()
-	if root != "" {
-		_ = os.Remove(filepath.Join(root, verificationCapabilityFile))
+	if m.objectQuarantineEnabled() && token != "" {
+		key, err := artifactstorage.QuarantineCapabilityKey(token)
+		if err != nil {
+			return err
+		}
+		if err := m.artifactStore.Delete(key); err != nil {
+			return fmt.Errorf("delete object capability marker: %w", err)
+		}
+		return nil
 	}
+	if root != "" {
+		err := os.Remove(filepath.Join(root, verificationCapabilityFile))
+		if err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	return nil
 }
 
 func (m *Manager) signJobArtifacts(jobID string) error {
@@ -2039,8 +2145,16 @@ func (m *Manager) signJobArtifacts(jobID string) error {
 	sourceToken := job.VerificationToken
 	rels := append([]string(nil), job.StagedArtifacts...)
 	m.jobsMu.RUnlock()
-	if sourceRoot == "" || !capabilityTokenRegex.MatchString(sourceToken) || len(rels) == 0 {
+	if (!m.objectQuarantineEnabled() && sourceRoot == "") ||
+		!capabilityTokenRegex.MatchString(sourceToken) || len(rels) == 0 {
 		return fmt.Errorf("job quarantine is incomplete")
+	}
+	if m.objectQuarantineEnabled() {
+		materialized, materializeErr := m.ensureObjectJobQuarantine(jobID)
+		if materializeErr != nil {
+			return fmt.Errorf("materialize signing inputs: %w", materializeErr)
+		}
+		sourceRoot = materialized
 	}
 
 	records, err := artifactMetadata(sourceRoot, rels, &status, "verified_unsigned")
@@ -2089,11 +2203,11 @@ func (m *Manager) signJobArtifacts(jobID string) error {
 	if waitTimeout <= 0 {
 		waitTimeout = 10 * time.Minute
 	}
-	return m.waitForSigningTask(jobID, sourceRoot, task, waitTimeout)
+	return m.waitForSigningTask(jobID, sourceRoot, sourceToken, task, waitTimeout)
 }
 
 func (m *Manager) waitForSigningTask(
-	jobID, sourceRoot string,
+	jobID, sourceRoot, sourceToken string,
 	task *signing.Task,
 	waitTimeout time.Duration,
 ) error {
@@ -2110,7 +2224,7 @@ func (m *Manager) waitForSigningTask(
 		}
 		switch current.State {
 		case "completed":
-			return m.adoptSignedArtifacts(jobID, sourceRoot, current)
+			return m.adoptSignedArtifacts(jobID, sourceRoot, sourceToken, current)
 		case "failed", "canceled":
 			if current.Error == "" {
 				current.Error = "signing task did not complete"
@@ -2125,12 +2239,11 @@ func (m *Manager) waitForSigningTask(
 	}
 }
 
-func (m *Manager) adoptSignedArtifacts(jobID, sourceRoot string, task *signing.Task) error {
+func (m *Manager) adoptSignedArtifacts(
+	jobID, sourceRoot, sourceToken string,
+	task *signing.Task,
+) error {
 	outputToken, err := signing.OutputToken(task.ID)
-	if err != nil {
-		return err
-	}
-	outputRoot, err := signing.TokenRoot(m.config.BinpkgPath, outputToken)
 	if err != nil {
 		return err
 	}
@@ -2143,6 +2256,17 @@ func (m *Manager) adoptSignedArtifacts(jobID, sourceRoot string, task *signing.T
 			return err
 		}
 		rels[index] = artifact.RelativePath
+	}
+	outputRoot := ""
+	if m.objectQuarantineEnabled() {
+		outputRoot, err = m.materializeObjectQuarantine(outputToken, rels)
+	} else {
+		outputRoot, err = signing.TokenRoot(m.config.BinpkgPath, outputToken)
+	}
+	if err != nil {
+		return err
+	}
+	for _, artifact := range task.Artifacts {
 		records, err := artifactMetadata(outputRoot, []string{artifact.RelativePath}, &BuildStatus{}, "signed")
 		if err != nil {
 			return err
@@ -2180,6 +2304,11 @@ func (m *Manager) adoptSignedArtifacts(jobID, sourceRoot string, task *signing.T
 	}
 	if sourceRoot != outputRoot && m.config.PhaseExecutorMode != "active" {
 		_ = os.RemoveAll(sourceRoot)
+	}
+	if m.objectQuarantineEnabled() && sourceToken != outputToken {
+		if err := m.deleteObjectQuarantine(sourceToken); err != nil {
+			return fmt.Errorf("delete unsigned quarantine generation: %w", err)
+		}
 	}
 	return nil
 }
@@ -2597,17 +2726,82 @@ func (m *Manager) uploadJobToMirror(jobID string, up *mirrorUploader) error {
 		return err
 	}
 	for i, local := range locals {
+		uploadSource := local
+		cleanupSource := ""
+		if m.objectQuarantineEnabled() {
+			temp, tempErr := os.CreateTemp(
+				m.artifactQuarantineBase(), ".mirror-artifact-*",
+			)
+			if tempErr != nil {
+				return tempErr
+			}
+			cleanupSource = temp.Name()
+			if closeErr := temp.Close(); closeErr != nil {
+				_ = os.Remove(cleanupSource)
+				return closeErr
+			}
+			if downloadErr := m.artifactStore.Download(local, cleanupSource); downloadErr != nil {
+				_ = os.Remove(cleanupSource)
+				return fmt.Errorf("materialize mirror artifact: %w", downloadErr)
+			}
+			uploadSource = cleanupSource
+		}
 		sub := ""
 		if j := strings.LastIndex(rels[i], "/"); j >= 0 {
 			sub = rels[i][:j]
 		}
-		url, err := up.uploadLocalFile(local, sub)
+		url, err := up.uploadLocalFile(uploadSource, sub)
+		if cleanupSource != "" {
+			_ = os.Remove(cleanupSource)
+		}
 		if err != nil {
 			return fmt.Errorf("upload %s: %w", rels[i], err)
 		}
 		m.appendJobLog(jobID, "[collect] uploaded to mirror: "+url)
 	}
-	if m.config.BinpkgPath != "" {
+	if m.objectQuarantineEnabled() {
+		channelKey, keyErr := artifactstorage.StableChannelKey(binhostPath, status.Arch)
+		if keyErr != nil {
+			return keyErr
+		}
+		pointerDocument, downloadErr := artifactstorage.DownloadBytes(
+			m.artifactStore, channelKey, m.artifactQuarantineBase(), 1<<20,
+		)
+		if downloadErr != nil {
+			return downloadErr
+		}
+		pointer, parseErr := artifactstorage.ParseChannelPointer(pointerDocument)
+		if parseErr != nil {
+			return parseErr
+		}
+		packagesKey, keyErr := artifactstorage.PublishedGenerationKey(
+			binhostPath, status.Arch, pointer.GenerationID, "Packages",
+		)
+		if keyErr != nil {
+			return keyErr
+		}
+		temp, tempErr := os.CreateTemp(
+			m.artifactQuarantineBase(), "mirror-"+pointer.GenerationID+"-Packages-*",
+		)
+		if tempErr != nil {
+			return tempErr
+		}
+		packagesFile := temp.Name()
+		if closeErr := temp.Close(); closeErr != nil {
+			_ = os.Remove(packagesFile)
+			return closeErr
+		}
+		if downloadErr := m.artifactStore.Download(packagesKey, packagesFile); downloadErr != nil {
+			return downloadErr
+		}
+		_, uploadErr := up.uploadLocalFile(packagesFile, binhostPath)
+		_ = os.Remove(packagesFile)
+		if uploadErr != nil {
+			return fmt.Errorf("upload Packages index: %w", uploadErr)
+		}
+		m.appendJobLog(jobID,
+			"[collect] uploaded to mirror: "+up.binhostURL()+"/"+binhostPath+"/Packages")
+	} else if m.config.BinpkgPath != "" {
 		idx := filepath.Join(m.config.BinpkgPath, filepath.FromSlash(binhostPath), "Packages")
 		if _, err := os.Stat(idx); err == nil {
 			if _, err := up.uploadLocalFile(idx, binhostPath); err != nil {
@@ -4247,7 +4441,157 @@ func (m *Manager) beginArtifactQuarantineToken(jobID, token string) (string, err
 }
 
 func (m *Manager) artifactQuarantineBase() string {
+	if m.objectQuarantineEnabled() {
+		base := strings.TrimSpace(m.config.DataDir)
+		if base == "" {
+			base = os.TempDir()
+		}
+		return filepath.Join(base, "quarantine-cache")
+	}
 	return filepath.Join(filepath.Dir(filepath.Clean(m.config.BinpkgPath)), ".portage-engine-quarantine")
+}
+
+func (m *Manager) objectQuarantineEnabled() bool {
+	return m.artifactStore != nil && strings.EqualFold(m.config.StorageType, "s3")
+}
+
+func (m *Manager) persistJobQuarantine(
+	jobID, root string,
+	rels []string,
+) error {
+	if !m.objectQuarantineEnabled() {
+		return nil
+	}
+	m.jobsMu.RLock()
+	job := m.jobs[jobID]
+	token := ""
+	if job != nil {
+		token = job.VerificationToken
+	}
+	m.jobsMu.RUnlock()
+	if !capabilityTokenRegex.MatchString(token) {
+		return fmt.Errorf("job %s has no valid object quarantine token", jobID)
+	}
+	for _, rel := range rels {
+		key, err := artifactstorage.QuarantineGenerationKey(token, filepath.ToSlash(rel))
+		if err != nil {
+			return err
+		}
+		local := filepath.Join(root, filepath.FromSlash(rel))
+		if err := m.artifactStore.Upload(local, key); err != nil {
+			return fmt.Errorf("upload quarantine artifact %q: %w", rel, err)
+		}
+	}
+	return nil
+}
+
+func (m *Manager) materializeObjectQuarantine(
+	token string,
+	rels []string,
+) (string, error) {
+	if !m.objectQuarantineEnabled() {
+		return "", fmt.Errorf("object quarantine is not configured")
+	}
+	if !capabilityTokenRegex.MatchString(token) || len(rels) == 0 {
+		return "", fmt.Errorf("invalid object quarantine selection")
+	}
+	base := m.artifactQuarantineBase()
+	if err := os.MkdirAll(base, 0o700); err != nil {
+		return "", err
+	}
+	root, err := os.MkdirTemp(base, token+"-*")
+	if err != nil {
+		return "", fmt.Errorf("create quarantine scratch: %w", err)
+	}
+	clean := false
+	defer func() {
+		if !clean {
+			_ = os.RemoveAll(root)
+		}
+	}()
+	for _, rel := range rels {
+		key, keyErr := artifactstorage.QuarantineGenerationKey(token, filepath.ToSlash(rel))
+		if keyErr != nil {
+			return "", keyErr
+		}
+		destination := filepath.Join(root, filepath.FromSlash(rel))
+		if err := m.artifactStore.Download(key, destination); err != nil {
+			return "", fmt.Errorf("materialize quarantine artifact %q: %w", rel, err)
+		}
+	}
+	clean = true
+	return root, nil
+}
+
+func (m *Manager) ensureObjectJobQuarantine(jobID string) (string, error) {
+	m.jobsMu.RLock()
+	job := m.jobs[jobID]
+	root, token := "", ""
+	var rels []string
+	if job != nil {
+		root = job.StagingRoot
+		token = job.VerificationToken
+		rels = append([]string(nil), job.StagedArtifacts...)
+	}
+	m.jobsMu.RUnlock()
+	if job == nil {
+		return "", fmt.Errorf("job %s not found", jobID)
+	}
+	if !m.objectQuarantineEnabled() {
+		return root, nil
+	}
+	materialized, err := m.materializeObjectQuarantine(token, rels)
+	if err != nil {
+		return "", err
+	}
+	m.jobsMu.Lock()
+	if current := m.jobs[jobID]; current != nil &&
+		current.VerificationToken == token {
+		current.StagingRoot = materialized
+	}
+	m.jobsMu.Unlock()
+	if root != materialized {
+		_ = os.RemoveAll(root)
+	}
+	return materialized, nil
+}
+
+func (m *Manager) deleteObjectQuarantine(token string) error {
+	if !m.objectQuarantineEnabled() || token == "" {
+		return nil
+	}
+	prefix, err := artifactstorage.QuarantineGenerationPrefix(token)
+	if err != nil {
+		return err
+	}
+	keys, err := m.artifactStore.List(prefix)
+	if err != nil {
+		return fmt.Errorf("list quarantine generation: %w", err)
+	}
+	for _, key := range keys {
+		if !strings.HasPrefix(key, prefix) {
+			return fmt.Errorf("object store returned key outside quarantine prefix")
+		}
+		if err := m.artifactStore.Delete(key); err != nil {
+			return fmt.Errorf("delete quarantine object %q: %w", key, err)
+		}
+	}
+	return nil
+}
+
+func generationArtifactsFromRecords(
+	rels []string,
+	records []ArtifactRecord,
+) []artifactstorage.GenerationArtifact {
+	artifacts := make([]artifactstorage.GenerationArtifact, len(records))
+	for index, record := range records {
+		artifacts[index] = artifactstorage.GenerationArtifact{
+			RelativePath: filepath.ToSlash(rels[index]),
+			SHA256:       record.Digest,
+			Size:         record.SizeBytes,
+		}
+	}
+	return artifacts
 }
 
 func (m *Manager) prepareVerificationBinhost(jobID, arch string) (string, error) {
@@ -4257,25 +4601,53 @@ func (m *Manager) prepareVerificationBinhost(jobID, arch string) (string, error)
 		m.jobsMu.RUnlock()
 		return "", fmt.Errorf("job %s not found", jobID)
 	}
-	root, token := job.StagingRoot, job.VerificationToken
+	root, token, signed := job.StagingRoot, job.VerificationToken, job.Signed
 	rels := append([]string(nil), job.StagedArtifacts...)
 	m.jobsMu.RUnlock()
-	if root == "" || token == "" || len(rels) == 0 {
+	if (!m.objectQuarantineEnabled() && root == "") ||
+		token == "" || len(rels) == 0 {
 		return "", fmt.Errorf("job %s has no staged artifacts", jobID)
 	}
 	if arch == "" {
 		return "", fmt.Errorf("job %s has no architecture for its verification index", jobID)
 	}
+	if m.objectQuarantineEnabled() {
+		materialized, err := m.materializeObjectQuarantine(token, rels)
+		if err != nil {
+			return "", err
+		}
+		if root != materialized {
+			_ = os.RemoveAll(root)
+		}
+		root = materialized
+		m.jobsMu.Lock()
+		if current := m.jobs[jobID]; current != nil &&
+			current.VerificationToken == token {
+			current.StagingRoot = root
+		}
+		m.jobsMu.Unlock()
+	}
 	if _, err := binpkg.NewStore(root).RegenerateIndex(arch); err != nil {
 		return "", fmt.Errorf("generate quarantine Packages index: %w", err)
 	}
-	// The marker is the shared, revocable capability state. Any control-plane
-	// replica mounting the same BINPKG_PATH can serve it; deleting the
-	// quarantine directory revokes it everywhere.
 	expiresAt := time.Now().UTC().Add(30 * time.Minute)
-	if err := os.WriteFile(filepath.Join(root, verificationCapabilityFile),
-		[]byte(strconv.FormatInt(expiresAt.Unix(), 10)), 0o600); err != nil {
-		return "", fmt.Errorf("activate quarantine capability: %w", err)
+	if m.objectQuarantineEnabled() {
+		generation := "unsigned"
+		if signed {
+			generation = "signed"
+		}
+		if err := m.activateObjectCapability(
+			root, token, generation, arch, rels, expiresAt,
+		); err != nil {
+			return "", err
+		}
+	} else {
+		// The marker is shared, revocable capability state in compatibility
+		// mode. Public deployments use the object-backed manifest below.
+		if err := os.WriteFile(filepath.Join(root, verificationCapabilityFile),
+			[]byte(strconv.FormatInt(expiresAt.Unix(), 10)), 0o600); err != nil {
+			return "", fmt.Errorf("activate quarantine capability: %w", err)
+		}
 	}
 
 	callback := strings.TrimRight(m.CloudSettings().ServerCallbackURL, "/")
@@ -4284,6 +4656,81 @@ func (m *Manager) prepareVerificationBinhost(jobID, arch string) (string, error)
 		return "", fmt.Errorf("SERVER_CALLBACK_URL must be an absolute http or https URL for quarantined verification")
 	}
 	return callback + "/verify-binhost/" + token, nil
+}
+
+func (m *Manager) activateObjectCapability(
+	root, token, generation, arch string,
+	rels []string,
+	expiresAt time.Time,
+) error {
+	records, err := artifactMetadata(root, rels, &BuildStatus{}, "quarantine")
+	if err != nil {
+		return err
+	}
+	artifacts := generationArtifactsFromRecords(rels, records)
+	capabilityKey, err := artifactstorage.QuarantineCapabilityKey(token)
+	if err != nil {
+		return err
+	}
+	exists, err := m.artifactStore.Exists(capabilityKey)
+	if err != nil {
+		return fmt.Errorf("inspect quarantine capability: %w", err)
+	}
+	if exists {
+		current, downloadErr := artifactstorage.DownloadBytes(
+			m.artifactStore, capabilityKey, m.artifactQuarantineBase(), 1<<20,
+		)
+		if downloadErr == nil {
+			parsed, parseErr := artifactstorage.ParseQuarantineManifest(current, time.Now())
+			if parseErr == nil && parsed.Token == token &&
+				parsed.Generation == generation &&
+				parsed.Architecture == arch &&
+				slices.Equal(parsed.Artifacts, artifacts) {
+				return nil
+			}
+		}
+		if err := m.artifactStore.Delete(capabilityKey); err != nil {
+			return fmt.Errorf("replace expired quarantine capability: %w", err)
+		}
+	}
+	packagesPath := filepath.Join(root, "Packages")
+	packagesDigest, _, err := digestRegularFileAt(root, "Packages")
+	if err != nil {
+		return fmt.Errorf("digest quarantine Packages index: %w", err)
+	}
+	packagesKey, err := artifactstorage.QuarantineGenerationKey(token, "Packages")
+	if err != nil {
+		return err
+	}
+	if packagesExists, existsErr := m.artifactStore.Exists(packagesKey); existsErr != nil {
+		return fmt.Errorf("inspect quarantine Packages index: %w", existsErr)
+	} else if packagesExists {
+		if err := m.artifactStore.Delete(packagesKey); err != nil {
+			return fmt.Errorf("replace quarantine Packages index: %w", err)
+		}
+	}
+	if err := m.artifactStore.Upload(packagesPath, packagesKey); err != nil {
+		return fmt.Errorf("upload quarantine Packages index: %w", err)
+	}
+	manifest := artifactstorage.QuarantineManifest{
+		SchemaVersion:  artifactstorage.QuarantineManifestSchema,
+		Token:          token,
+		Generation:     generation,
+		Architecture:   arch,
+		PackagesSHA256: packagesDigest,
+		Artifacts:      artifacts,
+		ExpiresAt:      expiresAt,
+	}
+	document, err := manifest.Marshal()
+	if err != nil {
+		return err
+	}
+	if err := artifactstorage.UploadBytes(
+		m.artifactStore, capabilityKey, document, m.artifactQuarantineBase(),
+	); err != nil {
+		return fmt.Errorf("activate object quarantine capability: %w", err)
+	}
+	return nil
 }
 
 // ServeVerificationBinhost exposes one active job quarantine through an
@@ -4303,6 +4750,10 @@ func (m *Manager) ServeVerificationBinhost(w http.ResponseWriter, r *http.Reques
 	token := parts[0]
 	if !capabilityTokenRegex.MatchString(token) {
 		http.NotFound(w, r)
+		return
+	}
+	if m.objectQuarantineEnabled() {
+		m.serveObjectVerificationBinhost(w, r, token, parts[1])
 		return
 	}
 	root := filepath.Join(m.artifactQuarantineBase(), token)
@@ -4334,6 +4785,110 @@ func (m *Manager) ServeVerificationBinhost(w http.ResponseWriter, r *http.Reques
 	http.ServeFile(w, r, file) // #nosec G703 -- regular-file and quarantine-root confinement checks passed above.
 }
 
+func (m *Manager) serveObjectVerificationBinhost(
+	w http.ResponseWriter,
+	r *http.Request,
+	token, requested string,
+) {
+	rel := path.Clean(strings.ReplaceAll(requested, "\\", "/"))
+	if rel == verificationCapabilityFile || rel == "." || rel == ".." ||
+		strings.HasPrefix(rel, "../") || strings.HasPrefix(rel, "/") {
+		http.NotFound(w, r)
+		return
+	}
+	capabilityKey, err := artifactstorage.QuarantineCapabilityKey(token)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	document, err := artifactstorage.DownloadBytes(
+		m.artifactStore, capabilityKey, m.artifactQuarantineBase(), 1<<20,
+	)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	manifest, err := artifactstorage.ParseQuarantineManifest(document, time.Now())
+	if err != nil || manifest.Token != token || !manifest.Allows(rel) {
+		http.NotFound(w, r)
+		return
+	}
+	key, err := artifactstorage.QuarantineGenerationKey(token, rel)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	quarantineRoot, err := os.OpenRoot(m.artifactQuarantineBase())
+	if err != nil {
+		http.Error(w, "Verification storage unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	defer func() { _ = quarantineRoot.Close() }()
+	scratch, err := os.MkdirTemp(m.artifactQuarantineBase(), "serve-"+token+"-*")
+	if err != nil {
+		http.Error(w, "Verification storage unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	scratchName := filepath.Base(scratch)
+	defer func() { _ = quarantineRoot.RemoveAll(scratchName) }()
+	scratchRoot, err := quarantineRoot.OpenRoot(scratchName)
+	if err != nil {
+		http.Error(w, "Verification storage unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	defer func() { _ = scratchRoot.Close() }()
+	localName := filepath.Base(rel)
+	filePath := filepath.Join(scratch, localName)
+	if err := m.artifactStore.Download(key, filePath); err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	file, err := scratchRoot.Open(localName)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	defer func() { _ = file.Close() }()
+	digest, size, err := digestRegularOpenFile(file)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	expectedDigest := manifest.PackagesSHA256
+	expectedSize := int64(-1)
+	if rel != "Packages" {
+		found := false
+		for _, artifact := range manifest.Artifacts {
+			if artifact.RelativePath == rel {
+				expectedDigest = artifact.SHA256
+				expectedSize = artifact.Size
+				found = true
+				break
+			}
+		}
+		if !found {
+			http.NotFound(w, r)
+			return
+		}
+	}
+	if digest != expectedDigest || (expectedSize >= 0 && size != expectedSize) {
+		http.NotFound(w, r)
+		return
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	http.ServeContent(w, r, filepath.Base(rel), info.ModTime(), file)
+}
+
 func (m *Manager) cleanupArtifactQuarantine(jobID string) {
 	m.jobsMu.Lock()
 	job, ok := m.jobs[jobID]
@@ -4342,6 +4897,7 @@ func (m *Manager) cleanupArtifactQuarantine(jobID string) {
 		return
 	}
 	root := job.StagingRoot
+	token := job.VerificationToken
 	status := *job
 	job.StagingRoot = ""
 	job.VerificationToken = ""
@@ -4351,6 +4907,9 @@ func (m *Manager) cleanupArtifactQuarantine(jobID string) {
 
 	if root != "" {
 		_ = os.RemoveAll(root)
+	}
+	if err := m.deleteObjectQuarantine(token); err != nil {
+		m.appendJobLog(jobID, "[collect] warning: delete object quarantine: "+err.Error())
 	}
 	if m.artifactDB != nil && status.AttemptID != "" {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -4368,9 +4927,10 @@ func (m *Manager) cleanupArtifactQuarantine(jobID string) {
 func (m *Manager) removeArtifactQuarantineFiles(jobID string) {
 	m.jobsMu.Lock()
 	job := m.jobs[jobID]
-	root := ""
+	root, token := "", ""
 	if job != nil {
 		root = job.StagingRoot
+		token = job.VerificationToken
 		job.StagingRoot = ""
 		job.VerificationToken = ""
 		job.StagedArtifacts = nil
@@ -4379,6 +4939,9 @@ func (m *Manager) removeArtifactQuarantineFiles(jobID string) {
 	m.jobsMu.Unlock()
 	if root != "" {
 		_ = os.RemoveAll(root)
+	}
+	if err := m.deleteObjectQuarantine(token); err != nil {
+		m.appendJobLog(jobID, "[collect] warning: delete object quarantine: "+err.Error())
 	}
 }
 
@@ -4491,7 +5054,7 @@ func (m *Manager) releaseArtifactGeneration(jobID, generation, reason string) er
 }
 
 func (m *Manager) promoteJobArtifacts(jobID string) error {
-	if m.promoteArtifacts == nil {
+	if m.promoteArtifacts == nil && !m.objectQuarantineEnabled() {
 		return fmt.Errorf("artifact promotion is not configured")
 	}
 	m.jobsMu.RLock()
@@ -4503,9 +5066,17 @@ func (m *Manager) promoteJobArtifacts(jobID string) error {
 	root := job.StagingRoot
 	rels := append([]string(nil), job.StagedArtifacts...)
 	primary := job.StagedPrimary
+	token := job.VerificationToken
 	arch := job.Arch
 	status := *job
 	m.jobsMu.RUnlock()
+	if m.objectQuarantineEnabled() {
+		materialized, materializeErr := m.ensureObjectJobQuarantine(jobID)
+		if materializeErr != nil {
+			return fmt.Errorf("materialize promotion inputs: %w", materializeErr)
+		}
+		root = materialized
+	}
 	binhostPath, err := buildStatusBinhostPath(&status)
 	if err != nil {
 		return err
@@ -4538,12 +5109,22 @@ func (m *Manager) promoteJobArtifacts(jobID string) error {
 			return fmt.Errorf("persist staged artifact metadata: %w", err)
 		}
 	}
-	paths, err := m.promoteArtifacts(root, rels, arch, binhostPath)
+	var paths []string
+	if m.objectQuarantineEnabled() {
+		paths, err = m.publishObjectGeneration(
+			&status, root, token, rels, arch, binhostPath,
+		)
+	} else {
+		paths, err = m.promoteArtifacts(root, rels, arch, binhostPath)
+	}
 	if err != nil {
 		return err
 	}
 	if len(paths) != len(rels) {
 		return fmt.Errorf("promotion returned %d paths for %d artifacts", len(paths), len(rels))
+	}
+	if m.objectQuarantineEnabled() && m.onArtifactStored != nil {
+		m.onArtifactStored()
 	}
 	pathByRel := make(map[string]string, len(rels))
 	webs := make([]string, 0, len(rels))
@@ -4578,6 +5159,386 @@ func (m *Manager) promoteJobArtifacts(jobID string) error {
 	}
 	m.cleanupArtifactQuarantine(jobID)
 	return nil
+}
+
+func (m *Manager) publishObjectGeneration(
+	status *BuildStatus,
+	root, token string,
+	rels []string,
+	arch, binhostPath string,
+) ([]string, error) {
+	versioned, ok := m.artifactStore.(artifactstorage.VersionedStorage)
+	if !ok {
+		return nil, fmt.Errorf("S3 publication requires versioned compare-and-swap storage")
+	}
+	newArtifacts, currentPackages, err := m.loadVerifiedPublicationInput(
+		status, root, token, rels, arch,
+	)
+	if err != nil {
+		return nil, err
+	}
+	channelKey, err := artifactstorage.StableChannelKey(binhostPath, arch)
+	if err != nil {
+		return nil, err
+	}
+	previous, err := m.loadPreviousPublication(
+		versioned, channelKey, binhostPath, arch,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	attemptID := stablePublicationAttemptID(status)
+	generationID := uuid.NewSHA1(
+		uuid.NameSpaceURL,
+		[]byte(binhostPath+"\x00"+attemptID),
+	).String()
+	if previous.pointer != nil && previous.pointer.GenerationID == generationID {
+		return publishedArtifactKeysForRels(previous.manifest.Artifacts, rels)
+	}
+	createdAt := status.CreatedAt.UTC()
+	if createdAt.IsZero() {
+		createdAt = time.Unix(1, 0).UTC()
+	}
+	mergedPackages, err := binpkg.MergePackagesIndexes(
+		previous.packages, currentPackages, arch, createdAt,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("merge publication Packages index: %w", err)
+	}
+	artifacts, err := m.uploadPublishedGenerationArtifacts(
+		root, rels, newArtifacts, previous.manifest,
+		binhostPath, arch, generationID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	manifest, manifestKey, manifestDocument, err := m.uploadPublicationMetadata(
+		status, artifacts, mergedPackages, binhostPath, arch,
+		generationID, attemptID, createdAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+	pointer := artifactstorage.ChannelPointer{
+		SchemaVersion: artifactstorage.ChannelPointerSchema,
+		Channel:       "stable", BinhostPath: binhostPath, Architecture: arch,
+		GenerationID: generationID, ManifestKey: manifestKey,
+		ManifestSHA256: digestBytes(manifestDocument),
+		PackagesSHA256: manifest.PackagesSHA256,
+		SelectedAt:     time.Now().UTC(),
+	}
+	if previous.pointer != nil {
+		pointer.PreviousGenerationID = previous.pointer.GenerationID
+	}
+	pointerDocument, err := pointer.Marshal()
+	if err != nil {
+		return nil, err
+	}
+	if _, err := artifactstorage.CompareAndSwapBytes(
+		versioned, channelKey, pointerDocument, previous.version,
+		m.artifactQuarantineBase(),
+	); err != nil {
+		return nil, fmt.Errorf("commit stable channel pointer: %w", err)
+	}
+	return publishedArtifactKeysForRels(artifacts, rels)
+}
+
+type previousPublication struct {
+	pointer  *artifactstorage.ChannelPointer
+	manifest *artifactstorage.GenerationManifest
+	packages []byte
+	version  string
+}
+
+func (m *Manager) loadVerifiedPublicationInput(
+	status *BuildStatus,
+	root, token string,
+	rels []string,
+	arch string,
+) ([]artifactstorage.GenerationArtifact, []byte, error) {
+	capabilityKey, err := artifactstorage.QuarantineCapabilityKey(token)
+	if err != nil {
+		return nil, nil, err
+	}
+	capabilityDocument, err := artifactstorage.DownloadBytes(
+		m.artifactStore, capabilityKey, m.artifactQuarantineBase(), 1<<20,
+	)
+	if err != nil {
+		return nil, nil, fmt.Errorf("read publication capability: %w", err)
+	}
+	capability, err := artifactstorage.ParseQuarantineManifest(
+		capabilityDocument, time.Now(),
+	)
+	if err != nil || capability.Token != token || capability.Architecture != arch {
+		return nil, nil, fmt.Errorf("publication capability is invalid or expired")
+	}
+	records, err := artifactMetadata(root, rels, status, "publishing")
+	if err != nil {
+		return nil, nil, err
+	}
+	artifacts := generationArtifactsFromRecords(rels, records)
+	if !slices.Equal(capability.Artifacts, artifacts) {
+		return nil, nil, fmt.Errorf("publication artifacts differ from verified capability")
+	}
+	packagesKey, err := artifactstorage.QuarantineGenerationKey(token, "Packages")
+	if err != nil {
+		return nil, nil, err
+	}
+	packages, err := artifactstorage.DownloadBytes(
+		m.artifactStore, packagesKey, m.artifactQuarantineBase(), 64<<20,
+	)
+	if err != nil {
+		return nil, nil, fmt.Errorf("read verified Packages index: %w", err)
+	}
+	if digestBytes(packages) != capability.PackagesSHA256 {
+		return nil, nil, fmt.Errorf("verified Packages digest changed before publication")
+	}
+	return artifacts, packages, nil
+}
+
+func (m *Manager) loadPreviousPublication(
+	versioned artifactstorage.VersionedStorage,
+	channelKey, binhostPath, arch string,
+) (previousPublication, error) {
+	var previous previousPublication
+	exists, err := m.artifactStore.Exists(channelKey)
+	if err != nil {
+		return previous, fmt.Errorf("inspect stable channel: %w", err)
+	}
+	if !exists {
+		return previous, nil
+	}
+	document, version, err := artifactstorage.DownloadVersionBytes(
+		versioned, channelKey, m.artifactQuarantineBase(), 1<<20,
+	)
+	if err != nil {
+		return previous, fmt.Errorf("read stable channel: %w", err)
+	}
+	pointer, err := artifactstorage.ParseChannelPointer(document)
+	if err != nil || pointer.BinhostPath != binhostPath ||
+		pointer.Architecture != arch {
+		return previous, fmt.Errorf("stable channel pointer failed validation")
+	}
+	manifestDocument, err := artifactstorage.DownloadBytes(
+		m.artifactStore, pointer.ManifestKey,
+		m.artifactQuarantineBase(), 4<<20,
+	)
+	if err != nil || digestBytes(manifestDocument) != pointer.ManifestSHA256 {
+		return previous, fmt.Errorf("stable channel manifest failed digest validation")
+	}
+	manifest, err := artifactstorage.ParseGenerationManifest(manifestDocument)
+	if err != nil || manifest.GenerationID != pointer.GenerationID ||
+		manifest.PackagesSHA256 != pointer.PackagesSHA256 {
+		return previous, fmt.Errorf("stable channel manifest failed identity validation")
+	}
+	packagesKey, err := artifactstorage.PublishedGenerationKey(
+		binhostPath, arch, pointer.GenerationID, "Packages",
+	)
+	if err != nil {
+		return previous, err
+	}
+	packages, err := artifactstorage.DownloadBytes(
+		m.artifactStore, packagesKey, m.artifactQuarantineBase(), 64<<20,
+	)
+	if err != nil || digestBytes(packages) != pointer.PackagesSHA256 {
+		return previous, fmt.Errorf("stable Packages object failed digest validation")
+	}
+	previous.pointer = &pointer
+	previous.manifest = &manifest
+	previous.packages = packages
+	previous.version = version
+	return previous, nil
+}
+
+func (m *Manager) uploadPublishedGenerationArtifacts(
+	root string,
+	rels []string,
+	newArtifacts []artifactstorage.GenerationArtifact,
+	previous *artifactstorage.GenerationManifest,
+	binhostPath, arch, generationID string,
+) ([]artifactstorage.GenerationArtifact, error) {
+	artifactByPath := make(map[string]artifactstorage.GenerationArtifact)
+	if previous != nil {
+		for _, artifact := range previous.Artifacts {
+			artifactByPath[artifact.RelativePath] = artifact
+		}
+	}
+	for index, artifact := range newArtifacts {
+		key, err := artifactstorage.PublishedGenerationKey(
+			binhostPath, arch, generationID, artifact.RelativePath,
+		)
+		if err != nil {
+			return nil, err
+		}
+		if err := m.artifactStore.Upload(
+			filepath.Join(root, filepath.FromSlash(rels[index])), key,
+		); err != nil {
+			return nil, fmt.Errorf(
+				"upload published artifact %q: %w", artifact.RelativePath, err,
+			)
+		}
+		artifact.ObjectKey = key
+		artifactByPath[artifact.RelativePath] = artifact
+	}
+	artifacts := make([]artifactstorage.GenerationArtifact, 0, len(artifactByPath))
+	for _, artifact := range artifactByPath {
+		artifacts = append(artifacts, artifact)
+	}
+	slices.SortFunc(artifacts, func(left, right artifactstorage.GenerationArtifact) int {
+		return strings.Compare(left.RelativePath, right.RelativePath)
+	})
+	return artifacts, nil
+}
+
+func (m *Manager) uploadPublicationMetadata(
+	status *BuildStatus,
+	artifacts []artifactstorage.GenerationArtifact,
+	packages []byte,
+	binhostPath, arch, generationID, attemptID string,
+	createdAt time.Time,
+) (artifactstorage.GenerationManifest, string, []byte, error) {
+	packagesKey, err := artifactstorage.PublishedGenerationKey(
+		binhostPath, arch, generationID, "Packages",
+	)
+	if err != nil {
+		return artifactstorage.GenerationManifest{}, "", nil, err
+	}
+	if err := artifactstorage.UploadBytes(
+		m.artifactStore, packagesKey, packages, m.artifactQuarantineBase(),
+	); err != nil {
+		return artifactstorage.GenerationManifest{}, "", nil,
+			fmt.Errorf("upload published Packages: %w", err)
+	}
+	profileID := "compatibility"
+	if status.ResolvedContext != nil && status.ResolvedContext.ProfileID != "" {
+		profileID = status.ResolvedContext.ProfileID
+	}
+	signingKeyID := "unsigned"
+	if status.Signed && m.gpgKeyProvider != nil {
+		signingKeyID, _, _ = m.gpgKeyProvider()
+	}
+	manifest := artifactstorage.GenerationManifest{
+		SchemaVersion: artifactstorage.GenerationManifestSchema,
+		GenerationID:  generationID, BinhostPath: binhostPath,
+		Architecture: arch, ProfileID: profileID, AttemptID: attemptID,
+		SigningKeyID: signingKeyID, PackagesSHA256: digestBytes(packages),
+		Provenance: generationProvenance(status),
+		Artifacts:  artifacts, CreatedAt: createdAt,
+	}
+	manifestDocument, err := manifest.Marshal()
+	if err != nil {
+		return artifactstorage.GenerationManifest{}, "", nil, err
+	}
+	manifestKey, err := artifactstorage.PublishedGenerationKey(
+		binhostPath, arch, generationID, artifactstorage.GenerationManifestName,
+	)
+	if err != nil {
+		return artifactstorage.GenerationManifest{}, "", nil, err
+	}
+	if err := artifactstorage.UploadBytes(
+		m.artifactStore, manifestKey, manifestDocument, m.artifactQuarantineBase(),
+	); err != nil {
+		return artifactstorage.GenerationManifest{}, "", nil,
+			fmt.Errorf("upload generation manifest: %w", err)
+	}
+	return manifest, manifestKey, manifestDocument, nil
+}
+
+func generationProvenance(status *BuildStatus) artifactstorage.GenerationProvenance {
+	provenance := artifactstorage.GenerationProvenance{
+		PackageAtom: buildStatusPackageAtom(status),
+		BuildMode:   "native-gentoo",
+	}
+	input := map[string]any{
+		"package_atom": provenance.PackageAtom,
+		"attempt_id":   stablePublicationAttemptID(status),
+	}
+	if status != nil {
+		input["architecture"] = status.Arch
+	}
+	if status != nil && status.Request != nil {
+		input["use_flags"] = append([]string(nil), status.Request.UseFlags...)
+		input["machine_spec"] = maps.Clone(status.Request.MachineSpec)
+		input["config_bundle"] = status.Request.ConfigBundle
+	}
+	if status != nil && status.ResolvedContext != nil {
+		resolved := status.ResolvedContext
+		provenance.CatalogVersion = resolved.CatalogVersion
+		provenance.BuildMode = resolved.BuildMode
+		provenance.ImageID = resolved.ImageID
+		provenance.ImageGeneration = resolved.ImageGeneration
+		provenance.ImageDigest = resolved.ImageDigest
+		provenance.MirrorBundleID = resolved.MirrorBundleID
+		provenance.MirrorBundleDigest = resolved.MirrorBundleDigest
+		provenance.EgressPolicyDigest = resolved.EgressPolicyDigest
+		provenance.PackageSetIDs = append([]string(nil), resolved.PackageSetIDs...)
+		provenance.PackageSetCatalogDigest = resolved.PackageSetCatalogDigest
+		for _, repository := range resolved.Repositories {
+			provenance.Repositories = append(
+				provenance.Repositories,
+				artifactstorage.GenerationRepository{
+					ID: repository.ID, Revision: repository.Revision,
+					Digest: repository.Digest,
+				},
+			)
+		}
+		input["resolved_context"] = resolved
+	}
+	document, _ := json.Marshal(input)
+	provenance.BuildInputSHA256 = digestBytes(document)
+	return provenance
+}
+
+func buildStatusPackageAtom(status *BuildStatus) string {
+	if status == nil {
+		return "unknown/unknown"
+	}
+	atom := strings.TrimSpace(status.PackageName)
+	if version := strings.TrimSpace(status.Version); version != "" {
+		atom += "-" + version
+	}
+	if atom == "" {
+		return "unknown/unknown"
+	}
+	return atom
+}
+
+func stablePublicationAttemptID(status *BuildStatus) string {
+	if status != nil {
+		if _, err := uuid.Parse(status.AttemptID); err == nil {
+			return status.AttemptID
+		}
+		if _, err := uuid.Parse(status.JobID); err == nil {
+			return status.JobID
+		}
+		return uuid.NewSHA1(uuid.NameSpaceOID, []byte(status.JobID)).String()
+	}
+	return uuid.NewSHA1(uuid.NameSpaceOID, []byte("missing-status")).String()
+}
+
+func publishedArtifactKeysForRels(
+	artifacts []artifactstorage.GenerationArtifact,
+	rels []string,
+) ([]string, error) {
+	byPath := make(map[string]string, len(artifacts))
+	for _, artifact := range artifacts {
+		byPath[artifact.RelativePath] = artifact.ObjectKey
+	}
+	keys := make([]string, len(rels))
+	for index, rel := range rels {
+		key := byPath[filepath.ToSlash(rel)]
+		if key == "" {
+			return nil, fmt.Errorf("published generation omitted artifact %q", rel)
+		}
+		keys[index] = key
+	}
+	return keys, nil
+}
+
+func digestBytes(document []byte) string {
+	digest := sha256.Sum256(document)
+	return hex.EncodeToString(digest[:])
 }
 
 func (m *Manager) checkPromotionArtifactBudget(
@@ -4652,6 +5613,33 @@ func artifactMetadata(root string, rels []string, status *BuildStatus, state str
 		})
 	}
 	return records, nil
+}
+
+func digestRegularFileAt(rootDir, name string) (string, int64, error) {
+	root, err := os.OpenRoot(rootDir)
+	if err != nil {
+		return "", 0, err
+	}
+	defer func() { _ = root.Close() }()
+	file, err := root.Open(filepath.FromSlash(name))
+	if err != nil {
+		return "", 0, err
+	}
+	defer func() { _ = file.Close() }()
+	return digestRegularOpenFile(file)
+}
+
+func digestRegularOpenFile(file *os.File) (string, int64, error) {
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		return "", 0, fmt.Errorf("path is not a regular file")
+	}
+	hash := sha256.New()
+	size, err := io.Copy(hash, file)
+	if err != nil {
+		return "", 0, err
+	}
+	return hex.EncodeToString(hash.Sum(nil)), size, nil
 }
 
 func buildBinhostPath(req *BuildRequest) (string, error) {
@@ -4815,6 +5803,9 @@ func (m *Manager) collectInstanceArtifacts(jobID, baseURL, remoteJobID, packageN
 			job.Signed = snap.Signed
 		}
 		m.jobsMu.Unlock()
+		if err := m.persistJobQuarantine(jobID, stagingRoot, []string{rel}); err != nil {
+			return err
+		}
 		success = true
 		return nil
 	}
@@ -4856,6 +5847,9 @@ func (m *Manager) collectInstanceArtifacts(jobID, baseURL, remoteJobID, packageN
 		job.Signed = snap.Signed
 	}
 	m.jobsMu.Unlock()
+	if err := m.persistJobQuarantine(jobID, stagingRoot, rels); err != nil {
+		return err
+	}
 	success = true
 	return nil
 }
@@ -4925,6 +5919,9 @@ func (m *Manager) collectPullArtifacts(
 		job.Signed = snapshot.Signed
 	}
 	m.jobsMu.Unlock()
+	if err := m.persistJobQuarantine(jobID, stagingRoot, rels); err != nil {
+		return err
+	}
 	success = true
 	return nil
 }

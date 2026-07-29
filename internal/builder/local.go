@@ -21,6 +21,7 @@ import (
 
 	"github.com/slchris/portage-engine/internal/notification"
 	"github.com/slchris/portage-engine/internal/signing"
+	"github.com/slchris/portage-engine/internal/storage"
 	"github.com/slchris/portage-engine/pkg/config"
 )
 
@@ -432,14 +433,17 @@ func initStorageUploader(cfg *config.BuilderConfig) *StorageUploader {
 		storageType = "local"
 	}
 
-	uploader, err := NewStorageUploader(
-		storageType,
-		cfg.StorageLocalDir,
-		cfg.StorageS3Bucket,
-		cfg.StorageS3Region,
-		cfg.StorageS3Prefix,
-		cfg.StorageHTTPBase,
-	)
+	uploader, err := NewStorageUploaderWithConfig(storage.Config{
+		Type:            storageType,
+		LocalDir:        cfg.StorageLocalDir,
+		S3Bucket:        cfg.StorageS3Bucket,
+		S3Region:        cfg.StorageS3Region,
+		S3Prefix:        cfg.StorageS3Prefix,
+		S3Endpoint:      cfg.StorageS3Endpoint,
+		S3UsePathStyle:  cfg.StorageS3UsePathStyle,
+		S3PublicBaseURL: cfg.StorageS3PublicBaseURL,
+		HTTPBase:        cfg.StorageHTTPBase,
+	})
 	if err != nil {
 		log.Printf("Failed to initialize storage uploader: %v", err)
 		return nil

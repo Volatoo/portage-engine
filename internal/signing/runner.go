@@ -13,12 +13,15 @@ import (
 	"time"
 
 	"github.com/slchris/portage-engine/internal/binpkg"
+	artifactstorage "github.com/slchris/portage-engine/internal/storage"
 )
 
 // Runner claims digest-bound tasks and signs them outside the control plane.
 type Runner struct {
 	Queue      Queue
 	BinpkgPath string
+	Storage    artifactstorage.Storage
+	ScratchDir string
 	Owner      string
 	Lease      time.Duration
 	GPG        GPG
@@ -26,8 +29,9 @@ type Runner struct {
 
 // Run processes signing tasks until the context is canceled.
 func (r *Runner) Run(ctx context.Context) error {
-	if r.Queue == nil || r.BinpkgPath == "" || r.Owner == "" || r.Lease <= 0 {
-		return fmt.Errorf("signer queue, binpkg path, owner, and lease are required")
+	if r.Queue == nil || (r.BinpkgPath == "" && r.Storage == nil) ||
+		r.Owner == "" || r.Lease <= 0 {
+		return fmt.Errorf("signer queue, artifact source, owner, and lease are required")
 	}
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
@@ -88,6 +92,10 @@ func (r *Runner) removeOutput(task *Task) {
 	if err != nil {
 		return
 	}
+	if r.Storage != nil {
+		_ = deleteQuarantineGeneration(r.Storage, token)
+		return
+	}
 	root, err := TokenRoot(r.BinpkgPath, token)
 	if err == nil {
 		_ = os.RemoveAll(root)
@@ -119,6 +127,9 @@ func (r *Runner) renewLease(ctx context.Context, task *Task, done chan<- error) 
 }
 
 func (r *Runner) process(task *Task) ([]Artifact, error) {
+	if r.Storage != nil {
+		return r.processObject(task)
+	}
 	sourceRoot, err := TokenRoot(r.BinpkgPath, task.SourceToken)
 	if err != nil {
 		return nil, err
@@ -134,6 +145,110 @@ func (r *Runner) process(task *Task) ([]Artifact, error) {
 	if sourceRoot == outputRoot {
 		return nil, fmt.Errorf("signing source and output roots must differ")
 	}
+	return r.processRoots(task, sourceRoot, outputRoot, true)
+}
+
+func (r *Runner) processObject(task *Task) ([]Artifact, error) {
+	outputToken, err := OutputToken(task.ID)
+	if err != nil {
+		return nil, err
+	}
+	scratch := r.ScratchDir
+	if scratch == "" {
+		scratch = os.TempDir()
+	}
+	if err := os.MkdirAll(scratch, 0o700); err != nil {
+		return nil, err
+	}
+	sourceRoot, err := os.MkdirTemp(scratch, "signer-input-*")
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = os.RemoveAll(sourceRoot) }()
+	outputRoot, err := os.MkdirTemp(scratch, "signer-output-*")
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = os.RemoveAll(outputRoot) }()
+	for _, artifact := range task.Artifacts {
+		key, keyErr := artifactstorage.QuarantineGenerationKey(
+			task.SourceToken, artifact.RelativePath,
+		)
+		if keyErr != nil {
+			return nil, keyErr
+		}
+		destination := filepath.Join(sourceRoot, filepath.FromSlash(artifact.RelativePath))
+		if err := r.Storage.Download(key, destination); err != nil {
+			return nil, fmt.Errorf("materialize signing input %q: %w", artifact.RelativePath, err)
+		}
+	}
+	outputs, err := r.processRoots(task, sourceRoot, outputRoot, false)
+	if err != nil {
+		return nil, err
+	}
+	for _, output := range outputs {
+		key, keyErr := artifactstorage.QuarantineGenerationKey(
+			outputToken, output.RelativePath,
+		)
+		if keyErr != nil {
+			return nil, keyErr
+		}
+		if err := r.Storage.Upload(
+			filepath.Join(outputRoot, filepath.FromSlash(output.RelativePath)), key,
+		); err != nil {
+			return nil, fmt.Errorf("upload signed artifact %q: %w", output.RelativePath, err)
+		}
+	}
+	packagesPath := filepath.Join(outputRoot, "Packages")
+	packagesDigest, _, err := fileDigest(packagesPath)
+	if err != nil {
+		return nil, fmt.Errorf("digest signed Packages index: %w", err)
+	}
+	packagesKey, err := artifactstorage.QuarantineGenerationKey(outputToken, "Packages")
+	if err != nil {
+		return nil, err
+	}
+	if err := r.Storage.Upload(packagesPath, packagesKey); err != nil {
+		return nil, fmt.Errorf("upload signed Packages index: %w", err)
+	}
+	manifestArtifacts := make([]artifactstorage.GenerationArtifact, len(outputs))
+	for index, output := range outputs {
+		manifestArtifacts[index] = artifactstorage.GenerationArtifact{
+			RelativePath: output.RelativePath,
+			SHA256:       output.OutputDigest,
+			Size:         output.OutputSize,
+		}
+	}
+	manifest := artifactstorage.QuarantineManifest{
+		SchemaVersion:  artifactstorage.QuarantineManifestSchema,
+		Token:          outputToken,
+		Generation:     "signed",
+		Architecture:   task.Architecture,
+		PackagesSHA256: packagesDigest,
+		Artifacts:      manifestArtifacts,
+		ExpiresAt:      time.Now().UTC().Add(30 * time.Minute),
+	}
+	document, err := manifest.Marshal()
+	if err != nil {
+		return nil, err
+	}
+	capabilityKey, err := artifactstorage.QuarantineCapabilityKey(outputToken)
+	if err != nil {
+		return nil, err
+	}
+	if err := artifactstorage.UploadBytes(
+		r.Storage, capabilityKey, document, scratch,
+	); err != nil {
+		return nil, fmt.Errorf("activate signed object capability: %w", err)
+	}
+	return outputs, nil
+}
+
+func (r *Runner) processRoots(
+	task *Task,
+	sourceRoot, outputRoot string,
+	activateLocalCapability bool,
+) ([]Artifact, error) {
 	if err := os.RemoveAll(outputRoot); err != nil {
 		return nil, fmt.Errorf("clear prior signer output: %w", err)
 	}
@@ -169,13 +284,35 @@ func (r *Runner) process(task *Task) ([]Artifact, error) {
 	if _, err := binpkg.NewStore(outputRoot).RegenerateIndex(task.Architecture); err != nil {
 		return nil, fmt.Errorf("generate signed quarantine index: %w", err)
 	}
-	expires := time.Now().UTC().Add(30 * time.Minute)
-	if err := os.WriteFile(filepath.Join(outputRoot, CapabilityMarkerName),
-		[]byte(fmt.Sprintf("%d", expires.Unix())), 0o600); err != nil {
-		return nil, fmt.Errorf("activate signed verification capability: %w", err)
+	if activateLocalCapability {
+		expires := time.Now().UTC().Add(30 * time.Minute)
+		if err := os.WriteFile(filepath.Join(outputRoot, CapabilityMarkerName),
+			[]byte(fmt.Sprintf("%d", expires.Unix())), 0o600); err != nil {
+			return nil, fmt.Errorf("activate signed verification capability: %w", err)
+		}
 	}
 	cleanOutput = false
 	return outputs, nil
+}
+
+func deleteQuarantineGeneration(store artifactstorage.Storage, token string) error {
+	prefix, err := artifactstorage.QuarantineGenerationPrefix(token)
+	if err != nil {
+		return err
+	}
+	keys, err := store.List(prefix)
+	if err != nil {
+		return err
+	}
+	for _, key := range keys {
+		if !strings.HasPrefix(key, prefix) {
+			return fmt.Errorf("object store returned key outside signer output prefix")
+		}
+		if err := store.Delete(key); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (r *Runner) signArtifact(

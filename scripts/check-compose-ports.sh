@@ -24,6 +24,8 @@ ports=(
   "otlp-http:${PORTAGE_OTLP_HTTP_PORT:-24318}"
   "postgres:${PORTAGE_POSTGRES_PORT:-25432}"
   "redis:${PORTAGE_REDIS_PORT:-26379}"
+  "minio-api:${PORTAGE_MINIO_API_PORT:-29000}"
+  "minio-console:${PORTAGE_MINIO_CONSOLE_PORT:-29001}"
   "prometheus:${PORTAGE_PROMETHEUS_PORT:-29090}"
 )
 

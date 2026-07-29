@@ -216,7 +216,10 @@ func (m *Manager) failActivePhase(claim *PhaseWorkClaim, cause error) {
 		fmt.Sprintf("[%s] active phase failed: %s", claim.Phase, detail))
 	if claim.Phase == "build" || claim.Phase == "verify" ||
 		claim.Phase == "publish" {
-		m.revokeArtifactCapability(claim.JobID)
+		if err := m.revokeArtifactCapability(claim.JobID); err != nil {
+			m.appendJobLog(claim.JobID,
+				"[phase] warning: revoke verification capability: "+err.Error())
+		}
 	}
 	previous, err := m.jobStatusSnapshot(claim.JobID)
 	if err != nil {
@@ -462,7 +465,9 @@ func (m *Manager) executeVerifyPhase(
 		); err != nil {
 			return fmt.Errorf("unsigned negative-control verification failed: %w", err)
 		}
-		m.revokeArtifactCapability(claim.JobID)
+		if err := m.revokeArtifactCapability(claim.JobID); err != nil {
+			return fmt.Errorf("revoke unsigned verification capability: %w", err)
+		}
 		m.appendJobLog(claim.JobID,
 			"[sign] signing remains fenced inside the active verify phase")
 		if err := m.refreshPhaseClaim(claim); err != nil {
@@ -611,7 +616,11 @@ func (m *Manager) applyPhaseContext(
 	if value.Instance != nil {
 		job.InstanceID = value.Instance.ID
 	}
-	job.StagingRoot = value.StagingRoot
+	if m.objectQuarantineEnabled() {
+		job.StagingRoot = ""
+	} else {
+		job.StagingRoot = value.StagingRoot
+	}
 	job.VerificationToken = value.VerificationToken
 	job.StagedArtifacts = append([]string(nil), value.StagedArtifacts...)
 	job.StagedPrimary = value.StagedPrimary
@@ -628,7 +637,11 @@ func (m *Manager) capturePhaseContext(
 	m.jobsMu.RLock()
 	job := m.jobs[jobID]
 	if job != nil {
-		value.StagingRoot = job.StagingRoot
+		if m.objectQuarantineEnabled() {
+			value.StagingRoot = ""
+		} else {
+			value.StagingRoot = job.StagingRoot
+		}
 		value.VerificationToken = job.VerificationToken
 		value.StagedArtifacts = append([]string(nil), job.StagedArtifacts...)
 		value.StagedPrimary = job.StagedPrimary

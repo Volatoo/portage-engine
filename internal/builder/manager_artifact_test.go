@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/slchris/portage-engine/internal/binpkg"
+	artifactstorage "github.com/slchris/portage-engine/internal/storage"
 	"github.com/slchris/portage-engine/pkg/config"
 )
 
@@ -326,5 +327,81 @@ func TestVerificationQuarantineIsServedByAnotherReplica(t *testing.T) {
 	replica.ServeVerificationBinhost(response, request)
 	if response.Code != http.StatusNotFound {
 		t.Fatalf("revoked shared capability status=%d", response.Code)
+	}
+}
+
+func TestObjectVerificationQuarantineNeedsNoSharedFilesystem(t *testing.T) {
+	parent := t.TempDir()
+	objectStore, err := artifactstorage.NewLocalStorage(filepath.Join(parent, "objects"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner := NewManager(&config.ServerConfig{
+		MaxWorkers: 0, BinpkgPath: filepath.Join(parent, "owner-binpkgs"),
+		DataDir: filepath.Join(parent, "owner"), StorageType: "s3",
+	})
+	replica := NewManager(&config.ServerConfig{
+		MaxWorkers: 0, BinpkgPath: filepath.Join(parent, "replica-binpkgs"),
+		DataDir: filepath.Join(parent, "replica"), StorageType: "s3",
+	})
+	owner.SetArtifactStorage(objectStore)
+	replica.SetArtifactStorage(objectStore)
+	defer owner.Shutdown()
+	defer replica.Shutdown()
+	settings := *owner.CloudSettings()
+	settings.ServerCallbackURL = "http://control-plane.test"
+	owner.UpdateCloudSettings(&settings)
+
+	owner.jobsMu.Lock()
+	owner.jobs["object-job"] = &BuildStatus{JobID: "object-job", Arch: "amd64"}
+	owner.jobsMu.Unlock()
+	root, err := owner.beginArtifactQuarantine("object-job")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const rel = "app-misc/jq/jq-1.8.1-1.gpkg.tar"
+	file := filepath.Join(root, filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(file), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(file, []byte("object-only bytes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	owner.jobsMu.Lock()
+	owner.jobs["object-job"].StagedArtifacts = []string{rel}
+	owner.jobsMu.Unlock()
+	if err := owner.persistJobQuarantine("object-job", root, []string{rel}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(root); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := owner.prepareVerificationBinhost("object-job", "amd64"); err != nil {
+		t.Fatal(err)
+	}
+	owner.jobsMu.RLock()
+	token := owner.jobs["object-job"].VerificationToken
+	owner.jobsMu.RUnlock()
+
+	request := httptest.NewRequest(http.MethodGet, "/verify-binhost/"+token+"/"+rel, nil)
+	response := httptest.NewRecorder()
+	replica.ServeVerificationBinhost(response, request)
+	if response.Code != http.StatusOK || response.Body.String() != "object-only bytes" {
+		t.Fatalf("replica response: status=%d body=%q", response.Code, response.Body.String())
+	}
+	unlisted := httptest.NewRequest(
+		http.MethodGet, "/verify-binhost/"+token+"/private/other.gpkg.tar", nil,
+	)
+	response = httptest.NewRecorder()
+	replica.ServeVerificationBinhost(response, unlisted)
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("capability exposed an unlisted object: status=%d", response.Code)
+	}
+
+	owner.cleanupArtifactQuarantine("object-job")
+	response = httptest.NewRecorder()
+	replica.ServeVerificationBinhost(response, request)
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("revoked object capability status=%d", response.Code)
 	}
 }

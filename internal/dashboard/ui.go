@@ -139,6 +139,18 @@ a { color: var(--keyColor); text-decoration: none; }
 }
 .landing-nav .brand { font: var(--body-emphasized); color: var(--systemPrimary); }
 .landing-nav .side { display: flex; align-items: center; gap: 8px; }
+.landing-nav .public-links { display: flex; align-items: center; gap: 4px; }
+.landing-nav .public-link {
+  color: var(--systemSecondary); font: var(--callout-emphasized);
+  padding: 6px 9px; border-radius: var(--buttonRadius);
+}
+.landing-nav .public-link:hover, .landing-nav .public-link.active {
+  background: var(--systemQuinary); color: var(--systemPrimary);
+}
+@media (max-width: 640px) {
+  .landing-nav { height: auto; min-height: 48px; flex-wrap: wrap; padding-top: 7px; padding-bottom: 7px; }
+  .landing-nav .public-links { order: 3; width: 100%; }
+}
 .landing-hero { max-width: 720px; margin: 0 auto; padding: 96px var(--bodyGutter) 64px; text-align: center; }
 .landing-hero .eyebrow { font: var(--subhead-emphasized); text-transform: uppercase; letter-spacing: .06em; color: var(--systemSecondary); margin-bottom: 12px; }
 .landing-hero h1 { font: var(--header-emphasized); text-wrap: balance; margin-bottom: 14px; }
@@ -165,6 +177,39 @@ a { color: var(--keyColor); text-decoration: none; }
 .landing-flow .step p { font: var(--body-tall); color: var(--systemSecondary); }
 .landing-flow .step .mono { font: 400 12.5px/1.6 var(--font-mono); color: var(--systemPrimary); background: var(--systemQuinary); border-radius: var(--buttonRadius); padding: 8px 10px; margin-top: 8px; display: block; overflow-x: auto; white-space: nowrap; }
 .landing-footer { border-top: var(--keyline); padding: 20px var(--bodyGutter); font: var(--footnote); color: var(--systemTertiary); text-align: center; }
+
+/* ---- public community pages ---- */
+.public-main { max-width: 1080px; margin: 0 auto; padding: 54px var(--bodyGutter) 80px; }
+.public-head { margin-bottom: 24px; max-width: 760px; }
+.public-head h1 { font: var(--header-emphasized); margin-bottom: 8px; }
+.public-head p { font: var(--title-3-tall); color: var(--systemSecondary); text-wrap: pretty; }
+.public-search {
+  display: grid; grid-template-columns: minmax(220px, 1fr) minmax(190px, 280px) auto;
+  gap: 10px; align-items: end;
+}
+.public-search .field { margin: 0; }
+.public-search input, .public-search select { min-height: 38px; }
+.package-summary { padding: 13px 20px; color: var(--systemSecondary); border-bottom: var(--keyline); }
+.package-name { font: 600 13px/1.4 var(--font-mono); }
+.package-profile { max-width: 300px; overflow-wrap: anywhere; }
+.package-flags { display: block; margin-top: 3px; font: var(--footnote); color: var(--systemTertiary); }
+.public-pagination { display: flex; justify-content: space-between; align-items: center; padding: 14px 20px; border-top: var(--keyline); }
+.status-overall { padding: 24px 20px; display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.status-overall strong { display: block; font: var(--title-2-emphasized); margin-bottom: 4px; }
+.status-overall p { color: var(--systemSecondary); }
+.status-list { border-top: var(--keyline); }
+.status-row { display: flex; justify-content: space-between; gap: 20px; padding: 15px 20px; border-bottom: var(--keyline); }
+.status-row:last-child { border-bottom: 0; }
+.status-row span:first-child { font: var(--body-emphasized); }
+.public-docs { max-width: 820px; }
+.public-docs .card-pad { padding: 24px; }
+.public-docs .notice { padding: 12px 14px; background: var(--systemQuinary); border-radius: var(--radius-medium); margin: 12px 0 18px; color: var(--systemSecondary); }
+.public-docs a { overflow-wrap: anywhere; }
+@media (max-width: 700px) {
+  .public-main { padding-top: 34px; }
+  .public-search { grid-template-columns: 1fr; }
+  .status-overall { align-items: flex-start; flex-direction: column; }
+}
 
 /* ---- auth card (login) ---- */
 .auth-wrap { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: var(--bodyGutter); }
@@ -420,7 +465,8 @@ const i18nJS = `
 var I18N = {
   zh: {
     'nav.overview': '总览', 'nav.builds': '构建任务', 'nav.monitor': '构建节点', 'nav.factory': '镜像工厂',
-    'nav.settings': '设置', 'nav.docs': '文档', 'nav.signout': '退出登录',
+    'nav.settings': '设置', 'nav.packages': '软件包', 'nav.docs': '文档',
+    'nav.status': '服务状态', 'nav.signout': '退出登录',
     'brand.sub': 'Gentoo Binhost 控制台',
 
     'title.landing': 'Portage Engine — 自托管 Gentoo 二进制包构建平台',
@@ -432,7 +478,9 @@ var I18N = {
     'title.monitor': '构建节点 — Portage Engine',
     'title.factory': '镜像工厂 — Portage Engine',
     'title.settings': '设置 — Portage Engine',
+    'title.packages': '软件包 — Portage Engine',
     'title.docs': '文档 — Portage Engine',
+    'title.status': '服务状态 — Portage Engine',
 
     'landing.signin': '登录控制台',
     'landing.eyebrow': 'Gentoo Binhost 构建平台',
@@ -440,6 +488,8 @@ var I18N = {
     'landing.sub': '在 PVE 或云端按需拉起构建机,产物自动汇聚为 Portage 原生 binhost。客户端完成一次 binhost 与签名信任配置后,继续用 emerge 安装。',
     'landing.cta': '进入控制台',
     'landing.docs': '查看文档',
+    'landing.packages': '软件包',
+    'landing.status': '服务状态',
     'landing.f1.eyebrow': '按需构建机', 'landing.f1.title': '用完即毁的构建 VM',
     'landing.f1.text': '提交构建时在 Proxmox VE、GCP 或 AWS 创建全新的 Native Gentoo 构建虚拟机,按集群实时负载选择节点,任务完成后立即销毁。',
     'landing.f2.eyebrow': '原生 Binhost', 'landing.f2.title': '标准 Packages 索引',
@@ -664,16 +714,33 @@ var I18N = {
     'th.node': '节点', 'th.freemem': '空闲内存', 'th.cpu': 'CPU 负载', 'th.hastpl': '持有模板',
     'set.yes': '是', 'set.no': '否',
 
-    'docs.h1': '文档', 'docs.sub': '快速上手',
+    'packages.h1': '软件包', 'packages.sub': '搜索已经发布到公开 Binhost 的二进制包。',
+    'packages.search': '搜索', 'packages.search.ph': '包名、版本或 Profile',
+    'packages.profile': 'Profile', 'packages.all': '全部 Profile', 'packages.default': '默认',
+    'packages.download': '下载', 'packages.none': '没有找到匹配的软件包。',
+    'packages.count': '共 %d 个已发布软件包', 'packages.prev': '上一页', 'packages.next': '下一页',
+    'packages.page': '第 %d–%d 项', 'packages.loadfail': '软件包加载失败:',
+    'docs.h1': '文档', 'docs.sub': '无需登录即可完成 Binhost 选择、签名信任和 Portage 配置。',
     'docs.consume': '消费二进制包',
-    'docs.consume.p': '先通过可信渠道核对签名指纹并配置 Portage keyring,再把本服务配置为 binhost。之后 emerge 拉取并校验二进制包,缺包时回退本地编译:',
+    'docs.consume.p': '先在软件包页面确认与本机 ABI/Profile 匹配的 Binhost。每个 Profile 都是独立的 PKGDIR，不能把 /binpkgs 根目录当作聚合仓库。',
+    'docs.client': '使用 Portage Engine 客户端',
+    'docs.browse': '浏览已发布软件包和 Profile',
+    'docs.client.p': '客户端会从公开 Profile 清单解析精确的官方风格路径，并写入 binrepos.conf。省略 profile-id 时选择默认 Profile：',
+    'docs.manual': '手动配置 Portage',
+    'docs.manual.p': '也可以直接创建 binrepos.conf。把示例路径替换为软件包页面显示的 Binhost 路径：',
     'docs.build': '请求构建',
-    'docs.build.p': 'Portage 没有请求远端构建的原生机制,用客户端提交(可选 -wait 等待完成):',
-    'docs.build.p2': '提交后服务端创建全新的 Native Gentoo 构建机(或分发给可创建一次性 root 的静态 agent),产物自动进入 binhost 仓库并刷新 Packages 索引。',
-    'docs.cloud': '云构建配置',
-    'docs.cloud.p': 'PVE / 云提供商的接入参数在「设置」页管理,保存即生效。PVE 模板制作与端到端测试步骤见仓库内 docs/PVE_TESTING.md。',
-    'docs.gpg': 'GPG 验证',
-    'docs.gpg.p': 'configure 只写 binrepos.conf 的 verify-signature。公钥可由管理员从 /api/v1/gpg/public-key 获取,但必须独立核对完整指纹并导入 /etc/portage/gnupg;仅导入不等于建立信任。',
+    'docs.build.p': '浏览和安装已发布软件包不需要登录。只有提交构建请求需要登录，并选择有权限的项目：',
+    'docs.build.p2': '构建在隔离环境完成安装验证和签名验证后才会发布；发布同时原子刷新对应 Profile 的 Packages 索引。',
+    'docs.gpg': '建立签名信任',
+    'docs.gpg.p': 'configure 只写 binrepos.conf，不会导入或信任密钥。必须从运营方控制的独立可信渠道取得发布公钥与完整指纹，导入 /etc/portage/gnupg 并建立信任；不要通过同一个未认证 HTTP 连接同时获取软件包和信任根。',
+    'docs.verify.note': '网页中的“已发布”只表示制品进入公开仓库，不能替代客户端签名校验。',
+    'status.h1': '服务状态', 'status.sub': '公开、脱敏的 Portage Engine 服务可用性。',
+    'status.operational': '服务运行正常', 'status.degraded': '部分服务异常',
+    'status.unavailable': '状态服务不可用', 'status.updated': '更新时间 ',
+    'status.refresh': '自动每 30 秒刷新', 'status.version': '版本 ',
+    'status.component.api': 'Web 与 API', 'status.component.repository': '软件包仓库',
+    'status.component.build': '构建服务', 'status.state.operational': '正常',
+    'status.state.degraded': '异常',
 
     'st.queued': '排队中', 'st.claimed': '已认领', 'st.provisioning': '开机中',
     'st.forwarding': '分发中', 'st.deploying': '部署中', 'st.building': '构建中',
@@ -935,7 +1002,9 @@ func appPage(titleEN, titleKey, active, content, script string) string {
 		{"/monitor", "Build Nodes", "nav.monitor"},
 		{"/image-factory", "Image Factory", "nav.factory"},
 		{"/settings", "Settings", "nav.settings"},
+		{"/packages", "Packages", "nav.packages"},
 		{"/docs", "Docs", "nav.docs"},
+		{"/status", "Status", "nav.status"},
 	} {
 		cls := "nav-item"
 		if it[0] == "/"+active {
@@ -978,6 +1047,68 @@ func appPage(titleEN, titleKey, active, content, script string) string {
 </html>`
 }
 
+const publicJS = `
+function el(tag, cls, text) {
+  var node = document.createElement(tag);
+  if (cls) node.className = cls;
+  if (text !== undefined && text !== null) node.textContent = String(text);
+  return node;
+}
+function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); }
+async function publicJSON(path) {
+  var response = await fetch(path, {credentials: 'omit', headers: {'Accept': 'application/json'}});
+  if (!response.ok) throw new Error('HTTP ' + response.status);
+  return response.json();
+}
+function fmtPublicTime(value) {
+  var date = new Date(value);
+  return isNaN(date) ? '-' : date.toLocaleString(peLang() === 'zh' ? 'zh-CN' : 'en');
+}
+function fmtPublicText(key, fallback) {
+  var text = t(key, fallback);
+  for (var i = 2; i < arguments.length; i++) text = text.replace('%d', String(arguments[i]));
+  return text;
+}
+`
+
+func publicPage(titleEN, titleKey, active, content, script string) string {
+	links := ""
+	for _, item := range [][3]string{
+		{"/packages", "Packages", "nav.packages"},
+		{"/docs", "Docs", "nav.docs"},
+		{"/status", "Status", "nav.status"},
+	} {
+		className := "public-link"
+		if item[0] == "/"+active {
+			className += " active"
+		}
+		links += `<a class="` + className + `" href="` + item[0] +
+			`" data-i18n="` + item[2] + `">` + item[1] + `</a>`
+	}
+	return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title data-i18n="` + titleKey + `">` + titleEN + ` — Portage Engine</title>
+<link rel="stylesheet" href="/static/apple.css?v=3">
+</head>
+<body>
+<nav class="landing-nav" aria-label="Public navigation">
+  <a class="brand" href="/">Portage Engine</a>
+  <span class="public-links">` + links + `</span>
+  <span class="side">
+    <button class="lang-btn" type="button">中文</button>
+    <a class="btn" href="/overview" data-i18n="landing.signin">Sign In</a>
+  </span>
+</nav>
+<main class="public-main">` + content + `</main>
+<footer class="landing-footer" data-i18n="landing.footer">Portage Engine · self-hosted Gentoo binary package platform</footer>
+<script>` + i18nJS + publicJS + script + `</script>
+</body>
+</html>`
+}
+
 // ---------------------------------------------------------------------------
 // Landing (public)
 // ---------------------------------------------------------------------------
@@ -992,7 +1123,12 @@ const landingHTML = `<!DOCTYPE html>
 </head>
 <body>
 <nav class="landing-nav">
-  <span class="brand">Portage Engine</span>
+  <a class="brand" href="/">Portage Engine</a>
+  <span class="public-links">
+    <a class="public-link" href="/packages" data-i18n="landing.packages">Packages</a>
+    <a class="public-link" href="/docs" data-i18n="landing.docs">Documentation</a>
+    <a class="public-link" href="/status" data-i18n="landing.status">Status</a>
+  </span>
   <span class="side">
     <button class="lang-btn" type="button">中文</button>
     <a class="btn" href="/overview" data-i18n="landing.signin">Sign In</a>
@@ -3041,27 +3177,262 @@ loadFactory();
 `
 
 // ---------------------------------------------------------------------------
-// Docs
+// Public packages, docs, and service status
 // ---------------------------------------------------------------------------
 
+const packagesContent = `
+<div class="public-head">
+  <h1 data-i18n="packages.h1">Packages</h1>
+  <p data-i18n="packages.sub">Search binary packages published to the public binhost.</p>
+</div>
+<div class="card">
+  <div class="card-pad">
+    <form class="public-search" id="package-search">
+      <div class="field">
+        <label for="package-query" data-i18n="packages.search">Search</label>
+        <input id="package-query" type="text" autocomplete="off" spellcheck="false" placeholder="Package, version, or profile">
+      </div>
+      <div class="field">
+        <label for="package-profile" data-i18n="packages.profile">Profile</label>
+        <select id="package-profile"><option value="" data-i18n="packages.all">All profiles</option></select>
+      </div>
+      <button class="btn blue" type="submit" data-i18n="packages.search">Search</button>
+    </form>
+  </div>
+</div>
+<div class="card">
+  <div class="package-summary" id="package-summary" aria-live="polite"></div>
+  <div class="table-scroll"><table class="list" aria-label="Published packages">
+    <thead><tr>
+      <th data-i18n="th.package">Package</th><th data-i18n="th.version">Version</th>
+      <th data-i18n="packages.profile">Profile</th><th data-i18n="th.arch">Arch</th>
+      <th data-i18n="packages.download">Download</th>
+    </tr></thead>
+    <tbody id="package-rows"></tbody>
+  </table></div>
+  <div id="package-empty"></div>
+  <div class="public-pagination">
+    <button class="btn" id="package-prev" type="button" data-i18n="packages.prev">Previous</button>
+    <span id="package-page"></span>
+    <button class="btn" id="package-next" type="button" data-i18n="packages.next">Next</button>
+  </div>
+</div>`
+
+const packagesJS = `
+var packageLimit = 50;
+var packageOffset = 0;
+var packageTotal = 0;
+var packageParams = new URLSearchParams(location.search);
+var packageProfiles = [];
+document.getElementById('package-query').value = packageParams.get('q') || '';
+document.getElementById('package-query').placeholder = t('packages.search.ph', 'Package, version, or profile');
+
+async function loadPackageProfiles() {
+  var response = await publicJSON('/api/public/binhosts');
+  packageProfiles = response.binhosts || [];
+  renderPackageProfiles();
+}
+function renderPackageProfiles() {
+  var select = document.getElementById('package-profile');
+  var selected = select.value || packageParams.get('profile_id') || '';
+  clear(select);
+  var all = document.createElement('option');
+  all.value = '';
+  all.textContent = t('packages.all', 'All profiles');
+  select.appendChild(all);
+  packageProfiles.forEach(function (profile) {
+    var option = document.createElement('option');
+    option.value = profile.profile_id;
+    option.textContent = profile.profile_id +
+      (profile.default ? ' · ' + t('packages.default', 'default') : '');
+    option.title = profile.binhost_path;
+    select.appendChild(option);
+  });
+  select.value = selected;
+}
+
+function renderPackages(response) {
+  packageTotal = Number(response.total || 0);
+  packageOffset = Number(response.offset || 0);
+  var rows = document.getElementById('package-rows');
+  var empty = document.getElementById('package-empty');
+  clear(rows); clear(empty);
+  (response.packages || []).forEach(function (pkg) {
+    var row = document.createElement('tr');
+    var name = el('td');
+    name.appendChild(el('span', 'package-name', pkg.name));
+    if (pkg.use_flags && pkg.use_flags.length) {
+      var flags = pkg.use_flags.join(' ');
+      var flagNode = el('span', 'package-flags', flags.length > 72 ? flags.slice(0, 69) + '…' : flags);
+      flagNode.title = flags;
+      name.appendChild(flagNode);
+    }
+    row.appendChild(name);
+    row.appendChild(el('td', 'mono', pkg.version));
+    var profile = el('td', 'package-profile', pkg.profile_id);
+    profile.title = pkg.binhost_path || '';
+    row.appendChild(profile);
+    row.appendChild(el('td', null, pkg.arch));
+    var download = el('td');
+    var link = el('a', null, t('packages.download', 'Download'));
+    link.href = pkg.download_path;
+    download.appendChild(link);
+    row.appendChild(download);
+    rows.appendChild(row);
+  });
+  if (!response.packages || !response.packages.length) {
+    empty.appendChild(el('div', 'empty', t('packages.none', 'No matching packages were found.')));
+  }
+  document.getElementById('package-summary').textContent =
+    fmtPublicText('packages.count', '%d published packages', packageTotal);
+  var start = packageTotal ? packageOffset + 1 : 0;
+  var end = Math.min(packageOffset + packageLimit, packageTotal);
+  document.getElementById('package-page').textContent =
+    fmtPublicText('packages.page', '%d–%d', start, end);
+  document.getElementById('package-prev').disabled = packageOffset === 0;
+  document.getElementById('package-next').disabled = packageOffset + packageLimit >= packageTotal;
+}
+
+async function loadPackages() {
+  var params = new URLSearchParams();
+  var query = document.getElementById('package-query').value.trim();
+  var profile = document.getElementById('package-profile').value;
+  if (query) params.set('q', query);
+  if (profile) params.set('profile_id', profile);
+  params.set('limit', String(packageLimit));
+  params.set('offset', String(packageOffset));
+  try {
+    renderPackages(await publicJSON('/api/public/packages?' + params.toString()));
+  } catch (error) {
+    clear(document.getElementById('package-rows'));
+    var empty = document.getElementById('package-empty'); clear(empty);
+    empty.appendChild(el('div', 'empty', t('packages.loadfail', 'Package search failed: ') + ' ' + error.message));
+  }
+}
+
+function persistPackageSearch() {
+  var params = new URLSearchParams();
+  var query = document.getElementById('package-query').value.trim();
+  var profile = document.getElementById('package-profile').value;
+  if (query) params.set('q', query);
+  if (profile) params.set('profile_id', profile);
+  history.replaceState(null, '', '/packages' + (params.toString() ? '?' + params.toString() : ''));
+}
+document.getElementById('package-search').addEventListener('submit', function (event) {
+  event.preventDefault(); packageOffset = 0; persistPackageSearch(); loadPackages();
+});
+document.getElementById('package-prev').addEventListener('click', function () {
+  packageOffset = Math.max(0, packageOffset - packageLimit); loadPackages();
+});
+document.getElementById('package-next').addEventListener('click', function () {
+  if (packageOffset + packageLimit < packageTotal) packageOffset += packageLimit;
+  loadPackages();
+});
+function onLangChange() {
+  document.getElementById('package-query').placeholder = t('packages.search.ph', 'Package, version, or profile');
+  renderPackageProfiles();
+  loadPackages();
+}
+loadPackageProfiles().catch(function () {}).then(loadPackages);
+`
+
 const docsContent = `
-<div class="page-head"><div><h1 data-i18n="docs.h1">Docs</h1><p class="sub" data-i18n="docs.sub">Quick start</p></div></div>
-<div class="card"><div class="card-pad docs-body">
+<div class="public-head">
+  <h1 data-i18n="docs.h1">Documentation</h1>
+  <p data-i18n="docs.sub">Choose a binhost, establish signing trust, and configure Portage without signing in.</p>
+</div>
+<div class="card public-docs"><div class="card-pad docs-body">
   <h2 data-i18n="docs.consume">Consume binary packages</h2>
-  <p data-i18n="docs.consume.p">Verify the signing fingerprint through a trusted channel and configure Portage's keyring before pointing a Gentoo machine at this binhost. Emerge then verifies fetched packages and falls back to source when a package is missing:</p>
-  <pre>sudo portage-client configure -server=https://SERVER
+  <p data-i18n="docs.consume.p">First use the Packages page to identify the binhost matching this machine's ABI and profile. Each profile is an independent PKGDIR; /binpkgs is not an aggregate repository.</p>
+  <p><a href="/packages" data-i18n="docs.browse">Browse published packages and profiles</a></p>
+  <h2 data-i18n="docs.client">Use the Portage Engine client</h2>
+  <p data-i18n="docs.client.p">The client resolves the profile's exact official-style path from the public inventory and writes binrepos.conf. Omitting profile-id selects the default profile:</p>
+  <pre>sudo portage-client configure \
+  -server=https://SERVER \
+  -profile-id=pe/amd64/glibc/systemd/base-v1
+
 emerge --getbinpkg app-misc/jq</pre>
+  <h2 data-i18n="docs.manual">Configure Portage manually</h2>
+  <p data-i18n="docs.manual.p">You can instead create binrepos.conf directly. Replace the example with the Binhost path shown on the Packages page:</p>
+  <pre>[portage-engine]
+priority = 1
+sync-uri = https://SERVER/binpkgs/releases/amd64/binpackages/23.0/TARGET
+verify-signature = true</pre>
+  <h2 data-i18n="docs.gpg">Establish signing trust</h2>
+  <p data-i18n="docs.gpg.p">Configure writes binrepos.conf only; it does not import or trust a key. Obtain the release public key and full fingerprint through an independent operator-controlled channel, import it into /etc/portage/gnupg, and establish trust. Never obtain both packages and the trust root over the same unauthenticated HTTP connection.</p>
+  <p class="notice" data-i18n="docs.verify.note">“Published” in the web catalog does not replace client-side signature verification.</p>
   <h2 data-i18n="docs.build">Request a build</h2>
-  <p data-i18n="docs.build.p">Portage has no native way to request a remote build — use the client (add -wait to block until done):</p>
-  <pre>portage-client build -server=https://SERVER -package app-misc/jq -wait</pre>
-  <p data-i18n="docs.build.p2">The server creates a fresh native Gentoo build VM (or dispatches to a static agent that owns disposable roots); the artifact lands in the binhost repository and the Packages index refreshes automatically.</p>
-  <h2 data-i18n="docs.cloud">Cloud build configuration</h2>
-  <p data-i18n="docs.cloud.p">PVE / cloud provider settings are managed on the Settings page and apply on save. For PVE template creation and the end-to-end test walkthrough, see docs/PVE_TESTING.md in the repository.</p>
-  <h2 data-i18n="docs.gpg">GPG verification</h2>
-  <p data-i18n="docs.gpg.p">Configure writes verify-signature to binrepos.conf only. An administrator can retrieve the public key from /api/v1/gpg/public-key, but clients must independently verify its full fingerprint, import it into /etc/portage/gnupg, and establish trust.</p>
+  <p data-i18n="docs.build.p">Browsing and installing published packages needs no account. Submitting a build requires sign-in and access to a project:</p>
+  <pre>portage-client build \
+  -server=https://SERVER \
+  -project=PROJECT \
+  -profile-id=pe/amd64/glibc/systemd/base-v1 \
+  -package=app-misc/jq \
+  -wait</pre>
+  <p data-i18n="docs.build.p2">A package is published only after isolated install and signature verification; publication atomically refreshes that profile's Packages index.</p>
 </div></div>`
 
-const docsJS = `/* static page */`
+const docsJS = `/* static public page */`
+
+const statusContent = `
+<div class="public-head">
+  <h1 data-i18n="status.h1">Service status</h1>
+  <p data-i18n="status.sub">Public, redacted availability for Portage Engine services.</p>
+</div>
+<div class="card">
+  <div class="status-overall">
+    <div><strong id="status-title">Loading status…</strong><p id="status-updated"></p></div>
+    <span data-i18n="status.refresh">Refreshes automatically every 30 seconds</span>
+  </div>
+  <div class="status-list" id="status-components"></div>
+</div>`
+
+const statusJS = `
+function statusLabel(state) {
+  if (state === 'operational') return t('status.operational', 'All systems operational');
+  if (state === 'degraded') return t('status.degraded', 'Some services are degraded');
+  return t('status.unavailable', 'Status service unavailable');
+}
+function statusIndicator(state) {
+  var color = state === 'operational' ? 'green' : (state === 'degraded' ? 'orange' : 'red');
+  var wrap = el('span', 'status ' + color);
+  wrap.appendChild(el('span', 'dot'));
+  wrap.appendChild(el('span', null, state === 'operational' ?
+    t('status.state.operational', 'Operational') : t('status.state.degraded', 'Degraded')));
+  return wrap;
+}
+function componentLabel(name) {
+  if (name === 'Web and API') return t('status.component.api', name);
+  if (name === 'Package repository') return t('status.component.repository', name);
+  if (name === 'Build service') return t('status.component.build', name);
+  return name;
+}
+async function loadPublicStatus() {
+  var title = document.getElementById('status-title');
+  var updated = document.getElementById('status-updated');
+  var components = document.getElementById('status-components');
+  try {
+    var response = await publicJSON('/api/public/status');
+    title.textContent = statusLabel(response.status);
+    updated.textContent = t('status.updated', 'Updated ') + fmtPublicTime(response.updated_at) +
+      (response.version ? ' · ' + t('status.version', 'Version ') + response.version : '');
+    clear(components);
+    (response.components || []).forEach(function (component) {
+      var row = el('div', 'status-row');
+      row.appendChild(el('span', null, componentLabel(component.name)));
+      row.appendChild(statusIndicator(component.status));
+      components.appendChild(row);
+    });
+  } catch (error) {
+    title.textContent = statusLabel('unavailable');
+    updated.textContent = error.message;
+    clear(components);
+  }
+}
+function onLangChange() { loadPublicStatus(); }
+loadPublicStatus();
+setInterval(loadPublicStatus, 30000);
+`
 
 // shellHTML is the full-screen web terminal page.
 const shellHTML = `<!DOCTYPE html>
@@ -3110,7 +3481,7 @@ term.onData(function (data) { if (ws.readyState === 1) ws.send(data); });
 </body>
 </html>`
 
-// Assembled authed pages.
+// Assembled console and public pages.
 var (
 	overviewHTML     = appPage("Overview", "title.overview", "overview", overviewContent, overviewJS)
 	buildsPageHTML   = appPage("Builds", "title.builds", "builds", buildsContent, buildsJS)
@@ -3119,5 +3490,7 @@ var (
 	monitorHTML      = appPage("Build Nodes", "title.monitor", "monitor", monitorContent, monitorJS)
 	imageFactoryHTML = appPage("Image Factory", "title.factory", "image-factory", imageFactoryContent, imageFactoryJS)
 	settingsHTML     = appPage("Settings", "title.settings", "settings", settingsContent, settingsJS)
-	docsHTML         = appPage("Docs", "title.docs", "docs", docsContent, docsJS)
+	packagesHTML     = publicPage("Packages", "title.packages", "packages", packagesContent, packagesJS)
+	docsHTML         = publicPage("Documentation", "title.docs", "docs", docsContent, docsJS)
+	statusHTML       = publicPage("Service Status", "title.status", "status", statusContent, statusJS)
 )

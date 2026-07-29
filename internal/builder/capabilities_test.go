@@ -162,6 +162,30 @@ func TestShadowExecutorAdvertisesResolvedCapabilities(t *testing.T) {
 	}
 }
 
+func TestSeparatedRuntimeRoleResponsibilities(t *testing.T) {
+	tests := []struct {
+		role      string
+		admission bool
+		phases    bool
+	}{
+		{role: "control-plane", admission: true, phases: true},
+		{role: "api", admission: true, phases: false},
+		{role: "executor", admission: false, phases: true},
+	}
+	for _, test := range tests {
+		t.Run(test.role, func(t *testing.T) {
+			if got := runtimeRunsAdmission(test.role); got != test.admission {
+				t.Fatalf("runtimeRunsAdmission(%q)=%t, want %t",
+					test.role, got, test.admission)
+			}
+			if got := runtimeRunsPhaseExecution(test.role); got != test.phases {
+				t.Fatalf("runtimeRunsPhaseExecution(%q)=%t, want %t",
+					test.role, got, test.phases)
+			}
+		})
+	}
+}
+
 func containsCapability(labels []string, expected string) bool {
 	for _, label := range labels {
 		if label == expected {

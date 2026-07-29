@@ -1,6 +1,6 @@
 # Build the control-plane binaries. Package builds are deliberately excluded:
 # portage-builder runs only in a disposable native Gentoo root/VM.
-FROM golang:1.26.5 AS go-build
+FROM golang:1.26.5@sha256:3aff6657219a4d9c14e27fb1d8976c49c29fddb70ba835014f477e1c70636647 AS go-build
 
 WORKDIR /app
 
@@ -15,30 +15,95 @@ RUN CGO_ENABLED=0 go build -trimpath -o /out/portage-server ./cmd/server && \
     CGO_ENABLED=0 go build -trimpath -o /out/portage-dashboard ./cmd/dashboard && \
     CGO_ENABLED=0 go build -trimpath -o /out/portage-migrate ./cmd/migrate && \
     CGO_ENABLED=0 go build -trimpath -o /out/portage-signer ./cmd/signer && \
-    CGO_ENABLED=0 go build -trimpath -o /out/portage-capacity-actuator ./cmd/capacity-actuator
+    CGO_ENABLED=0 go build -trimpath -o /out/portage-capacity-actuator ./cmd/capacity-actuator && \
+    CGO_ENABLED=0 go build -trimpath -o /out/portage-artifact-lifecycle ./cmd/artifact-lifecycle
 
-FROM hashicorp/terraform:1.15.6 AS terraform
+FROM hashicorp/terraform:1.15.6@sha256:adae45661e45d3c88beef071ee1277b4621cea73517aae7f0844657c8e85f641 AS terraform
 
-# Control-plane runtime only. SSH and GnuPG support PVE deployment and signing;
-# Terraform is pinned and copied from HashiCorp's multi-architecture image so
-# PVE/cloud provisioning works identically on amd64 and arm64 control planes.
-FROM debian:bookworm-slim
+# Minimal common runtime. Production targets below contain one trust-domain
+# binary and run as the same unprivileged numeric identity so deliberately
+# shared artifact volumes do not require root.
+FROM debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818 AS runtime-base
 
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends bash ca-certificates gnupg openssh-client && \
-    rm -rf /var/lib/apt/lists/*
+    apt-get install -y --no-install-recommends ca-certificates && \
+    rm -rf /var/lib/apt/lists/* && \
+    groupadd --gid 65532 portage-engine && \
+    useradd --uid 65532 --gid 65532 --home-dir /var/lib/portage-engine \
+      --create-home --shell /usr/sbin/nologin portage-engine && \
+    install -d -o 65532 -g 65532 \
+      /opt/portage-engine /var/lib/portage-engine /var/log/portage-engine
 
 WORKDIR /opt/portage-engine
 
+FROM runtime-base AS api-runtime
+COPY --from=go-build /out/portage-server /usr/local/bin/portage-server
+COPY configs ./configs
+USER 65532:65532
+EXPOSE 8080 9443
+CMD ["/usr/local/bin/portage-server"]
+
+FROM runtime-base AS dashboard-runtime
+COPY --from=go-build /out/portage-dashboard /usr/local/bin/portage-dashboard
+COPY configs ./configs
+USER 65532:65532
+EXPOSE 8081
+CMD ["/usr/local/bin/portage-dashboard"]
+
+FROM runtime-base AS migrate-runtime
+COPY --from=go-build /out/portage-migrate /usr/local/bin/portage-migrate
+USER 65532:65532
+CMD ["/usr/local/bin/portage-migrate"]
+
+FROM runtime-base AS signer-runtime
+USER root
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends gnupg && \
+    rm -rf /var/lib/apt/lists/* && \
+    install -d -o 65532 -g 65532 /var/lib/portage-signer
+COPY --from=go-build /out/portage-signer /usr/local/bin/portage-signer
+USER 65532:65532
+CMD ["/usr/local/bin/portage-signer"]
+
+FROM runtime-base AS executor-runtime
+USER root
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends bash gnupg openssh-client && \
+    rm -rf /var/lib/apt/lists/*
+COPY --from=go-build /out/portage-server /usr/local/bin/portage-server
+COPY --from=terraform /bin/terraform /usr/local/bin/terraform
+COPY configs ./configs
+USER 65532:65532
+CMD ["/usr/local/bin/portage-server"]
+
+FROM runtime-base AS actuator-runtime
+COPY --from=go-build /out/portage-capacity-actuator /usr/local/bin/portage-capacity-actuator
+COPY --from=terraform /bin/terraform /usr/local/bin/terraform
+USER 65532:65532
+CMD ["/usr/local/bin/portage-capacity-actuator"]
+
+FROM runtime-base AS artifact-lifecycle-runtime
+COPY --from=go-build /out/portage-artifact-lifecycle /usr/local/bin/portage-artifact-lifecycle
+USER 65532:65532
+ENTRYPOINT ["/usr/local/bin/portage-artifact-lifecycle"]
+
+# Backward-compatible trusted/LAN image. The development Compose topology uses
+# several commands from one image and intentionally retains root plus its
+# shell/tooling. Public deployments must select the target-specific stages.
+FROM debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818 AS trusted-runtime
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends bash ca-certificates gnupg openssh-client && \
+    rm -rf /var/lib/apt/lists/*
+WORKDIR /opt/portage-engine
 COPY --from=go-build /out/portage-server /usr/local/bin/portage-server
 COPY --from=go-build /out/portage-dashboard /usr/local/bin/portage-dashboard
 COPY --from=go-build /out/portage-migrate /usr/local/bin/portage-migrate
 COPY --from=go-build /out/portage-signer /usr/local/bin/portage-signer
 COPY --from=go-build /out/portage-capacity-actuator /usr/local/bin/portage-capacity-actuator
+COPY --from=go-build /out/portage-artifact-lifecycle /usr/local/bin/portage-artifact-lifecycle
 COPY --from=terraform /bin/terraform /usr/local/bin/terraform
 COPY configs ./configs
 COPY scripts/rotating-log-tee.sh /usr/local/bin/rotating-log-tee
-
 EXPOSE 8080 8081
 
 CMD ["/usr/local/bin/portage-server"]

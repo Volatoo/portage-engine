@@ -95,6 +95,32 @@ func (s *Store) Query(req *QueryRequest) (*Package, bool) {
 	return best, best != nil
 }
 
+// Snapshot returns a detached view of every package currently advertised by
+// this store. Callers can safely sort and filter the result without holding a
+// store lock or mutating the query index.
+func (s *Store) Snapshot() []*Package {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	result := make([]*Package, 0)
+	for _, packages := range s.packages {
+		for _, pkg := range packages {
+			if pkg == nil {
+				continue
+			}
+			copyPkg := *pkg
+			copyPkg.UseFlags = slices.Clone(pkg.UseFlags)
+			copyPkg.Dependencies = slices.Clone(pkg.Dependencies)
+			copyPkg.Metadata = make(map[string]string, len(pkg.Metadata))
+			for key, value := range pkg.Metadata {
+				copyPkg.Metadata[key] = value
+			}
+			result = append(result, &copyPkg)
+		}
+	}
+	return result
+}
+
 // candidatesLocked returns the known packages for name, restricted to arch
 // when non-empty. Callers must hold s.mu.
 func (s *Store) candidatesLocked(name, arch string) []*Package {

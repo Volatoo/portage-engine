@@ -158,11 +158,14 @@ func (s *Server) authMode() string {
 }
 
 func publicControlPlanePath(path string) bool {
-	return path == "/health" || path == "/readyz" || path == "/livez" ||
+	return path == "/readyz" || path == "/livez" ||
 		path == "/metrics" || path == "/metrics/prometheus" ||
 		path == "/api/v1/iam/exchange" ||
 		backchannelProviderID(path) != "" ||
 		path == "/api/v1/binhosts" ||
+		path == "/api/v1/gpg/public-key" ||
+		path == "/api/v1/public/packages" ||
+		path == "/api/v1/public/status" ||
 		strings.HasPrefix(path, "/binpkgs/") ||
 		strings.HasPrefix(path, "/verify-binhost/")
 }
@@ -193,7 +196,8 @@ func systemAdminPath(path string) bool {
 		}
 	}
 	return path == "/api/v1/builds/cleanup-failed" ||
-		path == "/api/v1/gpg/generate"
+		path == "/api/v1/gpg/generate" ||
+		path == "/health"
 }
 
 func stepUpRequired(r *http.Request) bool {

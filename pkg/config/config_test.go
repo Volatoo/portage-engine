@@ -68,6 +68,143 @@ func TestLoadServerRedisConfig(t *testing.T) {
 	}
 }
 
+func validPublicServerConfig() *ServerConfig {
+	return &ServerConfig{
+		DeploymentMode:  DeploymentModePublic,
+		RuntimeRole:     "api",
+		ControlPlaneID:  "community-api-1",
+		StorageType:     "s3",
+		StorageS3Bucket: "portage-engine-artifacts",
+		StorageS3Region: "us-east-1",
+		CatalogPath:     "/etc/portage-engine/catalog.json",
+		AuthMode:        "oidc",
+		CORSAllowedOrigins: []string{
+			"https://build.example.test",
+		},
+		IdentityProviders: []IdentityProviderConfig{{
+			ID:          "google",
+			Type:        "oidc",
+			DisplayName: "Google",
+			IssuerURL:   "https://accounts.google.com",
+			Audience:    "portage-engine",
+			ClientID:    "portage-engine",
+			RedirectURL: "https://build.example.test/auth/provider/google/callback",
+		}},
+		IdentityAdminSubjects: []string{"google:admin-subject"},
+		Database: DatabaseConfig{
+			Enabled: true, Required: true,
+		},
+		Cache: CacheConfig{
+			Enabled: true, Required: true, Password: "redis-secret",
+		},
+		GPGEnabled:                         true,
+		GPGAutoCreate:                      false,
+		GPGKeyID:                           "0123456789ABCDEF",
+		GPGPublicKeyPath:                   "/run/portage-engine/release.asc",
+		WorkerGatewayEnabled:               true,
+		WorkerGatewayPort:                  9443,
+		WorkerGatewayAdvertiseURL:          "https://workers.example.test:9443",
+		WorkerGatewayTLSCert:               "/run/pki/server.crt",
+		WorkerGatewayTLSKey:                "/run/pki/server.key",
+		WorkerGatewayServerCA:              "/run/pki/server-ca.crt",
+		WorkerGatewayClientCA:              "/run/pki/client-ca.crt",
+		WorkerGatewayIssuerID:              "community-vault",
+		WorkerGatewayIssuerProvider:        "vault",
+		WorkerGatewayVaultAddress:          "https://vault.internal:8200",
+		WorkerGatewayVaultMount:            "pki",
+		WorkerGatewayVaultRole:             "portage-worker",
+		WorkerGatewayVaultTokenPath:        "/run/secrets/vault-token",
+		WorkerGatewayVaultTimeout:          15,
+		WorkerCertificateTTLMin:            180,
+		PhaseExecutorMode:                  "active",
+		MetricsEnabled:                     true,
+		MetricsPassword:                    "metrics-secret",
+		SchedulerAutoscaleMode:             "observe",
+		SchedulerAutoscaleMinSlots:         1,
+		SchedulerAutoscaleMaxSlots:         64,
+		SchedulerAutoscaleTargetReady:      2,
+		SchedulerAutoscaleCooldownSeconds:  60,
+		SchedulerAutoscaleScaleDownSeconds: 600,
+		SchedulerAutoscaleIntervalSeconds:  15,
+		SchedulerAutoscaleProviderMaxSlots: map[string]int{},
+		SchedulerAutoscaleProviderLimitsOK: true,
+	}
+}
+
+func TestPublicServerDeploymentRejectsUnsafeCompatibilityDefaults(t *testing.T) {
+	cfg := validPublicServerConfig()
+	cfg.StorageType = "local"
+	cfg.AuthMode = "hybrid"
+	cfg.APIKey = "legacy-admin"
+	cfg.CORSAllowedOrigins = nil
+	cfg.WorkerGatewayIssuerProvider = "file"
+	cfg.GPGAutoCreate = true
+	cfg.RemoteBuilders = []string{"http://legacy-builder:9090"}
+	cfg.MetricsPassword = ""
+
+	err := cfg.ValidateStartup()
+	if err == nil {
+		t.Fatal("unsafe public deployment was accepted")
+	}
+	message := err.Error()
+	for _, want := range []string{
+		"STORAGE_TYPE must be s3",
+		"AUTH_MODE must be oidc",
+		"CORS_ALLOWED_ORIGINS",
+		"WORKER_GATEWAY_ISSUER_PROVIDER must be vault",
+		"GPG_AUTO_CREATE must be false",
+		"REMOTE_BUILDERS",
+		"METRICS_PASSWORD",
+	} {
+		if !strings.Contains(message, want) {
+			t.Errorf("public validation error %q does not contain %q", message, want)
+		}
+	}
+}
+
+func TestPublicServerDeploymentAcceptsHardenedBoundary(t *testing.T) {
+	if err := validPublicServerConfig().ValidateStartup(); err != nil {
+		t.Fatalf("valid public deployment was rejected: %v", err)
+	}
+}
+
+func TestPublicExecutorRequiresQuarantineScopedDeleteClient(t *testing.T) {
+	cfg := validPublicServerConfig()
+	cfg.RuntimeRole = "executor"
+	if err := cfg.ValidateStartup(); err == nil ||
+		!strings.Contains(err.Error(), "STORAGE_S3_ALLOW_DELETE") {
+		t.Fatalf("public executor without revocation client error=%v", err)
+	}
+	cfg.StorageS3AllowDelete = true
+	if err := cfg.ValidateStartup(); err != nil {
+		t.Fatalf("public executor with lifecycle client was rejected: %v", err)
+	}
+}
+
+func TestPublicAPIRejectsObjectDeleteCapability(t *testing.T) {
+	cfg := validPublicServerConfig()
+	cfg.StorageS3AllowDelete = true
+	if err := cfg.ValidateStartup(); err == nil ||
+		!strings.Contains(err.Error(), "public read path") {
+		t.Fatalf("public api with object deletion capability error=%v", err)
+	}
+}
+
+func TestTrustedServerDeploymentPreservesLANCompatibility(t *testing.T) {
+	cfg := &ServerConfig{
+		DeploymentMode:              DeploymentModeTrusted,
+		StorageType:                 "local",
+		AuthMode:                    "legacy",
+		OIDCAllowInsecureHTTP:       true,
+		CloudPVEInsecure:            true,
+		CloudSSHInsecureHostKey:     true,
+		WorkerGatewayIssuerProvider: "file",
+	}
+	if err := cfg.ValidateStartup(); err != nil {
+		t.Fatalf("trusted deployment compatibility was rejected: %v", err)
+	}
+}
+
 func TestLoadServerIAMSessionAndStepUpPolicy(t *testing.T) {
 	t.Setenv("STEP_UP_API_KEY", "independent-key")
 	t.Setenv("OIDC_SESSION_IDLE_MINUTES", "45")
@@ -171,6 +308,11 @@ MAX_WORKERS=10
 BUILD_MODE=cloud
 STORAGE_TYPE=s3
 STORAGE_S3_BUCKET=test-bucket
+STORAGE_S3_REGION=us-east-1
+STORAGE_S3_ENDPOINT=http://minio.internal:9000
+STORAGE_S3_USE_PATH_STYLE=true
+STORAGE_S3_PUBLIC_BASE_URL=https://binpkgs.example.test
+STORAGE_S3_ALLOW_DELETE=true
 GPG_ENABLED=true
 GPG_KEY_ID=ABCD1234
 CLOUD_DEFAULT_PROVIDER=aws
@@ -210,6 +352,13 @@ CATALOG_PATH=/etc/portage-engine/catalog.json
 
 	if cfg.StorageS3Bucket != "test-bucket" {
 		t.Errorf("Expected StorageS3Bucket=test-bucket, got %s", cfg.StorageS3Bucket)
+	}
+	if cfg.StorageS3Region != "us-east-1" ||
+		cfg.StorageS3Endpoint != "http://minio.internal:9000" ||
+		!cfg.StorageS3UsePathStyle ||
+		!cfg.StorageS3AllowDelete ||
+		cfg.StorageS3PublicBaseURL != "https://binpkgs.example.test" {
+		t.Errorf("Unexpected S3-compatible configuration: %+v", cfg)
 	}
 
 	if !cfg.GPGEnabled {
@@ -437,6 +586,45 @@ func TestDashboardConfigValidatesOIDCTransport(t *testing.T) {
 	base.AuthEnabled = false
 	if err := base.Validate(); err == nil {
 		t.Fatal("OIDC succeeded while dashboard authentication was disabled")
+	}
+}
+
+func TestPublicDashboardDeploymentBoundary(t *testing.T) {
+	cfg := DashboardConfig{
+		DeploymentMode: DeploymentModePublic,
+		ServerURL:      "http://portage-server:8080",
+		AuthEnabled:    true,
+		JWTSecret:      "test-secret-that-is-at-least-32-chars-long",
+		AllowAnonymous: false,
+		CookieSecure:   true,
+		IdentityProviders: []IdentityProviderConfig{{
+			ID:           "github",
+			Type:         "github",
+			DisplayName:  "GitHub",
+			ClientID:     "github-client",
+			ClientSecret: "github-secret",
+			RedirectURL:  "https://build.example.test/auth/provider/github/callback",
+		}},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("valid public dashboard was rejected: %v", err)
+	}
+
+	cfg.AllowAnonymous = true
+	cfg.AdminUser = "admin"
+	cfg.CookieSecure = false
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("unsafe public dashboard was accepted")
+	}
+	for _, want := range []string{
+		"ALLOW_ANONYMOUS must be false",
+		"COOKIE_SECURE must be true",
+		"local ADMIN_USER",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("public dashboard validation error %q does not contain %q", err, want)
+		}
 	}
 }
 

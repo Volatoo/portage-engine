@@ -14,6 +14,12 @@ Portage against the server's binhost. The client is a management/request tool.
 
 ## 1. Consuming packages (the normal path)
 
+The dashboard's public `/packages` page searches already published packages
+across catalog profiles and links to their immutable binhost paths. `/docs`
+contains the anonymous quick start, and `/status` exposes only coarse service
+availability. These public pages do not expose build jobs, logs, dependency
+metadata, storage credentials, topology, or detailed health reasons.
+
 The server exposes Gentoo-style release namespaces below `/binpkgs/`. Each
 catalog profile owns one real `PKGDIR` and one independent `Packages` index:
 
@@ -68,15 +74,26 @@ FEATURES="${FEATURES} binpkg-request-signature"
 
 ### Establish signing trust
 
-Obtain the release public key and its full fingerprint through an authenticated
-channel controlled by the operator. Do not use the same unauthenticated HTTP
-connection for both the package repository and its trust root. The API endpoint
-is useful for an administrator, but it requires the API key when server API
-authentication is enabled:
+Obtain the release key's full primary fingerprint through an authenticated,
+operator-controlled channel. Do not use the same HTTPS origin as both package
+source and only trust root. The recommended one-time flow verifies that
+independent fingerprint before it imports the public key into Portage's
+keyring and writes `binrepos.conf`:
+
+```bash
+sudo portage-client setup \
+  -server=https://portage.example.org \
+  -expected-fingerprint=<FULL_PRIMARY_FINGERPRINT> \
+  -profile-id=pe/amd64/glibc/systemd/base-v1
+```
+
+The public-key endpoint is intentionally unauthenticated because stock
+community consumers need the key before they have a platform account. It is
+not a trust anchor by itself; the full fingerprint comparison above is
+mandatory. The manual equivalent is:
 
 ```bash
 curl --fail --show-error \
-  -H "X-API-Key: ${PORTAGE_ENGINE_API_KEY}" \
   https://portage.example.org/api/v1/gpg/public-key \
   -o portage-engine.asc
 

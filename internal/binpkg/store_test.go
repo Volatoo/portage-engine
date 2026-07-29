@@ -174,6 +174,32 @@ func TestQuery(t *testing.T) {
 	}
 }
 
+func TestSnapshotIsDetached(t *testing.T) {
+	store := NewStore(t.TempDir())
+	original := &Package{
+		Name: "app-misc/jq", Version: "1.8.2", Arch: "amd64",
+		UseFlags: []string{"oniguruma"},
+		Metadata: map[string]string{"BUILD_ID": "job-1"},
+	}
+	if err := store.Add(original); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot := store.Snapshot()
+	if len(snapshot) != 1 {
+		t.Fatalf("snapshot length=%d", len(snapshot))
+	}
+	snapshot[0].Name = "mutated"
+	snapshot[0].UseFlags[0] = "mutated"
+	snapshot[0].Metadata["BUILD_ID"] = "mutated"
+
+	got, ok := store.Query(&QueryRequest{Name: "app-misc/jq", Arch: "amd64"})
+	if !ok || got.Name != "app-misc/jq" || got.UseFlags[0] != "oniguruma" ||
+		got.Metadata["BUILD_ID"] != "job-1" {
+		t.Fatalf("snapshot mutation reached store: %#v", got)
+	}
+}
+
 // TestQueryNotFound tests querying for non-existent package.
 func TestQueryNotFound(t *testing.T) {
 	tmpDir, err := os.MkdirTemp("", "binpkg-test-*")

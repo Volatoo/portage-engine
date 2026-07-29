@@ -57,7 +57,8 @@ func main() {
 			log.Printf("WARNING: %s", w)
 		}
 	}
-	if cfg.RuntimeRole != "control-plane" && cfg.RuntimeRole != "executor" {
+	if cfg.RuntimeRole != "control-plane" && cfg.RuntimeRole != "api" &&
+		cfg.RuntimeRole != "executor" {
 		log.Fatalf("Invalid SERVER_RUNTIME_ROLE %q", cfg.RuntimeRole)
 	}
 	if cfg.RuntimeRole == "executor" && cfg.ControlPlaneID == "" {
@@ -76,6 +77,9 @@ func main() {
 	// Override port if specified
 	if *port != 8080 {
 		cfg.Port = *port
+	}
+	if err := cfg.ValidateStartup(); err != nil {
+		log.Fatalf("Configuration validation failed: %v", err)
 	}
 
 	// Propagate version info to the server package

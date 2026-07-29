@@ -35,12 +35,11 @@ func TestNewStorageUploader(t *testing.T) {
 			expectEnabled: false,
 		},
 		{
-			name:        "s3 with bucket",
-			storageType: "s3",
-			s3Bucket:    "test-bucket",
-			s3Region:    "us-east-1",
-			// S3 backend is not implemented: construction fails fast.
-			expectError: true,
+			name:          "s3 with bucket",
+			storageType:   "s3",
+			s3Bucket:      "test-bucket",
+			s3Region:      "us-east-1",
+			expectEnabled: true,
 		},
 		{
 			name:          "http without base url",
@@ -115,6 +114,7 @@ func TestStorageUploaderGetURL(t *testing.T) {
 		name        string
 		storageType string
 		s3Bucket    string
+		s3Region    string
 		httpBase    string
 		remotePath  string
 		expectError bool
@@ -125,8 +125,13 @@ func TestStorageUploaderGetURL(t *testing.T) {
 			remotePath:  "/path/to/file.txt",
 			expectError: false,
 		},
-		// (http/s3 backends are not implemented; their constructors error, so
-		// there is no uploader to call GetURL on — covered by TestNewStorageUploader.)
+		{
+			name:        "s3 storage",
+			storageType: "s3",
+			s3Bucket:    "test-bucket",
+			s3Region:    "us-east-1",
+			remotePath:  "app-misc/jq/jq-1.8.2.gpkg.tar",
+		},
 	}
 
 	for _, tt := range tests {
@@ -135,7 +140,7 @@ func TestStorageUploaderGetURL(t *testing.T) {
 				tt.storageType,
 				"/tmp/local",
 				tt.s3Bucket,
-				"",
+				tt.s3Region,
 				"",
 				tt.httpBase,
 			)

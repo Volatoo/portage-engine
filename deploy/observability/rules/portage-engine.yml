@@ -1,0 +1,58 @@
+groups:
+  - name: portage-engine-availability
+    rules:
+      - alert: PortageEngineMetricsTargetDown
+        expr: up{job="portage-engine-server"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: Portage Engine metrics target is unavailable
+          description: The control-plane metrics endpoint has failed for two minutes.
+
+      - alert: PortageEngineStorageErrors
+        expr: increase(portage_storage_errors_total[10m]) > 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: Portage Engine observed artifact storage errors
+          description: Publication/read authority errors occurred during the last ten minutes.
+
+  - name: portage-engine-scheduler
+    rules:
+      - alert: PortageEngineQueueBacklog
+        expr: portage_scheduler_queued_tasks > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Portage Engine queue is not draining
+          description: At least one durable build has remained queued for fifteen minutes.
+
+      - alert: PortageEngineUnschedulableBuilds
+        expr: portage_scheduler_unschedulable_tasks > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Builds have no exact-capability executor
+          description: Check profile/image/provider/zone labels and persistent executor capacity.
+
+      - alert: PortageEngineCapacityProvisioningStuck
+        expr: portage_capacity_instances_provisioning > 0
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: Persistent executor provisioning has not completed
+          description: Review actuator action fences, provider state, and exact worker heartbeat.
+
+      - alert: PortageEngineTargetSLOBreach
+        expr: portage_monitor_target_slo_breaches_30d > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: A target is below the configured 30-day SLO
+          description: Use the authenticated Monitor to identify the target and failure class.

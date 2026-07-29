@@ -18,6 +18,8 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -37,6 +39,8 @@ func main() {
 	args := os.Args[2:]
 
 	switch cmd {
+	case "setup":
+		runSetup(args)
 	case "configure":
 		runConfigure(args)
 	case "build":
@@ -80,6 +84,9 @@ func printUsage() {
 Usage: portage-client <command> [flags]
 
 Commands:
+  setup       Verify the independently published release-key fingerprint,
+              install that key into Portage's keyring, and configure binrepo.
+
   configure   Point Portage at the server's binhost (writes binrepos.conf).
               After this, install packages the normal way:
                 emerge --getbinpkg <pkg>
@@ -110,6 +117,12 @@ Commands:
 Run 'portage-client <command> -h' for command-specific flags.
 
 Examples:
+  # Recommended one-time trust bootstrap. Obtain the fingerprint through an
+  # independent operator-controlled channel, not from this same command.
+  sudo portage-client setup -server=https://portage.example.org \
+    -expected-fingerprint=<FULL_PRIMARY_FINGERPRINT> \
+    -profile-id=pe/amd64/glibc/systemd/base-v1
+
   # One-time: configure the consume path, then install natively.
   sudo portage-client configure -server=http://binhost:8080 \
     -profile-id=pe/amd64/glibc/systemd/base-v1
@@ -233,16 +246,11 @@ func runConfigure(args []string) {
 	if err != nil {
 		log.Fatalf("failed to resolve binhost profile: %v", err)
 	}
-	content := fmt.Sprintf("[%s]\npriority = %d\nsync-uri = %s%s\nverify-signature = %t\n",
-		*name, *priority, base, selected.SyncPath, *verify)
-
-	// binrepos.conf lives under /etc/portage and must be world-readable so
-	// Portage (and emerge run as any user) can read the binhost definition.
-	if err := os.MkdirAll(dirOf(*out), 0o755); err != nil { // #nosec G301 -- Portage config dir must be world-readable.
-		log.Fatalf("failed to create %s: %v", dirOf(*out), err)
-	}
-	if err := os.WriteFile(*out, []byte(content), 0o644); err != nil { // #nosec G306 -- Portage config file must be world-readable.
-		log.Fatalf("failed to write %s: %v", *out, err)
+	content, err := writeBinrepoConfig(
+		base, selected, *name, *priority, *verify, *out,
+	)
+	if err != nil {
+		log.Fatal(err)
 	}
 
 	fmt.Printf("Wrote %s:\n\n%s\n", *out, content)
@@ -250,6 +258,215 @@ func runConfigure(args []string) {
 	fmt.Println("Next: enable binary fetching, then install as usual, e.g.:")
 	fmt.Println("  emerge --getbinpkg <pkg>")
 	fmt.Println("  # or add to /etc/portage/make.conf:  FEATURES=\"getbinpkg\"")
+}
+
+func runSetup(args []string) {
+	fs := flag.NewFlagSet("setup", flag.ExitOnError)
+	server := fs.String("server", "http://localhost:8080", "Server URL")
+	profileID := fs.String("profile-id", "", "Catalog profile ID")
+	expected := fs.String(
+		"expected-fingerprint", "",
+		"Full primary fingerprint obtained through an independent trusted channel",
+	)
+	keyring := fs.String(
+		"keyring", "/etc/portage/gnupg", "Portage verification GnuPG home",
+	)
+	out := fs.String(
+		"out", "/etc/portage/binrepos.conf/portage-engine.conf",
+		"Output binrepos.conf path",
+	)
+	name := fs.String("name", "portage-engine", "binrepo name")
+	priority := fs.Int("priority", 1, "binrepo priority")
+	_ = fs.Parse(args)
+	expectedFingerprint, err := normalizeFingerprint(*expected)
+	if err != nil {
+		log.Fatalf("-expected-fingerprint: %v", err)
+	}
+	base := strings.TrimRight(*server, "/")
+	client := &http.Client{Timeout: httpTimeout}
+	selected, err := fetchBinhostProfile(client, base, *profileID)
+	if err != nil {
+		log.Fatalf("resolve binhost profile: %v", err)
+	}
+	publicKey, err := fetchReleasePublicKey(client, base)
+	if err != nil {
+		log.Fatalf("fetch release public key: %v", err)
+	}
+	fingerprint, err := inspectPublicKeyFingerprint(publicKey)
+	if err != nil {
+		log.Fatalf("inspect release public key: %v", err)
+	}
+	if fingerprint != expectedFingerprint {
+		log.Fatalf(
+			"release key fingerprint mismatch: got %s, expected %s",
+			fingerprint, expectedFingerprint,
+		)
+	}
+	if err := installPortagePublicKey(*keyring, publicKey, fingerprint); err != nil {
+		log.Fatalf("install Portage release key: %v", err)
+	}
+	content, err := writeBinrepoConfig(
+		base, selected, *name, *priority, true, *out,
+	)
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("Trusted release key %s in %s\n", fingerprint, *keyring)
+	fmt.Printf("Wrote %s:\n\n%s\n", *out, content)
+	fmt.Println("Next: emerge --getbinpkg <pkg>")
+}
+
+func fetchReleasePublicKey(client *http.Client, base string) ([]byte, error) {
+	response, err := client.Get(base + "/api/v1/gpg/public-key")
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = response.Body.Close() }()
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
+		return nil, fmt.Errorf(
+			"server returned %s: %s",
+			response.Status, strings.TrimSpace(string(body)),
+		)
+	}
+	publicKey, err := io.ReadAll(io.LimitReader(response.Body, (1<<20)+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(publicKey) == 0 || len(publicKey) > 1<<20 {
+		return nil, fmt.Errorf("release public key is empty or exceeds 1 MiB")
+	}
+	return publicKey, nil
+}
+
+func normalizeFingerprint(value string) (string, error) {
+	value = strings.ToUpper(strings.ReplaceAll(strings.TrimSpace(value), " ", ""))
+	if len(value) < 40 || len(value) > 64 {
+		return "", fmt.Errorf("full 40..64 hexadecimal primary fingerprint is required")
+	}
+	for _, character := range value {
+		if !strings.ContainsRune("0123456789ABCDEF", character) {
+			return "", fmt.Errorf("fingerprint must be hexadecimal")
+		}
+	}
+	return value, nil
+}
+
+func inspectPublicKeyFingerprint(publicKey []byte) (string, error) {
+	scratch, err := os.MkdirTemp("", "portage-client-key-*")
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = os.RemoveAll(scratch) }()
+	keyFile := filepath.Join(scratch, "release.asc")
+	if err := os.WriteFile(keyFile, publicKey, 0o600); err != nil {
+		return "", err
+	}
+	command := exec.Command( // #nosec G204 -- fixed gpg executable and server-owned key file.
+		"gpg", "--homedir", scratch, "--batch", "--no-options",
+		"--with-colons", "--import-options", "show-only", "--import", keyFile,
+	)
+	output, err := command.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("gpg show-only failed: %w: %s",
+			err, strings.TrimSpace(string(output)))
+	}
+	fingerprints := primaryFingerprints(output)
+	if len(fingerprints) != 1 {
+		return "", fmt.Errorf(
+			"public key bundle must contain exactly one primary key, found %d",
+			len(fingerprints),
+		)
+	}
+	return normalizeFingerprint(fingerprints[0])
+}
+
+func primaryFingerprints(colonOutput []byte) []string {
+	var result []string
+	want := false
+	for _, line := range strings.Split(string(colonOutput), "\n") {
+		fields := strings.Split(line, ":")
+		if len(fields) == 0 {
+			continue
+		}
+		if fields[0] == "pub" {
+			want = true
+			continue
+		}
+		if want && fields[0] == "fpr" && len(fields) > 9 {
+			result = append(result, fields[9])
+			want = false
+		}
+	}
+	return result
+}
+
+func installPortagePublicKey(
+	keyring string,
+	publicKey []byte,
+	fingerprint string,
+) error {
+	if err := os.MkdirAll(keyring, 0o700); err != nil {
+		return err
+	}
+	if err := os.Chmod(keyring, 0o700); err != nil { // #nosec G302 -- GnuPG home must be owner-only.
+		return err
+	}
+	temp, err := os.CreateTemp(keyring, ".release-key-*.asc")
+	if err != nil {
+		return err
+	}
+	name := temp.Name()
+	defer func() { _ = os.Remove(name) }()
+	if err := temp.Chmod(0o600); err != nil {
+		_ = temp.Close()
+		return err
+	}
+	if _, err := temp.Write(publicKey); err != nil {
+		_ = temp.Close()
+		return err
+	}
+	if err := temp.Close(); err != nil {
+		return err
+	}
+	importKey := exec.Command( // #nosec G204 -- fixed gpg executable and operator-selected confined paths.
+		"gpg", "--homedir", keyring, "--batch", "--no-options", "--import", name,
+	)
+	if output, err := importKey.CombinedOutput(); err != nil {
+		return fmt.Errorf("gpg import failed: %w: %s",
+			err, strings.TrimSpace(string(output)))
+	}
+	ownerTrust := exec.Command( // #nosec G204 -- fixed gpg executable and operator-selected keyring.
+		"gpg", "--homedir", keyring, "--batch", "--no-options", "--import-ownertrust",
+	)
+	ownerTrust.Stdin = strings.NewReader(fingerprint + ":6:\n")
+	if output, err := ownerTrust.CombinedOutput(); err != nil {
+		return fmt.Errorf("gpg ownertrust failed: %w: %s",
+			err, strings.TrimSpace(string(output)))
+	}
+	return nil
+}
+
+func writeBinrepoConfig(
+	base string,
+	selected *binhostProfile,
+	name string,
+	priority int,
+	verify bool,
+	out string,
+) (string, error) {
+	content := fmt.Sprintf(
+		"[%s]\npriority = %d\nsync-uri = %s%s\nverify-signature = %t\n",
+		name, priority, base, selected.SyncPath, verify,
+	)
+	// Portage configuration is intentionally world-readable.
+	if err := os.MkdirAll(dirOf(out), 0o755); err != nil { // #nosec G301 -- Portage config directory.
+		return "", fmt.Errorf("create %s: %w", dirOf(out), err)
+	}
+	if err := os.WriteFile(out, []byte(content), 0o644); err != nil { // #nosec G306 -- Portage config file.
+		return "", fmt.Errorf("write %s: %w", out, err)
+	}
+	return content, nil
 }
 
 type binhostProfile struct {
