@@ -175,6 +175,12 @@ appends to, an untrusted client `X-Forwarded-For` header. When another trusted
 load balancer sits in front, configure its real-IP trust list explicitly;
 never trust arbitrary forwarded addresses.
 
+The `/api/v1/iam/device/` prefix is anonymous, write-backed identity traffic:
+authorization creation, token polling, and the authenticated decision route
+all use the stricter identity-request zone as well as the general request zone.
+Every response on that prefix is marked `Cache-Control: no-store`. Do not let
+these routes fall through to the general 20 requests/second API location.
+
 Metrics use a distinct hostname. The edge htpasswd entry must use username
 `metrics` and the same password injected as the server's
 `METRICS_PASSWORD`, so both the edge and application independently verify the

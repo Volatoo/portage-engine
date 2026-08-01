@@ -1,9 +1,9 @@
 {
   "schema_version": 1,
   "gate": "public_edge_repository",
-  "generated_at": "2026-08-01T05:05:22Z",
+  "generated_at": "2026-08-01T05:10:02Z",
   "baseline_commit": "f79fca4",
-  "repository_head": "f79fca4fd41cc8d451c65553b5f1346dfe57feae",
+  "repository_head": "d5b06eb7e95fbf8ca03d0d79c08e6bed5d481824",
   "tree_basis": "repository_head_plus_worktree",
   "working_tree_dirty": true,
   "validation_image": "nginx:1.29-alpine",
@@ -25,7 +25,7 @@
     {
       "id": "edge_static_policy",
       "status": "pass",
-      "summary": "edge template contains independent source-IP/request limits, cookie policy, anonymous routes, metrics auth, and WebShell denial"
+      "summary": "edge template contains independent source-IP/request limits, device IAM no-store policy, cookie policy, anonymous routes, metrics auth, and WebShell denial"
     },
     {
       "id": "production_boundary_documented",
