@@ -138,6 +138,11 @@ func metricMap(value any) map[string]any {
 	return nil
 }
 
+func metricBool(value any) bool {
+	result, _ := value.(bool)
+	return result
+}
+
 func capacityPoolMetricCounts(value any) (int64, int64) {
 	pools, ok := value.([]any)
 	if !ok {
@@ -188,41 +193,60 @@ func targetHistoryMetricCounts(value any) (
 }
 
 func (s *Server) schedulerMetricsSnapshot() metrics.SchedulerSnapshot {
-	status := s.builder.GetSchedulerStatus()
+	return schedulerMetricsSnapshotFromStatus(s.builder.GetSchedulerStatus())
+}
+
+func schedulerMetricsSnapshotFromStatus(
+	status map[string]any,
+) metrics.SchedulerSnapshot {
 	fairness := metricMap(status["fairness"])
 	workerScoring := metricMap(status["worker_scoring"])
+	leaseExpiries := metricMap(status["lease_expiries"])
+	targetHistory := metricMap(status["target_history"])
+	projection := metricMap(targetHistory["projection"])
 	autoscaler := metricMap(status["autoscaler"])
 	actuator := metricMap(autoscaler["actuator"])
 	pools, blockedPools := capacityPoolMetricCounts(autoscaler["pools"])
 	targetSamples, targetSuccesses, targetFailures, targetBreaches,
 		targetReserved, targetCharged := targetHistoryMetricCounts(
-		status["target_history"],
+		targetHistory,
 	)
 	return metrics.SchedulerSnapshot{
-		QueuedTasks:           metricInt64(status["queued_tasks"]),
-		UnschedulableTasks:    metricInt64(status["unschedulable_tasks"]),
-		RunningTasks:          metricInt64(status["running_tasks"]),
-		EligibleProjects:      metricInt64(fairness["eligible_projects"]),
-		StarvedProjects:       metricInt64(fairness["starved_projects"]),
-		MaxQueueWaitSeconds:   metricInt64(fairness["max_queue_wait_seconds"]),
-		WorkerDecisions:       metricInt64(workerScoring["decisions_last_hour"]),
-		WorkerMultiCandidate:  metricInt64(workerScoring["multi_candidate_last_hour"]),
-		TargetSamples30d:      targetSamples,
-		TargetSuccesses30d:    targetSuccesses,
-		TargetFailures30d:     targetFailures,
-		TargetSLOBreaches30d:  targetBreaches,
-		TargetReservedCost30d: targetReserved,
-		TargetChargedCost30d:  targetCharged,
-		AutoscaleActiveSlots:  metricInt64(autoscaler["active_slots"]),
-		AutoscaleDesiredSlots: metricInt64(autoscaler["desired_slots"]),
-		AutoscaleBacklog:      metricInt64(autoscaler["backlog"]),
-		AutoscalePools:        pools,
-		AutoscaleBlockedPools: blockedPools,
-		CapacityOpenActions:   metricInt64(actuator["open_actions"]),
-		CapacityProvisioning:  metricInt64(actuator["provisioning_instances"]),
-		CapacityActive:        metricInt64(actuator["active_instances"]),
-		CapacityDraining:      metricInt64(actuator["draining_instances"]),
-		CapacityDeleting:      metricInt64(actuator["deleting_instances"]),
+		QueuedTasks:             metricInt64(status["queued_tasks"]),
+		UnschedulableTasks:      metricInt64(status["unschedulable_tasks"]),
+		RunningTasks:            metricInt64(status["running_tasks"]),
+		EligibleProjects:        metricInt64(fairness["eligible_projects"]),
+		StarvedProjects:         metricInt64(fairness["starved_projects"]),
+		MaxQueueWaitSeconds:     metricInt64(fairness["max_queue_wait_seconds"]),
+		WorkerDecisions:         metricInt64(workerScoring["decisions_last_hour"]),
+		WorkerMultiCandidate:    metricInt64(workerScoring["multi_candidate_last_hour"]),
+		TargetSamples30d:        targetSamples,
+		TargetSuccesses30d:      targetSuccesses,
+		TargetFailures30d:       targetFailures,
+		TargetSLOBreaches30d:    targetBreaches,
+		TargetReservedCost30d:   targetReserved,
+		TargetChargedCost30d:    targetCharged,
+		AutoscaleActiveSlots:    metricInt64(autoscaler["active_slots"]),
+		AutoscaleDesiredSlots:   metricInt64(autoscaler["desired_slots"]),
+		AutoscaleBacklog:        metricInt64(autoscaler["backlog"]),
+		AutoscalePools:          pools,
+		AutoscaleBlockedPools:   blockedPools,
+		CapacityOpenActions:     metricInt64(actuator["open_actions"]),
+		CapacityProvisioning:    metricInt64(actuator["provisioning_instances"]),
+		CapacityActive:          metricInt64(actuator["active_instances"]),
+		CapacityDraining:        metricInt64(actuator["draining_instances"]),
+		CapacityDeleting:        metricInt64(actuator["deleting_instances"]),
+		LeaseAttemptRequeued:    metricInt64(leaseExpiries["attempt_requeued"]),
+		LeaseAttemptFailed:      metricInt64(leaseExpiries["attempt_failed"]),
+		LeaseAttemptCanceled:    metricInt64(leaseExpiries["attempt_canceled"]),
+		LeaseAdmissionRequeued:  metricInt64(leaseExpiries["admission_requeued"]),
+		LeaseAdmissionFailed:    metricInt64(leaseExpiries["admission_failed"]),
+		LeaseAdmissionCanceled:  metricInt64(leaseExpiries["admission_canceled"]),
+		LeasePhaseReclaimed:     metricInt64(leaseExpiries["phase_reclaimed"]),
+		ProjectionConfigured:    status["authority"] == "postgresql",
+		ProjectionSnapshotValid: metricBool(projection["valid"]),
+		ProjectionSourcePresent: metricBool(projection["source_watermark_present"]),
+		ProjectionLagSeconds:    metricInt64(projection["lag_seconds"]),
 	}
 }
 

@@ -116,15 +116,23 @@ func (r *JobRepository) ClaimPhaseWork(
 		if err != nil {
 			return err
 		}
-		if _, err := q.Exec(ctx, `
+		tag, err := q.Exec(ctx, `
 			UPDATE phase_work_items
 			SET state = 'ready', claim_owner = '', lease_expires_at = NULL,
 			    available_at = clock_timestamp(), updated_at = clock_timestamp(),
 			    ready_since = COALESCE(ready_since, clock_timestamp()),
 			    error = 'phase lease expired and was reclaimed'
 			WHERE state = 'claimed' AND lease_expires_at <= clock_timestamp()
-		`); err != nil {
+		`)
+		if err != nil {
 			return fmt.Errorf("recover expired phase work: %w", err)
+		}
+		if tag.RowsAffected() > 0 {
+			if err := recordLeaseExpiry(
+				ctx, q, "phase", "reclaimed", tag.RowsAffected(),
+			); err != nil {
+				return err
+			}
 		}
 
 		fairness, found, err := selectFairPhaseProject(

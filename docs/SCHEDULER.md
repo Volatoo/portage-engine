@@ -1,9 +1,10 @@
 # Scheduler fairness and autoscaling
 
-Schema v26 makes project fairness, catalog-derived capacity-pool demand,
-fenced capacity actions, pull-aware worker scoring, and the target-history
-read model part of the PostgreSQL authority. Redis remains a wake-up and
-presence accelerator and may be flushed without changing dispatch order.
+Schema v28 makes project fairness, catalog-derived capacity-pool demand,
+fenced capacity actions, pull-aware worker scoring, the target-history read
+model, and lease-recovery observability part of the PostgreSQL authority.
+Redis remains a wake-up and presence accelerator and may be flushed without
+changing dispatch order.
 
 ## Dispatch order
 
@@ -82,6 +83,31 @@ operator projection. The view is bounded to the 50 most active targets in the
 dashboard and Prometheus polling do not rescan it per request. Costs are
 internal estimates/settlements from the admission ledger, not provider-invoice
 reconciliation.
+
+The Monitor projection publishes two database-derived event-time watermarks.
+The source watermark is the latest `completed_at`/`updated_at` of a durable
+terminal job. The projected watermark is the latest of those same persisted
+source timestamps whose job is represented by `monitor_job_outcomes` in the
+cached snapshot. When the source is ahead,
+`lag_seconds = source_watermark - projected_watermark`: an event-time distance
+between two persisted timestamps. Before the first projected watermark exists,
+the fallback is `database_clock - source_watermark`. A caught-up projection and
+an empty source both report zero. `source_watermark_present` distinguishes the
+valid empty case. The cache refresh interval is 30 seconds; the checked-in
+warning threshold is more than 120 watermark seconds and must remain true for
+another two minutes. This is projection delay, not the age of the last build.
+
+Schema v28 also persists the fixed `attempt`/`admission` kind on each newly
+claimed scheduler lease and creates seven durable lease-expiry counters.
+Recovery updates the appropriate counter in the same transaction as the
+fenced state change:
+
+- `attempt` and `admission` leases use `requeued`, `failed`, or `canceled`;
+- phase-work leases use `reclaimed`.
+
+These totals begin when schema v28 is applied. The enum set is closed; job,
+package, project, pool, provider, worker, profile, and image identities are not
+metric labels.
 
 ## Project policy
 
@@ -233,6 +259,10 @@ autoscale state. Prometheus exposes:
 - `portage_monitor_target_slo_breaches_30d`
 - `portage_monitor_target_reserved_cost_microunits_30d`
 - `portage_monitor_target_charged_cost_microunits_30d`
+- `portage_scheduler_lease_expiries_total{lease,result}`
+- `portage_monitor_projection_snapshot_valid`
+- `portage_monitor_projection_source_watermark_present`
+- `portage_monitor_projection_lag_seconds`
 - `portage_scheduler_autoscale_active_slots`
 - `portage_scheduler_autoscale_desired_slots`
 - `portage_scheduler_autoscale_backlog`
@@ -247,6 +277,9 @@ autoscale state. Prometheus exposes:
 Package names, job IDs, project IDs, and capability strings are intentionally
 not metric labels. Use structured job/audit logs for high-cardinality
 explanations.
+
+Checked-in alert ownership, severity, threshold semantics, diagnostics, and
+drills are in [the observability runbooks](OBSERVABILITY_RUNBOOKS.md).
 
 ## Current limits
 

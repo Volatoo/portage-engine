@@ -69,6 +69,7 @@ func (r *JobRepository) ClaimNext(
 	if err != nil {
 		return nil, err
 	}
+	leaseKind := schedulerLeaseKind(capabilities)
 	var claim *builder.SchedulerClaim
 	err = r.db.WithTx(ctx, pgx.TxOptions{}, func(q Querier) error {
 		workerID, err := r.schedulerWorker(ctx, q, stableWorker, capabilities)
@@ -79,13 +80,24 @@ func (r *JobRepository) ClaimNext(
 		if _, err := r.recoverExpiredTx(ctx, q, schedulerRecoveryBatch); err != nil {
 			return err
 		}
-		claim, err = r.claimNextTx(ctx, q, workerID, stableWorker, leaseDuration)
+		claim, err = r.claimNextTx(
+			ctx, q, workerID, stableWorker, leaseKind, leaseDuration,
+		)
 		return err
 	})
 	if err != nil || claim != nil {
 		r.recordWrite(err)
 	}
 	return claim, err
+}
+
+func schedulerLeaseKind(capabilities []string) string {
+	for _, capability := range capabilities {
+		if capability == "worker-kind:admission" {
+			return "admission"
+		}
+	}
+	return "attempt"
 }
 
 type claimCandidate struct {
@@ -305,6 +317,7 @@ func (r *JobRepository) claimNextTx(
 	q Querier,
 	workerID uuid.UUID,
 	stableWorker string,
+	leaseKind string,
 	leaseDuration time.Duration,
 ) (*builder.SchedulerClaim, error) {
 	candidate, found, err := selectClaimCandidate(ctx, q, workerID)
@@ -325,7 +338,7 @@ func (r *JobRepository) claimNextTx(
 	}
 	claim, err := r.persistClaim(
 		ctx, q, candidate, resources, runtimeBudget,
-		workerID, stableWorker, leaseDuration, attemptNo, fenceToken,
+		workerID, stableWorker, leaseKind, leaseDuration, attemptNo, fenceToken,
 	)
 	if err != nil {
 		return nil, err
@@ -374,6 +387,7 @@ func (r *JobRepository) persistClaim(
 	runtimeBudget runtimeBudgetSpec,
 	workerID uuid.UUID,
 	stableWorker string,
+	leaseKind string,
 	leaseDuration time.Duration,
 	attemptNo int,
 	fenceToken int64,
@@ -415,13 +429,15 @@ func (r *JobRepository) persistClaim(
 	}
 	if _, err := q.Exec(ctx, `
 			INSERT INTO worker_leases (
-				id, worker_id, attempt_id, fence_token, expires_at, renewed_at, created_at
+				id, worker_id, attempt_id, fence_token, lease_kind,
+				expires_at, renewed_at, created_at
 			) VALUES (
-				$1, $2, $3, $4,
-				LEAST($5::timestamptz, $7::timestamptz),
-				$6::timestamptz, $6::timestamptz
+				$1, $2, $3, $4, $5,
+				LEAST($6::timestamptz, $8::timestamptz),
+				$7::timestamptz, $7::timestamptz
 			)
-		`, uuid.New(), workerID, attemptID, fenceToken, now.Add(leaseDuration), now,
+		`, uuid.New(), workerID, attemptID, fenceToken, leaseKind,
+		now.Add(leaseDuration), now,
 		now.Add(time.Duration(runtimeBudget.MaxRuntimeSeconds)*time.Second)); err != nil {
 		return nil, fmt.Errorf("insert worker lease: %w", err)
 	}
@@ -732,13 +748,15 @@ type expiredLeaseRow struct {
 	leaseID, attemptID, jobID uuid.UUID
 	attemptNo, maxAttempts    int
 	canceled                  bool
+	leaseKind                 string
 	statusJSON                []byte
 }
 
 func loadExpiredLeases(ctx context.Context, q Querier, limit int) ([]expiredLeaseRow, error) {
 	rows, err := q.Query(ctx, `
 		SELECT l.id, a.id, a.job_id, a.attempt_no, j.max_attempts,
-		       j.cancel_requested_at IS NOT NULL, j.status_snapshot
+		       j.cancel_requested_at IS NOT NULL, l.lease_kind,
+		       j.status_snapshot
 		FROM worker_leases l
 		JOIN build_attempts a ON a.id = l.attempt_id
 		JOIN build_jobs j ON j.id = a.job_id
@@ -757,7 +775,7 @@ func loadExpiredLeases(ctx context.Context, q Querier, limit int) ([]expiredLeas
 	for rows.Next() {
 		var row expiredLeaseRow
 		if err := rows.Scan(&row.leaseID, &row.attemptID, &row.jobID, &row.attemptNo,
-			&row.maxAttempts, &row.canceled, &row.statusJSON); err != nil {
+			&row.maxAttempts, &row.canceled, &row.leaseKind, &row.statusJSON); err != nil {
 			return nil, err
 		}
 		expired = append(expired, row)
@@ -766,6 +784,50 @@ func loadExpiredLeases(ctx context.Context, q Querier, limit int) ([]expiredLeas
 		return nil, err
 	}
 	return expired, nil
+}
+
+func leaseExpiryResult(state string) string {
+	switch state {
+	case "queued":
+		return "requeued"
+	case "failed", "canceled":
+		return state
+	default:
+		return ""
+	}
+}
+
+func recordLeaseExpiry(
+	ctx context.Context,
+	q Querier,
+	leaseKind, result string,
+	count int64,
+) error {
+	valid := (leaseKind == "attempt" || leaseKind == "admission") &&
+		(result == "requeued" || result == "failed" || result == "canceled")
+	valid = valid || (leaseKind == "phase" && result == "reclaimed")
+	if !valid || count <= 0 {
+		return fmt.Errorf(
+			"invalid lease expiry counter update kind=%q result=%q count=%d",
+			leaseKind, result, count,
+		)
+	}
+	tag, err := q.Exec(ctx, `
+		UPDATE scheduler_lease_expiry_counters
+		SET total = total + $3,
+		    last_occurred_at = clock_timestamp()
+		WHERE lease_kind = $1 AND result = $2
+	`, leaseKind, result, count)
+	if err != nil {
+		return fmt.Errorf("record lease expiry counter: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return fmt.Errorf(
+			"lease expiry counter is missing for kind=%q result=%q",
+			leaseKind, result,
+		)
+	}
+	return nil
 }
 
 func expiredLeaseOutcome(row expiredLeaseRow) (string, string) {
@@ -851,10 +913,15 @@ func (r *JobRepository) recoverExpiredLease(
 		`, row.jobID, state, string(snapshot), digest, reason, now, completedAt); err != nil {
 		return err
 	}
-	return r.insertJobEvent(ctx, q, row.jobID.String(), "job.lease_expired", map[string]any{
+	if err := r.insertJobEvent(ctx, q, row.jobID.String(), "job.lease_expired", map[string]any{
 		"attempt_id": row.attemptID, "attempt_no": row.attemptNo, "next_state": state,
-		"reason": reason,
-	})
+		"lease_kind": row.leaseKind, "reason": reason,
+	}); err != nil {
+		return err
+	}
+	return recordLeaseExpiry(
+		ctx, q, row.leaseKind, leaseExpiryResult(state), 1,
+	)
 }
 
 func (r *JobRepository) recoverExpiredTx(ctx context.Context, q Querier, limit int) (int, error) {
@@ -1295,6 +1362,10 @@ func (r *JobRepository) RuntimeStatus(ctx context.Context) (builder.SchedulerRun
 	if err != nil {
 		return status, fmt.Errorf("read scheduler runtime status: %w", err)
 	}
+	status.LeaseExpiries, err = readLeaseExpiryStatus(ctx, r.db.Pool())
+	if err != nil {
+		return status, err
+	}
 	status.Fairness, err = readFairnessRuntimeStatus(ctx, r.db.Pool())
 	if err != nil {
 		return status, err
@@ -1310,6 +1381,50 @@ func (r *JobRepository) RuntimeStatus(ctx context.Context) (builder.SchedulerRun
 	status.Autoscaler, err = readAutoscaleRuntimeStatus(ctx, r.db.Pool())
 	if err != nil {
 		return status, err
+	}
+	return status, nil
+}
+
+func readLeaseExpiryStatus(
+	ctx context.Context,
+	q Querier,
+) (builder.LeaseExpiryStatus, error) {
+	var status builder.LeaseExpiryStatus
+	err := q.QueryRow(ctx, `
+		SELECT
+		  COALESCE(sum(total) FILTER (
+		    WHERE lease_kind = 'attempt' AND result = 'requeued'
+		  ), 0),
+		  COALESCE(sum(total) FILTER (
+		    WHERE lease_kind = 'attempt' AND result = 'failed'
+		  ), 0),
+		  COALESCE(sum(total) FILTER (
+		    WHERE lease_kind = 'attempt' AND result = 'canceled'
+		  ), 0),
+		  COALESCE(sum(total) FILTER (
+		    WHERE lease_kind = 'admission' AND result = 'requeued'
+		  ), 0),
+		  COALESCE(sum(total) FILTER (
+		    WHERE lease_kind = 'admission' AND result = 'failed'
+		  ), 0),
+		  COALESCE(sum(total) FILTER (
+		    WHERE lease_kind = 'admission' AND result = 'canceled'
+		  ), 0),
+		  COALESCE(sum(total) FILTER (
+		    WHERE lease_kind = 'phase' AND result = 'reclaimed'
+		  ), 0)
+		FROM scheduler_lease_expiry_counters
+	`).Scan(
+		&status.AttemptRequeued,
+		&status.AttemptFailed,
+		&status.AttemptCanceled,
+		&status.AdmissionRequeued,
+		&status.AdmissionFailed,
+		&status.AdmissionCanceled,
+		&status.PhaseReclaimed,
+	)
+	if err != nil {
+		return status, fmt.Errorf("read lease expiry counters: %w", err)
 	}
 	return status, nil
 }

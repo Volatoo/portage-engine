@@ -580,6 +580,7 @@ var I18N = {
     'mon.scheduler.workers': '活跃执行槽 ', 'mon.scheduler.capability': '能力执行槽 ',
     'mon.scheduler.stale': '过期执行槽 ',
     'mon.scheduler.attempts': '最近一小时尝试 ',
+    'mon.scheduler.lease.expiry': '租约过期 尝试重排/失败/取消 · 准入重排/失败/取消 · 阶段回收 ',
     'mon.scheduler.fair.projects': '公平队列项目 ',
     'mon.scheduler.fair.starved': '反饥饿提升 ',
     'mon.scheduler.fair.dispatches': '公平派发 准入/阶段 ',
@@ -605,6 +606,14 @@ var I18N = {
     'mon.targets.cost': '预留/结算成本 ',
     'mon.targets.failure': '主要失败分类 ',
     'mon.targets.insufficient': '样本不足',
+    'mon.targets.projection': 'Monitor 投影 ',
+    'mon.targets.projection.current': '已追平',
+    'mon.targets.projection.empty': '事实源为空',
+    'mon.targets.projection.lagging': '落后',
+    'mon.targets.projection.invalid': '无效',
+    'mon.targets.projection.lag': '延迟/告警阈值 ',
+    'mon.targets.projection.source': '事实源 watermark ',
+    'mon.targets.projection.snapshot': '快照 watermark ',
     'mon.gateway': 'Worker Gateway', 'mon.gateway.mtls': '出站拉取与短期 mTLS 身份',
     'mon.gateway.enabled': '已启用', 'mon.gateway.disabled': '兼容模式',
     'mon.gateway.connected': '已连接 ', 'mon.gateway.registered': '已登记 ',
@@ -2065,16 +2074,21 @@ async function load() {
   } catch (e) { showError('ledger-error', e); }
   try {
     var scheduler = await api('/api/scheduler/status');
+    var history = scheduler.target_history || {};
+    var projection = history.projection || {};
+    var projectionThreshold = projection.alert_threshold_seconds || 120;
+    var projectionBad = projection.valid === false ||
+      (projection.lag_seconds || 0) > projectionThreshold;
     var schedulerGrid = document.getElementById('scheduler');
     clear(schedulerGrid); clear(document.getElementById('scheduler-error'));
     var schedulerCard = el('article', 'builder-card');
     schedulerCard.appendChild(el('h3', null, t('mon.scheduler.pg', 'PostgreSQL queue and leases')));
-    var schedulerBadge = statusBadge(
+    var schedulerDegraded =
       scheduler.healthy === false ||
       (scheduler.expired_leases || 0) > 0 ||
-      (scheduler.unschedulable_tasks || 0) > 0 ? 'failed' : 'passed'
-    );
-    schedulerBadge.lastChild.textContent = scheduler.healthy === false
+      (scheduler.unschedulable_tasks || 0) > 0 || projectionBad;
+    var schedulerBadge = statusBadge(schedulerDegraded ? 'failed' : 'passed');
+    schedulerBadge.lastChild.textContent = schedulerDegraded
       ? t('mon.scheduler.degraded', 'degraded')
       : t('mon.scheduler.healthy', 'healthy');
     schedulerCard.appendChild(schedulerBadge);
@@ -2088,6 +2102,41 @@ async function load() {
     schedulerMeta.appendChild(el('span', null, t('mon.scheduler.capability', 'capability slots ') + (scheduler.capability_workers || 0)));
     schedulerMeta.appendChild(el('span', null, t('mon.scheduler.stale', 'stale slots ') + (scheduler.stale_workers || 0)));
     schedulerMeta.appendChild(el('span', null, t('mon.scheduler.attempts', 'attempts last hour ') + (scheduler.attempts_last_hour || 0)));
+    var leaseExpiries = scheduler.lease_expiries || {};
+    schedulerMeta.appendChild(el('span', null,
+      t('mon.scheduler.lease.expiry',
+        'lease expiry attempt requeued/failed/canceled · admission requeued/failed/canceled · phase reclaimed ') +
+      (leaseExpiries.attempt_requeued || 0) + '/' +
+      (leaseExpiries.attempt_failed || 0) + '/' +
+      (leaseExpiries.attempt_canceled || 0) + ' · ' +
+      (leaseExpiries.admission_requeued || 0) + '/' +
+      (leaseExpiries.admission_failed || 0) + '/' +
+      (leaseExpiries.admission_canceled || 0) + ' · ' +
+      (leaseExpiries.phase_reclaimed || 0)));
+    if (Object.keys(projection).length) {
+      var projectionStateLabels = {
+        current: t('mon.targets.projection.current', 'current'),
+        empty: t('mon.targets.projection.empty', 'source empty'),
+        lagging: t('mon.targets.projection.lagging', 'lagging'),
+        invalid: t('mon.targets.projection.invalid', 'invalid')
+      };
+      schedulerMeta.appendChild(el('span', null,
+        t('mon.targets.projection', 'Monitor projection ') +
+        (projectionStateLabels[projection.state] || projection.state || 'unknown')));
+      schedulerMeta.appendChild(el('span', null,
+        t('mon.targets.projection.lag', 'lag / alert threshold ') +
+        (projection.lag_seconds || 0) + '/' + projectionThreshold + 's'));
+      if (projection.source_watermark_at) {
+        schedulerMeta.appendChild(el('span', null,
+          t('mon.targets.projection.source', 'source watermark ') +
+          fmtTime(projection.source_watermark_at)));
+      }
+      if (projection.projected_watermark_at) {
+        schedulerMeta.appendChild(el('span', null,
+          t('mon.targets.projection.snapshot', 'snapshot watermark ') +
+          fmtTime(projection.projected_watermark_at)));
+      }
+    }
     var fairness = scheduler.fairness || {};
     schedulerMeta.appendChild(el('span', null,
       t('mon.scheduler.fair.projects', 'fair-queue projects ') +
@@ -2193,7 +2242,6 @@ async function load() {
       });
     schedulerCard.appendChild(schedulerMeta);
     schedulerGrid.appendChild(schedulerCard);
-    var history = scheduler.target_history || {};
     var targets = Array.isArray(history.targets) ? history.targets : [];
     var historyGrid = document.getElementById('target-history');
     var historyEmpty = document.getElementById('target-history-empty');

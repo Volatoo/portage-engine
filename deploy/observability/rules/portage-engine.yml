@@ -6,18 +6,22 @@ groups:
         for: 2m
         labels:
           severity: critical
+          owner: platform-operations
         annotations:
           summary: Portage Engine metrics target is unavailable
           description: The control-plane metrics endpoint has failed for two minutes.
+          runbook_url: https://github.com/slchris/portage-engine/blob/main/docs/OBSERVABILITY_RUNBOOKS.md#portageenginemetricstargetdown
 
       - alert: PortageEngineStorageErrors
         expr: increase(portage_storage_errors_total[10m]) > 0
         for: 2m
         labels:
           severity: critical
+          owner: platform-operations
         annotations:
           summary: Portage Engine observed artifact storage errors
           description: Publication/read authority errors occurred during the last ten minutes.
+          runbook_url: https://github.com/slchris/portage-engine/blob/main/docs/OBSERVABILITY_RUNBOOKS.md#portageenginestorageerrors
 
   - name: portage-engine-scheduler
     rules:
@@ -26,33 +30,74 @@ groups:
         for: 15m
         labels:
           severity: warning
+          owner: platform-operations
         annotations:
           summary: Portage Engine queue is not draining
           description: At least one durable build has remained queued for fifteen minutes.
+          runbook_url: https://github.com/slchris/portage-engine/blob/main/docs/OBSERVABILITY_RUNBOOKS.md#portageenginequeuebacklog
 
       - alert: PortageEngineUnschedulableBuilds
         expr: portage_scheduler_unschedulable_tasks > 0
         for: 10m
         labels:
           severity: warning
+          owner: platform-operations
         annotations:
           summary: Builds have no exact-capability executor
           description: Check profile/image/provider/zone labels and persistent executor capacity.
+          runbook_url: https://github.com/slchris/portage-engine/blob/main/docs/OBSERVABILITY_RUNBOOKS.md#portageengineunschedulablebuilds
 
       - alert: PortageEngineCapacityProvisioningStuck
         expr: portage_capacity_instances_provisioning > 0
         for: 30m
         labels:
           severity: warning
+          owner: platform-operations
         annotations:
           summary: Persistent executor provisioning has not completed
           description: Review actuator action fences, provider state, and exact worker heartbeat.
+          runbook_url: https://github.com/slchris/portage-engine/blob/main/docs/OBSERVABILITY_RUNBOOKS.md#portageenginecapacityprovisioningstuck
 
       - alert: PortageEngineTargetSLOBreach
         expr: portage_monitor_target_slo_breaches_30d > 0
         for: 15m
         labels:
           severity: warning
+          owner: platform-operations
         annotations:
           summary: A target is below the configured 30-day SLO
           description: Use the authenticated Monitor to identify the target and failure class.
+          runbook_url: https://github.com/slchris/portage-engine/blob/main/docs/OBSERVABILITY_RUNBOOKS.md#portageenginetargetslobreach
+
+      - alert: PortageEngineLeaseExpiry
+        expr: sum by (lease, result) (increase(portage_scheduler_lease_expiries_total[10m])) > 0
+        for: 2m
+        labels:
+          severity: warning
+          owner: platform-operations
+        annotations:
+          summary: A durable scheduler lease expired
+          description: Lease {{ $labels.lease }} produced recovery result {{ $labels.result }} during the last ten minutes.
+          runbook_url: https://github.com/slchris/portage-engine/blob/main/docs/OBSERVABILITY_RUNBOOKS.md#portageengineleaseexpiry
+
+      - alert: PortageEngineMonitorProjectionLag
+        expr: portage_monitor_projection_snapshot_valid == 1 and portage_monitor_projection_source_watermark_present == 1 and portage_monitor_projection_lag_seconds > 120
+        for: 2m
+        labels:
+          severity: warning
+          owner: platform-operations
+        annotations:
+          summary: Monitor projection is behind durable terminal events
+          description: The durable terminal source watermark is more than 120 event-time seconds ahead of the cached Monitor projection watermark.
+          runbook_url: https://github.com/slchris/portage-engine/blob/main/docs/OBSERVABILITY_RUNBOOKS.md#portageenginemonitorprojectionlag
+
+      - alert: PortageEngineMonitorProjectionUnavailable
+        expr: portage_monitor_projection_snapshot_valid == 0
+        for: 5m
+        labels:
+          severity: critical
+          owner: platform-operations
+        annotations:
+          summary: Monitor projection snapshot is invalid
+          description: PostgreSQL authority is configured but the Monitor projection snapshot has been invalid for five minutes.
+          runbook_url: https://github.com/slchris/portage-engine/blob/main/docs/OBSERVABILITY_RUNBOOKS.md#portageenginemonitorprojectionunavailable

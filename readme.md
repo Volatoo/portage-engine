@@ -183,7 +183,7 @@ Compose does not start package builders or mount the host Docker socket. It
 does start the control plane plus its local PostgreSQL, Redis and observability
 foundation. PostgreSQL/Redis metrics and current process logs are collected
 now; shared process log files rotate at 10 MiB with one backup and Docker JSON
-logs are capped separately. Schema v26 makes PostgreSQL the sole online job,
+logs are capped separately. Schema v28 makes PostgreSQL the sole online job,
 infrastructure-cleanup, signing-task, external-subject and project-membership
 authority, including versioned project admission policy and active-attempt
 resource/phase/artifact/runtime reservations, phase execution context and
@@ -310,6 +310,7 @@ logs containing secrets.
 - [Using the binhost and requesting builds](docs/USAGE.md)
 - [Federated identity and project RBAC](docs/IAM.md)
 - [Scheduler fairness and autoscaling](docs/SCHEDULER.md)
+- [Observability alert runbooks and drills](docs/OBSERVABILITY_RUNBOOKS.md)
 - [Authentik, Google, GitHub, and generic OIDC providers](docs/IDENTITY_PROVIDERS.md)
 - [Policy-validated Portage configuration](docs/SYSTEM_CONFIG_USAGE.md)
 - [PVE native Gentoo deployment and testing](docs/PVE_TESTING.md)

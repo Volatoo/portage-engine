@@ -84,6 +84,31 @@ func TestNew(t *testing.T) {
 	}
 }
 
+func TestSchedulerMetricsSnapshotUsesOnlyBoundedObservabilityFields(t *testing.T) {
+	snapshot := schedulerMetricsSnapshotFromStatus(map[string]any{
+		"authority": "postgresql",
+		"lease_expiries": map[string]any{
+			"attempt_requeued": 3, "attempt_failed": 2,
+			"attempt_canceled": 1, "admission_requeued": 4,
+			"admission_failed": 2, "admission_canceled": 1,
+			"phase_reclaimed": 5,
+			"job_id":          "must-not-be-exported", "provider": "must-not-be-exported",
+		},
+		"target_history": map[string]any{
+			"projection": map[string]any{
+				"valid": true, "source_watermark_present": true,
+				"lag_seconds": 37, "project_id": "must-not-be-exported",
+			},
+		},
+	})
+	if snapshot.LeaseAttemptRequeued != 3 || snapshot.LeaseAttemptFailed != 2 ||
+		snapshot.LeaseAdmissionRequeued != 4 || snapshot.LeasePhaseReclaimed != 5 ||
+		!snapshot.ProjectionConfigured || !snapshot.ProjectionSnapshotValid ||
+		!snapshot.ProjectionSourcePresent || snapshot.ProjectionLagSeconds != 37 {
+		t.Fatalf("scheduler metric snapshot=%+v", snapshot)
+	}
+}
+
 func TestCatalogBinhostStoresAndInventory(t *testing.T) {
 	root := t.TempDir()
 	cfg := &config.ServerConfig{

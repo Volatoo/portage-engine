@@ -290,6 +290,15 @@ func TestPostgresMigrationTransactionAndCompatibility(t *testing.T) {
 		t.Fatalf("last project owner removal was not rejected: %v", err)
 	}
 
+	emptyRuntime, err := persistence.NewJobRepository(db).RuntimeStatus(ctx)
+	if err != nil || !emptyRuntime.TargetHistory.Projection.Valid ||
+		emptyRuntime.TargetHistory.Projection.State != "empty" ||
+		emptyRuntime.TargetHistory.Projection.SourceWatermarkPresent ||
+		emptyRuntime.TargetHistory.Projection.LagSeconds != 0 ||
+		emptyRuntime.LeaseExpiries != (builder.LeaseExpiryStatus{}) {
+		t.Fatalf("empty scheduler observability snapshot=%+v err=%v", emptyRuntime, err)
+	}
+
 	jobRepo := persistence.NewJobRepository(db)
 	now := time.Now().UTC()
 	iamJobID := uuid.NewString()
@@ -1524,6 +1533,25 @@ func TestProjectResourceAndArtifactMigrationsRequireDrainedAttempts(t *testing.T
 		deviceTable != "iam_device_authorizations" {
 		t.Fatalf("device-authorization table=%q err=%v", deviceTable, err)
 	}
+	if _, err := runner.Provider().UpTo(ctx, 28); err != nil {
+		t.Fatalf("schema v28 lease/projection observability migration failed: %v", err)
+	}
+	if version, err := runner.Provider().GetDBVersion(ctx); err != nil ||
+		version != 28 {
+		t.Fatalf("lease/projection observability migration version=%d err=%v", version, err)
+	}
+	var countersTable string
+	var counterKeys int
+	if err := fixture.QueryRow(ctx, `
+		SELECT to_regclass('scheduler_lease_expiry_counters')::text,
+		       (SELECT count(*) FROM scheduler_lease_expiry_counters)
+	`).Scan(&countersTable, &counterKeys); err != nil ||
+		countersTable != "scheduler_lease_expiry_counters" || counterKeys != 7 {
+		t.Fatalf(
+			"lease expiry counters table=%q keys=%d err=%v",
+			countersTable, counterKeys, err,
+		)
+	}
 }
 
 func testDurableWorkerGatewaySpool(
@@ -2201,10 +2229,17 @@ func testExecutorCapabilityRouting(
 		)
 	}
 	schedulerClaim, err := jobRepo.ClaimNext(
-		ctx, "capability-admission-exact", time.Minute, exactCapabilities,
+		ctx, "capability-admission-exact", time.Minute,
+		append(exactCapabilities, "worker-kind:admission"),
 	)
 	if err != nil || schedulerClaim == nil || schedulerClaim.Status.JobID != status.JobID {
 		t.Fatalf("exact executor did not admit job: claim=%+v err=%v", schedulerClaim, err)
+	}
+	var leaseKind string
+	if err := db.Pool().QueryRow(ctx, `
+		SELECT lease_kind FROM worker_leases WHERE attempt_id = $1
+	`, schedulerClaim.Status.AttemptID).Scan(&leaseKind); err != nil || leaseKind != "admission" {
+		t.Fatalf("persisted scheduler lease kind=%q err=%v", leaseKind, err)
 	}
 	if err := jobRepo.ActivatePhasePlan(ctx, schedulerClaim.Status); err != nil {
 		t.Fatal(err)
@@ -2366,6 +2401,10 @@ func testDurablePhaseWorkQueue(
 			reclaimed, first, err, workState, workExpires, reservationPhase,
 			attemptLease, diagErr,
 		)
+	}
+	runtime, err := jobRepo.RuntimeStatus(ctx)
+	if err != nil || runtime.LeaseExpiries.PhaseReclaimed < 1 {
+		t.Fatalf("phase lease expiry snapshot=%+v err=%v", runtime.LeaseExpiries, err)
 	}
 	if err := jobRepo.CompletePhaseWork(ctx, first); err == nil ||
 		!strings.Contains(err.Error(), "lock claimed phase work") {
@@ -3129,6 +3168,10 @@ func testDurableScheduler(t *testing.T, ctx context.Context, db *persistence.Dat
 	}
 	if attempts != 3 || leases != 0 || leaseExpiredEvents != 1 {
 		t.Fatalf("attempts=%d leases=%d lease_expired_events=%d", attempts, leases, leaseExpiredEvents)
+	}
+	runtime, err := repo.RuntimeStatus(ctx)
+	if err != nil || runtime.LeaseExpiries.AttemptRequeued < 1 {
+		t.Fatalf("lease expiry snapshot=%+v err=%v", runtime.LeaseExpiries, err)
 	}
 
 	testConcurrentClaims(t, ctx, db, repo, now.Add(2*time.Hour))

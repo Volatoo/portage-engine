@@ -90,7 +90,7 @@ jq -e '
   .checks.database.enabled == true and
   .checks.database.required == true and
   .checks.database.ok == true and
-  .checks.database.schema_version == 26 and
+  .checks.database.schema_version == 28 and
   .checks.job_ledger.enabled == true and
   .checks.job_ledger.ok == true and
   .checks.job_ledger.authority == "postgresql" and
@@ -136,9 +136,10 @@ app_db_check="$(
      SELECT has_table_privilege(current_user, 'public.scheduler_capacity_actions', 'SELECT,INSERT,UPDATE,DELETE');
      SELECT has_table_privilege(current_user, 'public.scheduler_capacity_instances', 'SELECT,INSERT,UPDATE,DELETE');
      SELECT has_table_privilege(current_user, 'public.scheduler_worker_decisions', 'SELECT,INSERT,UPDATE,DELETE');
-     SELECT has_table_privilege(current_user, 'public.monitor_job_outcomes', 'SELECT');"
+     SELECT has_table_privilege(current_user, 'public.monitor_job_outcomes', 'SELECT');
+     SELECT has_table_privilege(current_user, 'public.scheduler_lease_expiry_counters', 'SELECT,INSERT,UPDATE,DELETE');"
 )"
-if [[ "${app_db_check}" != $'26\nf\nt\nt\nt\nt\nt\nt\nt\nt\nt\nt\nt\nt' ]]; then
+if [[ "${app_db_check}" != $'28\nf\nt\nt\nt\nt\nt\nt\nt\nt\nt\nt\nt\nt\nt' ]]; then
   echo "PostgreSQL application-role contract failed: ${app_db_check}" >&2
   exit 1
 fi
@@ -153,7 +154,7 @@ signer_db_check="$(
      SELECT has_table_privilege(current_user, 'public.iam_sessions', 'SELECT');
      SELECT has_table_privilege(current_user, 'public.iam_logout_events', 'SELECT');"
 )"
-if [[ "${signer_db_check}" != $'26\nf\nt\nf\nf\nf' ]]; then
+if [[ "${signer_db_check}" != $'28\nf\nt\nf\nf\nf' ]]; then
   echo "PostgreSQL signer-role contract failed: ${signer_db_check}" >&2
   exit 1
 fi
@@ -169,7 +170,7 @@ actuator_db_check="$(
      SELECT has_table_privilege(current_user, 'public.workers', 'INSERT');
      SELECT has_table_privilege(current_user, 'public.worker_leases', 'UPDATE');"
 )"
-if [[ "${actuator_db_check}" != $'26\nf\nt\nt\nt\nf\nf' ]]; then
+if [[ "${actuator_db_check}" != $'28\nf\nt\nt\nt\nf\nf' ]]; then
   echo "PostgreSQL actuator-role contract failed: ${actuator_db_check}" >&2
   exit 1
 fi
@@ -349,6 +350,12 @@ jq -e '
   .fairness.enabled == true and .fairness.eligible_projects >= 0 and
   .fairness.starved_projects >= 0 and
   .fairness.admission_dispatches >= 0 and .fairness.phase_dispatches >= 0 and
+  .lease_expiries.attempt_requeued >= 0 and
+  .lease_expiries.admission_requeued >= 0 and
+  .lease_expiries.phase_reclaimed >= 0 and
+  .target_history.projection.valid == true and
+  .target_history.projection.lag_seconds >= 0 and
+  .target_history.projection.alert_threshold_seconds == 120 and
   (.autoscaler.mode == "off" or .autoscaler.mode == "observe") and
   (.autoscaler.recommendation == "off" or
    .autoscaler.recommendation == "hold" or
@@ -361,6 +368,10 @@ scheduler_metrics="$(
 )"
 grep -q '^portage_scheduler_fair_eligible_projects ' <<<"${scheduler_metrics}"
 grep -q '^portage_scheduler_autoscale_desired_slots ' <<<"${scheduler_metrics}"
+grep -q '^portage_scheduler_lease_expiries_total{lease="attempt",result="requeued"} ' <<<"${scheduler_metrics}"
+grep -q '^portage_scheduler_lease_expiries_total{lease="phase",result="reclaimed"} ' <<<"${scheduler_metrics}"
+grep -q '^portage_monitor_projection_snapshot_valid 1$' <<<"${scheduler_metrics}"
+grep -q '^portage_monitor_projection_lag_seconds ' <<<"${scheduler_metrics}"
 
 sse_ready="$(
   curl_server -sN --max-time 2 "http://127.0.0.1:${server_port}/api/v1/events/jobs" 2>/dev/null || true
@@ -467,7 +478,7 @@ fi
 printf '%s\n' \
   "Compose verification passed." \
   "  endpoints: server dashboard grafana loki tempo otel prometheus" \
-  "  state: PostgreSQL schema v27 sole authority + one-time CLI device authorization + target history/SLO/cost projection + weighted fair scheduling/anti-starvation + explainable worker soft scoring + capability/provider-pool observations + fenced capacity action/ownership/drain ledger + workload issuer/certificate lifecycle + exact executor capability routing + multi-provider token exchange/back-channel replay protection + session revocation + administrator step-up + active phase hand-off context + durable worker sessions/commands/uploads + IAM/project RBAC/resource + phase work/fences + phase caps + runtime/cloud-cost/artifact budgets + abuse cooldown + scheduler/logs/metadata/infra-cleanup/signing leases/executor fence" \
+  "  state: PostgreSQL schema v28 sole authority + one-time CLI device authorization + low-cardinality lease expiry/projection lag observability + target history/SLO/cost projection + weighted fair scheduling/anti-starvation + explainable worker soft scoring + capability/provider-pool observations + fenced capacity action/ownership/drain ledger + workload issuer/certificate lifecycle + exact executor capability routing + multi-provider token exchange/back-channel replay protection + session revocation + administrator step-up + active phase hand-off context + durable worker sessions/commands/uploads + IAM/project RBAC/resource + phase work/fences + phase caps + runtime/cloud-cost/artifact budgets + abuse cooldown + scheduler/logs/metadata/infra-cleanup/signing leases/executor fence" \
   "  signing: isolated outbound-pull signer + least-privilege role + server has public key only" \
   "  capacity: opt-in listener-free actuator + dedicated least-privilege DB role + exact PVE identity/drain/absence fences" \
   "  binhost: official-style per-profile namespace + independently generated Packages index" \

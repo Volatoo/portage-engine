@@ -24,6 +24,12 @@ func TestPrometheusSchedulerSnapshot(t *testing.T) {
 			AutoscalePools: 3, AutoscaleBlockedPools: 1,
 			CapacityOpenActions: 2, CapacityProvisioning: 1,
 			CapacityActive: 4, CapacityDraining: 1, CapacityDeleting: 1,
+			LeaseAttemptRequeued: 3, LeaseAttemptFailed: 2,
+			LeaseAttemptCanceled: 1, LeaseAdmissionRequeued: 4,
+			LeaseAdmissionFailed: 2, LeaseAdmissionCanceled: 1,
+			LeasePhaseReclaimed:  5,
+			ProjectionConfigured: true, ProjectionSnapshotValid: true,
+			ProjectionSourcePresent: true, ProjectionLagSeconds: 37,
 		}
 	})
 	request := httptest.NewRequest(
@@ -55,10 +61,50 @@ func TestPrometheusSchedulerSnapshot(t *testing.T) {
 		"portage_capacity_instances_active 4",
 		"portage_capacity_instances_draining 1",
 		"portage_capacity_instances_deleting 1",
+		`portage_scheduler_lease_expiries_total{lease="attempt",result="requeued"} 3`,
+		`portage_scheduler_lease_expiries_total{lease="attempt",result="failed"} 2`,
+		`portage_scheduler_lease_expiries_total{lease="attempt",result="canceled"} 1`,
+		`portage_scheduler_lease_expiries_total{lease="admission",result="requeued"} 4`,
+		`portage_scheduler_lease_expiries_total{lease="admission",result="failed"} 2`,
+		`portage_scheduler_lease_expiries_total{lease="admission",result="canceled"} 1`,
+		`portage_scheduler_lease_expiries_total{lease="phase",result="reclaimed"} 5`,
+		"portage_monitor_projection_snapshot_valid 1",
+		"portage_monitor_projection_source_watermark_present 1",
+		"portage_monitor_projection_lag_seconds 37",
 	} {
 		if !strings.Contains(body, expected) {
 			t.Fatalf("prometheus body missing %q", expected)
 		}
+	}
+	leaseSeries := 0
+	for _, line := range strings.Split(body, "\n") {
+		if !strings.HasPrefix(line, "portage_scheduler_lease_expiries_total{") {
+			continue
+		}
+		leaseSeries++
+		for _, forbidden := range []string{
+			"job=", "package=", "project=", "pool=", "provider=", "worker=",
+		} {
+			if strings.Contains(line, forbidden) {
+				t.Fatalf("lease expiry series contains high-cardinality label %q: %s", forbidden, line)
+			}
+		}
+	}
+	if leaseSeries != 7 {
+		t.Fatalf("lease expiry metric series=%d, want fixed cardinality 7", leaseSeries)
+	}
+}
+
+func TestPrometheusOmitsProjectionMetricsWithoutPostgreSQLSnapshot(t *testing.T) {
+	m := New(&Config{Enabled: true})
+	m.SetSchedulerProvider(func() SchedulerSnapshot {
+		return SchedulerSnapshot{}
+	})
+	request := httptest.NewRequest(http.MethodGet, "/metrics/prometheus", nil)
+	response := httptest.NewRecorder()
+	m.PrometheusHandler().ServeHTTP(response, request)
+	if strings.Contains(response.Body.String(), "portage_monitor_projection_") {
+		t.Fatalf("projection metrics were emitted without PostgreSQL authority: %s", response.Body.String())
 	}
 }
 
