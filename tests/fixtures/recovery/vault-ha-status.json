@@ -1,0 +1,7 @@
+{
+  "initialized": true,
+  "sealed": false,
+  "standby": false,
+  "storage_type": "raft",
+  "ha_enabled": true
+}

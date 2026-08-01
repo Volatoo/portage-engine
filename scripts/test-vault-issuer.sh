@@ -3,8 +3,11 @@
 
 set -euo pipefail
 
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly script_dir
 readonly vault_image="${VAULT_TEST_IMAGE:-hashicorp/vault:2.0.3@sha256:a296a888b118615dc01d5f1a6846e6d4a7277946caaed5b447008fff5fe06b54}"
-readonly test_root="$(mktemp -d "${TMPDIR:-/tmp}/portage-vault-test.XXXXXX")"
+test_root="$(mktemp -d "${TMPDIR:-/tmp}/portage-vault-test.XXXXXX")"
+readonly test_root
 readonly container_name="portage-vault-test-$$"
 readonly tls_dir="${test_root}/tls"
 readonly token_file="${test_root}/vault-token"
@@ -52,7 +55,8 @@ for _ in $(seq 1 60); do
 done
 vault_exec status >/dev/null
 
-readonly published_port="$(docker port "${container_name}" 8200/tcp | sed -E 's/.*:([0-9]+)$/\1/')"
+published_port="$(docker port "${container_name}" 8200/tcp | sed -E 's/.*:([0-9]+)$/\1/')"
+readonly published_port
 readonly vault_address="https://127.0.0.1:${published_port}"
 
 vault_exec secrets enable -path=pki_workers pki >/dev/null
@@ -60,11 +64,19 @@ vault_exec secrets tune -max-lease-ttl=8760h pki_workers >/dev/null
 vault_exec write pki_workers/root/generate/internal \
     common_name=portage-worker-integration-root-1 ttl=8760h >/dev/null
 vault_exec write pki_workers/roles/portage-worker \
-    allow_any_name=true enforce_hostnames=false \
+    allow_any_name=false allow_bare_domains=true allow_glob_domains=false \
+    allow_subdomains=false allowed_domains=portage-worker enforce_hostnames=false \
     allowed_uri_sans='spiffe://portage-engine/*' \
     use_csr_common_name=true use_csr_sans=true \
     server_flag=false client_flag=true code_signing_flag=false \
-    key_type=any ttl=3h max_ttl=24h >/dev/null
+    email_protection_flag=false key_type=ed25519 \
+    ttl=3h max_ttl=24h >/dev/null
+vault_exec read -format=json pki_workers/roles/portage-worker \
+    >"${test_root}/minimal-role.json"
+python3 "${script_dir}/recovery/validate.py" vault-role \
+    --file "${test_root}/minimal-role.json" \
+    --allowed-common-name portage-worker \
+    --allowed-uri-san 'spiffe://portage-engine/*' >/dev/null
 
 printf '%s\n' \
     'path "pki_workers/sign/portage-worker" {' \
@@ -92,11 +104,12 @@ run_gate() {
 
 run_gate "${old_ca}" false true
 
-readonly new_issuer_id="$(
+new_issuer_id="$(
     vault_exec write -field=issuer_id \
         pki_workers/issuers/generate/root/internal \
         common_name=portage-worker-integration-root-2 ttl=8760h
 )"
+readonly new_issuer_id
 vault_exec write pki_workers/config/issuers \
     default="${new_issuer_id}" default_follows_latest_issuer=false >/dev/null
 vault_exec read -field=certificate \

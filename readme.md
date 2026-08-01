@@ -83,6 +83,9 @@ static and real-host evidence Gates; missing production credentials are
 reported as `not_run`, never passed.
 The immutable adapter, key layout, role-specific permissions, and local MinIO
 Gate are documented in [Object storage contract](docs/OBJECT_STORAGE.md).
+The staged, fail-closed Vault/PostgreSQL/object-storage/signer recovery harness
+and its machine-readable evidence contract are documented in
+[Public Beta recovery Gate](docs/PUBLIC_BETA_RECOVERY.md).
 The anonymous HTTP contract is published as
 [OpenAPI 3.1](docs/openapi.yaml). Compatibility and community operations are
 covered by [the compatibility policy](docs/COMPATIBILITY.md),
@@ -232,6 +235,11 @@ Create a logical backup and prove it restores into an isolated database:
 
 ```bash
 scripts/postgres-backup.sh /mnt/portage-nas/postgres/portage-engine.dump
+export PORTAGE_DRILL_TARGET='local-logical-restore-drill'
+export PORTAGE_DRILL_OWNER='operator@example.com'
+export PORTAGE_DRILL_ISOLATED=true
+export PORTAGE_DRILL_CONFIRM=RUN_PUBLIC_BETA_RECOVERY_DRILL
+export PORTAGE_DRILL_DESTRUCTIVE_CONFIRM=DESTROY_ISOLATED_DRILL_TARGET_ONLY
 scripts/postgres-restore-check.sh /mnt/portage-nas/postgres/portage-engine.dump
 ```
 
@@ -245,7 +253,9 @@ export PORTAGE_PGBACKREST_REPO=/mnt/portage-nas/postgres/pgbackrest
 docker compose -f docker-compose.yml -f docker-compose.pgbackrest.yml up -d postgres
 scripts/pgbackrest-init.sh
 scripts/pgbackrest-backup.sh full
-scripts/pgbackrest-restore-drill.sh
+# Use docs/PUBLIC_BETA_RECOVERY.md to create a durable marker and supply the
+# explicit isolated-target, RPO/RTO and PITR target inputs before restoring.
+scripts/public-beta-recovery-drill.sh postgres
 ```
 
 ## Deployment and security

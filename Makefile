@@ -1,4 +1,4 @@
-.PHONY: all build clean test test-release run-server run-dashboard run-builder run-client build-image-factory build-desktop-runner build-migrate build-signer build-capacity-actuator build-persistent-executor-template test-persistent-executor-gate lint lint-security lint-complexity
+.PHONY: all build clean test test-release test-recovery run-server run-dashboard run-builder run-client build-image-factory build-desktop-runner build-migrate build-signer build-capacity-actuator build-persistent-executor-template test-persistent-executor-gate lint lint-security lint-complexity
 
 # Variables
 BINARY_SERVER=bin/portage-server
@@ -98,6 +98,10 @@ test:
 test-release:
 	@echo "Running release manifest and workflow contract tests..."
 	$(PYTHON) -m unittest -v tests.release_pipeline_test
+
+test-recovery:
+	@echo "Running recovery drill shell tests..."
+	bash tests/recovery-drill-test.sh
 
 # Run server
 run-server:

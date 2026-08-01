@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+arguments="$*"
+input="$(sed -n '1,240p')"
+if [[ "${input}" == *"recovery.pitr.before"* ]]; then
+  printf '%s\n' '2026-08-01T03:00:00.000000Z'
+elif [[ "${arguments}" == *"clock_timestamp"* ]]; then
+  printf '%s\n' '2026-08-01T03:00:01.000000Z'
+elif [[ "${input}" == *"recovery.pitr.after"* ||
+  "${arguments}" == *"pg_switch_wal"* ]]; then
+  :
+else
+  echo "unexpected fake docker invocation: ${arguments}" >&2
+  exit 1
+fi
