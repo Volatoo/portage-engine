@@ -173,6 +173,9 @@ Owner: `platform-operations`. Severity: `warning`.
 
 Meaning: the durable terminal source watermark is more than 120 event-time
 seconds ahead of the current 30-second cached Monitor projection watermark.
+Both watermarks use `job.completed_at`, then the latest
+`attempt.finished_at`, then `job.updated_at`; source and projection scans stay
+independent so an omitted newest projection row remains detectable.
 Before the first projection, lag is the source-event age measured by the
 database clock. The gauge is zero when caught up or the durable source is empty;
 it is not the age of the last completed build. The two-minute `for` clause

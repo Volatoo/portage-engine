@@ -300,6 +300,9 @@ func TestPostgresMigrationTransactionAndCompatibility(t *testing.T) {
 	}
 
 	jobRepo := persistence.NewJobRepository(db)
+	t.Run("monitor terminal event watermark fallback", func(t *testing.T) {
+		testMonitorTerminalEventWatermarkFallback(t, ctx, db, jobRepo)
+	})
 	now := time.Now().UTC()
 	iamJobID := uuid.NewString()
 	iamRequest := &builder.BuildRequest{
@@ -777,6 +780,88 @@ func testDeviceAuthorizationAtomicConsumption(
 	); err != nil || slowDown.Status != persistence.DeviceAuthorizationSlowDown ||
 		slowDown.IntervalSeconds != 10 {
 		t.Fatalf("slow-down poll=%+v err=%v", slowDown, err)
+	}
+}
+
+func testMonitorTerminalEventWatermarkFallback(
+	t *testing.T,
+	ctx context.Context,
+	db *persistence.Database,
+	repo *persistence.JobRepository,
+) {
+	t.Helper()
+	request := &builder.BuildRequest{
+		PackageName: "app-misc/monitor-watermark", Arch: "amd64",
+		IdempotencyKey: "monitor-watermark-attempt-fallback",
+	}
+	createdAt := time.Now().UTC().Add(-15 * time.Minute)
+	status := &builder.BuildStatus{
+		JobID: uuid.NewString(), Status: "queued",
+		PackageName: request.PackageName, Arch: request.Arch,
+		CreatedAt: createdAt, UpdatedAt: createdAt, Request: request,
+	}
+	if result, err := repo.CreateJob(ctx, request, status); err != nil || !result.Created {
+		t.Fatalf("create monitor watermark fixture: result=%+v err=%v", result, err)
+	}
+	claim, err := repo.ClaimNext(ctx, "monitor-watermark-worker", time.Minute)
+	if err != nil || claim == nil || claim.Status.JobID != status.JobID {
+		t.Fatalf("claim monitor watermark fixture: claim=%+v err=%v", claim, err)
+	}
+	completed := *claim.Status
+	completed.Status = "completed"
+	completed.UpdatedAt = time.Now().UTC()
+	if err := repo.RecordTransition(ctx, claim.Status, &completed); err != nil {
+		t.Fatalf("complete monitor watermark fixture: %v", err)
+	}
+
+	attemptFinishedAt := time.Now().UTC().Add(-10 * time.Minute).Truncate(time.Microsecond)
+	jobUpdatedAt := attemptFinishedAt.Add(5 * time.Minute)
+	if _, err := db.Pool().Exec(ctx, `
+		UPDATE build_attempts
+		SET finished_at = $2, updated_at = $3
+		WHERE id = $1
+	`, claim.Status.AttemptID, attemptFinishedAt, jobUpdatedAt); err != nil {
+		t.Fatalf("shape monitor attempt watermark fallback fixture: %v", err)
+	}
+	if _, err := db.Pool().Exec(ctx, `
+		UPDATE build_jobs
+		SET completed_at = NULL, updated_at = $2
+		WHERE id = $1
+	`, status.JobID, jobUpdatedAt); err != nil {
+		t.Fatalf("shape monitor job watermark fallback fixture: %v", err)
+	}
+
+	var outcomeEventAt time.Time
+	if err := db.Pool().QueryRow(ctx, `
+		SELECT completed_at
+		FROM monitor_job_outcomes
+		WHERE job_id = $1
+	`, status.JobID).Scan(&outcomeEventAt); err != nil ||
+		!outcomeEventAt.Equal(attemptFinishedAt) {
+		t.Fatalf(
+			"projected terminal event time=%s want=%s err=%v",
+			outcomeEventAt, attemptFinishedAt, err,
+		)
+	}
+
+	projectionRepo := persistence.NewJobRepository(db)
+	for _, snapshotKind := range []string{"fresh", "cached"} {
+		runtime, err := projectionRepo.RuntimeStatus(ctx)
+		projection := runtime.TargetHistory.Projection
+		if err != nil || !projection.Valid || projection.State != "current" ||
+			projection.LagSeconds != 0 || projection.SourceWatermarkAt == nil ||
+			projection.ProjectedWatermarkAt == nil ||
+			!projection.SourceWatermarkAt.Equal(attemptFinishedAt) ||
+			!projection.ProjectedWatermarkAt.Equal(attemptFinishedAt) ||
+			projection.SourceWatermarkAt.Equal(jobUpdatedAt) {
+			t.Fatalf(
+				"%s monitor watermark fallback projection=%+v err=%v",
+				snapshotKind, projection, err,
+			)
+		}
+	}
+	if err := repo.HideJob(ctx, &completed, "monitor watermark fixture cleanup"); err != nil {
+		t.Fatalf("hide monitor watermark fixture: %v", err)
 	}
 }
 
