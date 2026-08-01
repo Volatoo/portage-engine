@@ -85,10 +85,13 @@ internal estimates/settlements from the admission ledger, not provider-invoice
 reconciliation.
 
 The Monitor projection publishes two database-derived event-time watermarks.
-The source watermark is the latest `completed_at`/`updated_at` of a durable
-terminal job. The projected watermark is the latest of those same persisted
-source timestamps whose job is represented by `monitor_job_outcomes` in the
-cached snapshot. When the source is ahead,
+The canonical terminal event time is `job.completed_at`, falling back to the
+latest `attempt.finished_at`, then `job.updated_at`. The source watermark is
+the latest canonical time read independently from the durable job/attempt
+tables. The projected watermark is the latest `monitor_job_outcomes.completed_at`
+using that same fallback order. Keeping the scans independent detects a newest
+source row omitted from the projection without assigning it a different event
+time. When the source is ahead,
 `lag_seconds = source_watermark - projected_watermark`: an event-time distance
 between two persisted timestamps. Before the first projected watermark exists,
 the fallback is `database_clock - source_watermark`. A caught-up projection and

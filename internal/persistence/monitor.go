@@ -78,15 +78,25 @@ func loadMonitorProjection(
 	err := q.QueryRow(ctx, `
 		SELECT clock_timestamp(),
 		       (
-		         SELECT max(COALESCE(j.completed_at, j.updated_at))
+		         -- This expression must match monitor_job_outcomes.completed_at.
+		         -- Keep the base-table source independent from the view so a
+		         -- projection omission still leaves the source watermark ahead.
+		         SELECT max(COALESCE(
+		           j.completed_at,
+		           (
+		             SELECT max(a.finished_at)
+		             FROM build_attempts a
+		             WHERE a.job_id = j.id
+		           ),
+		           j.updated_at
+		         ))
 		         FROM build_jobs j
 		         WHERE j.legacy_visible = true
 		           AND j.state IN ('completed', 'success', 'failed', 'canceled')
 		       ),
 		       (
-		         SELECT max(COALESCE(j.completed_at, j.updated_at))
+		         SELECT max(outcomes.completed_at)
 		         FROM monitor_job_outcomes outcomes
-		         JOIN build_jobs j ON j.id = outcomes.job_id
 		       )
 	`).Scan(&now, &source, &projected)
 	if err != nil {
@@ -105,7 +115,15 @@ func loadCachedMonitorProjection(
 	var source *time.Time
 	err := q.QueryRow(ctx, `
 		SELECT clock_timestamp(),
-		       max(COALESCE(j.completed_at, j.updated_at))
+		       max(COALESCE(
+		         j.completed_at,
+		         (
+		           SELECT max(a.finished_at)
+		           FROM build_attempts a
+		           WHERE a.job_id = j.id
+		         ),
+		         j.updated_at
+		       ))
 		FROM build_jobs j
 		WHERE j.legacy_visible = true
 		  AND j.state IN ('completed', 'success', 'failed', 'canceled')
