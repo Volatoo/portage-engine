@@ -4,7 +4,8 @@ This runbook coordinates recovery evidence for the Public Beta readiness
 decision. It does not claim that a local container test is a production drill,
 and it does not overlap the release OCI build/promotion pipeline. The harness
 reuses the Vault issuer integration Gate, pgBackRest restore path, immutable
-object lifecycle binary, schema v26 ledger, and isolated signer boundary.
+object lifecycle binary, migration-binary schema contract (with the Public Beta
+production upgrade history starting at v26), and isolated signer boundary.
 
 ## Status and evidence contract
 
@@ -127,6 +128,7 @@ restore command and records the backup repository size.
 Example commands for the checked-in Compose pgBackRest topology:
 
 ```bash
+export PORTAGE_MIGRATE_BIN='/opt/portage/bin/portage-migrate'
 export PORTAGE_PGBACKREST_CIPHER_PASS='read-from-secret-provider'
 export PORTAGE_PGBACKREST_REPO='/mnt/backup/portage-engine-recovery-drill-01'
 export PORTAGE_PITR_ASSERT_RESOURCE_ID='public-beta-recovery-20260801-01'
@@ -146,9 +148,16 @@ export PORTAGE_POSTGRES_PITR_CMD='set -a; source "$PORTAGE_PITR_STATE_FILE"; set
 scripts/public-beta-recovery-drill.sh postgres
 ```
 
+`PORTAGE_MIGRATE_BIN` must be the absolute path to the executable migration
+binary deployed with the version under drill. Its database-free
+`supported-schema` command reports the binary's supported range and latest
+embedded migration as JSON; disagreement fails closed before restore. This
+keeps the Gate aligned when reviewed migrations are added instead of treating
+v26 as an eternal constant.
+
 The preparation and restore hooks must use the same state file; do not edit its
 timestamps. The restore script starts a temporary isolated PostgreSQL instance
-and requires schema exactly v26. It
+and requires the restored database to equal that authoritative maximum. It
 checks jobs, attempts, signing lineage, workload issuer/leaf lineage, capacity
 pool/action/instance lineage, targets and the monitor view, project role
 vocabulary, least-privilege app/signer/actuator database roles, and the PITR

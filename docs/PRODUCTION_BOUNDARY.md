@@ -241,8 +241,9 @@ Before switching a deployment to `public`, preserve evidence for:
    providers;
 6. rejected foreign-origin shell WebSocket and no Public Beta WebShell route;
 7. Vault issuer recovery and CA rollover;
-8. schema-current PostgreSQL full/differential/WAL/PITR restore, including
-   ledger, workload identity, capacity, target and database-role integrity;
+8. authoritative-current-schema PostgreSQL full/differential/WAL/PITR restore
+   (the production upgrade history starts at v26), including ledger, workload
+   identity, capacity, target and database-role integrity;
 9. immutable S3 generation publication, channel rollback, deep reconciliation,
    cross-site replication, split quarantine/generation deletion authority and
    reference-aware GC;

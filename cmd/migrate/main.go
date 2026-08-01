@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -36,6 +37,16 @@ func main() {
 	}
 	if flag.NArg() > 1 {
 		log.Fatalf("unexpected argument %q", flag.Arg(1))
+	}
+	if command == "supported-schema" {
+		support, err := migrations.SupportedSchema()
+		if err != nil {
+			log.Fatalf("read supported schema: %v", err)
+		}
+		if err := json.NewEncoder(os.Stdout).Encode(support); err != nil {
+			log.Fatalf("encode supported schema: %v", err)
+		}
+		return
 	}
 
 	cfg, err := config.LoadServerConfig(*configPath)
@@ -93,7 +104,7 @@ func main() {
 		}
 		fmt.Println(current)
 	default:
-		fmt.Fprintf(os.Stderr, "unknown command %q; use up, status, or db-version\n", command)
+		fmt.Fprintf(os.Stderr, "unknown command %q; use up, status, db-version, or supported-schema\n", command)
 		os.Exit(2)
 	}
 }

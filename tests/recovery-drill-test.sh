@@ -16,6 +16,17 @@ fail() {
   exit 1
 }
 
+future_schema="$(
+  PORTAGE_MIGRATE_BIN="${repo_root}/tests/fixtures/recovery/fake-bin/portage-migrate" \
+    scripts/recovery/current-schema-version.sh
+)"
+[[ "${future_schema}" == "29" ]] ||
+  fail "recovery schema authority did not accept a future supported version"
+if PORTAGE_MIGRATE_BIN="${repo_root}/tests/fixtures/recovery/fake-bin/portage-migrate-mismatch" \
+  scripts/recovery/current-schema-version.sh >/dev/null 2>&1; then
+  fail "mismatched binary and embedded migration schema versions were accepted"
+fi
+
 static_evidence="${test_root}/static"
 PORTAGE_DRILL_EVIDENCE_DIR="${static_evidence}" \
   scripts/public-beta-recovery-drill.sh static >/dev/null

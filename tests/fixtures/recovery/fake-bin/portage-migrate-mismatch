@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+[[ "${1:-}" == "supported-schema" ]]
+printf '%s\n' '{"min":26,"max":29,"embedded_latest":28}'
