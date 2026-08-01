@@ -113,6 +113,12 @@ Static access keys are acceptable only for the loopback development Gate.
 Production should use workload identity or short-lived credentials and bucket
 policy conditions that independently enforce the prefixes above.
 
+Before Public Beta, export the effective provider policy for each role and run
+the policy/restore coordinator in
+[Public Beta recovery Gate](PUBLIC_BETA_RECOVERY.md#object-storage-phase). It
+also requires quarantine deletion and published-generation GC to use distinct
+principals; `STORAGE_S3_ALLOW_DELETE` alone is not evidence of that split.
+
 ## Local MinIO Gate
 
 The Compose `object-storage` profile starts a loopback-only, single-node MinIO

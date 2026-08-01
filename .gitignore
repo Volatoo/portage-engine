@@ -79,6 +79,7 @@ Desktop.ini
 image-factory/packer/output/
 image-factory/common.local.json
 /.local/worker-pki/
+/.local/recovery-evidence/
 /configs/capacity-actuator.json
 
 # Docker

@@ -1,0 +1,20 @@
+{
+  "data": {
+    "allow_any_name": false,
+    "allow_bare_domains": true,
+    "allow_glob_domains": false,
+    "allow_subdomains": false,
+    "allowed_domains": ["portage-worker"],
+    "allowed_other_sans": [],
+    "allowed_uri_sans": ["spiffe://portage-engine/*"],
+    "client_flag": true,
+    "code_signing_flag": false,
+    "email_protection_flag": false,
+    "key_bits": 0,
+    "key_type": "ed25519",
+    "max_ttl": 86400,
+    "server_flag": false,
+    "use_csr_common_name": true,
+    "use_csr_sans": true
+  }
+}

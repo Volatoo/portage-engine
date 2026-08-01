@@ -222,6 +222,11 @@ provided. Exit `3` and manifest status `not_run` are never release success.
 Sensitive values and response bodies must not be attached to the manifest or
 stored in the repository.
 
+The fail-closed coordinator, evidence schema, phase inputs, and exact live
+commands are documented in [Public Beta recovery Gate](PUBLIC_BETA_RECOVERY.md).
+Repository-only validation records every external phase as `not-run`; it is not
+production recovery evidence.
+
 Before switching a deployment to `public`, preserve evidence for:
 
 1. rejected startup with every unsafe compatibility option;
@@ -236,8 +241,13 @@ Before switching a deployment to `public`, preserve evidence for:
    providers;
 6. rejected foreign-origin shell WebSocket and no Public Beta WebShell route;
 7. Vault issuer recovery and CA rollover;
-8. schema-current PostgreSQL full/differential/PITR restore; and
+8. schema-current PostgreSQL full/differential/WAL/PITR restore, including
+   ledger, workload identity, capacity, target and database-role integrity;
 9. immutable S3 generation publication, channel rollback, deep reconciliation,
-   cross-site replication and reference-aware GC; and
+   cross-site replication, split quarantine/generation deletion authority and
+   reference-aware GC;
 10. public `/packages`, `/docs`, `/status`, `/binpkgs/.../Packages` and package
-   downloads through the external HTTPS hostname without a login.
+   downloads through the external HTTPS hostname without a login; and
+11. offline encrypted signer-key backup, isolated restore, old/new dual-key
+   verification, retained-generation/rollback compatibility, and live proof
+   that Builder, API and Dashboard have no private key.
