@@ -326,16 +326,16 @@ func validateDesktopPromotionEvidence(path string, manifest *ImageManifest, scen
 	if err := decodeStrictFile(path, &result); err != nil {
 		return err
 	}
-	if result.SchemaVersion != 1 || result.State != "passed" || result.ImageID != manifest.ImageID || result.ProfileID != manifest.ProfileID ||
+	if (result.SchemaVersion != 1 && result.SchemaVersion != 2) || result.State != "passed" || result.ImageID != manifest.ImageID || result.ProfileID != manifest.ProfileID ||
 		result.ScenarioID != scenarioID || result.StartedAt.IsZero() || result.CompletedAt.Before(result.StartedAt) || result.StartedAt.Before(stampedAt) || len(result.Steps) == 0 {
 		return fmt.Errorf("desktop result identity, state, or timing is invalid")
 	}
-	if result.ImageGeneration != "" && result.ImageGeneration != manifest.Generation {
-		return fmt.Errorf("desktop result image generation does not match the promoted manifest")
+	if err := validateDesktopResultSchema(&result, manifest); err != nil {
+		return err
 	}
 	required := map[string]bool{"restore": false, "start": false, "screenshot": false, "collect_accessibility": false, "stop": false}
 	artifactRequired := map[string]bool{"screenshot": true, "collect_accessibility": true}
-	if result.ImageGeneration != "" {
+	if result.SchemaVersion == 2 {
 		for _, action := range []string{"install", "launch_fixture", "wait_accessible", "collect_logs", "close"} {
 			required[action] = false
 		}
@@ -359,6 +359,27 @@ func validateDesktopPromotionEvidence(path string, manifest *ImageManifest, scen
 		}
 	}
 	return nil
+}
+
+func validateDesktopResultSchema(result *desktop.Result, manifest *ImageManifest) error {
+	if result.SchemaVersion == 1 {
+		if result.ImageGeneration != "" || result.DisplayServer != "" || result.ApplicationKind != "" {
+			return fmt.Errorf("desktop result schema version 1 must not carry version 2 runtime identity")
+		}
+		return nil
+	}
+	if result.ImageGeneration == "" || result.ImageGeneration != manifest.Generation {
+		return fmt.Errorf("desktop result schema version 2 image generation does not match the promoted manifest")
+	}
+	if result.DisplayServer != "x11" && result.DisplayServer != "wayland" {
+		return fmt.Errorf("desktop result schema version 2 has an invalid display server")
+	}
+	switch result.ApplicationKind {
+	case "gtk", "qt", "electron", "webview":
+		return nil
+	default:
+		return fmt.Errorf("desktop result schema version 2 has an invalid application kind")
+	}
 }
 
 type verifiedPromotionBundle struct {

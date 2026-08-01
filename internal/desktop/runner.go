@@ -48,7 +48,8 @@ type StepResult struct {
 	Artifacts []string      `json:"artifacts,omitempty"`
 }
 
-// Result records the complete deterministic scenario outcome.
+// Result records the complete deterministic scenario outcome. SchemaVersion
+// matches the originating Scenario so consumers can enforce its identity fields.
 type Result struct {
 	SchemaVersion   int          `json:"schema_version"`
 	ScenarioID      string       `json:"scenario_id"`
@@ -67,7 +68,7 @@ type Result struct {
 func Run(ctx context.Context, scenario *Scenario, driver Driver, now func() time.Time) Result {
 	started := now().UTC()
 	result := Result{
-		SchemaVersion: 1, ScenarioID: scenario.ID, ProfileID: scenario.ProfileID, ImageID: scenario.ImageID,
+		SchemaVersion: scenario.SchemaVersion, ScenarioID: scenario.ID, ProfileID: scenario.ProfileID, ImageID: scenario.ImageID,
 		ImageGeneration: scenario.ImageGeneration, DisplayServer: scenario.DisplayServer, ApplicationKind: scenario.ApplicationKind,
 		State: "passed", StartedAt: started,
 	}

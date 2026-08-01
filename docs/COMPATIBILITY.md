@@ -52,10 +52,10 @@ features only and are rejected by public mode.
   version-1 scenarios, but must be upgraded before it is selected for a
   version-2 scenario. Silently ignoring identity fields or claiming unsupported
   actions passed is incompatible.
-- Desktop result JSON remains schema version 1 and adds optional runtime
-  identity fields. Existing evidence remains readable. Promotion additionally
-  rejects a present `image_generation` that differs from the image manifest;
-  such a version-2 result must also carry the signed-install and log artifacts,
+- Desktop result JSON uses the same schema version as its scenario. Version 1
+  remains readable and must omit version-2 runtime identity. Version 2 requires
+  `image_generation`, `display_server` and `application_kind`; promotion rejects
+  identity drift and requires signed-install and log artifacts,
   fixture/readiness steps, normal close and final stop.
 - The bundled direct-PVE helper is X11-only. Native Wayland requires an adapter
   with compositor-native readiness, capture, input and close semantics;

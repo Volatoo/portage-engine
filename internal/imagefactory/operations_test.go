@@ -35,9 +35,9 @@ func TestDesktopPromotionEvidenceIsARequiredDeterministicGate(t *testing.T) {
 	stampedAt := time.Date(2026, 7, 24, 1, 0, 0, 0, time.UTC)
 	manifest := &ImageManifest{ImageID: "pe/amd64/desktop-g2", ProfileID: "pe/amd64/desktop-v1", Generation: "g2"}
 	result := desktop.Result{
-		SchemaVersion: 1, ScenarioID: "desktop/image-baseline-v1", ProfileID: manifest.ProfileID, ImageID: manifest.ImageID,
-		ImageGeneration: manifest.Generation,
-		State:           "passed", StartedAt: stampedAt.Add(time.Minute), CompletedAt: stampedAt.Add(2 * time.Minute),
+		SchemaVersion: 2, ScenarioID: "desktop/gui-matrix-v2", ProfileID: manifest.ProfileID, ImageID: manifest.ImageID,
+		ImageGeneration: manifest.Generation, DisplayServer: "x11", ApplicationKind: "gtk",
+		State: "passed", StartedAt: stampedAt.Add(time.Minute), CompletedAt: stampedAt.Add(2 * time.Minute),
 		Steps: []desktop.StepResult{
 			{ID: "restore", Action: "restore", State: "passed", StartedAt: stampedAt.Add(time.Minute)},
 			{ID: "start", Action: "start", State: "passed", StartedAt: stampedAt.Add(time.Minute)},
@@ -77,6 +77,31 @@ func TestDesktopPromotionEvidenceIsARequiredDeterministicGate(t *testing.T) {
 	path = writeTestJSON(t, t.TempDir(), "missing-close-desktop-result.json", result)
 	if err := validateDesktopPromotionEvidence(path, manifest, result.ScenarioID, stampedAt); err == nil {
 		t.Fatal("promotion accepted schema v2 desktop evidence without deterministic close")
+	}
+}
+
+func TestDesktopPromotionEvidenceRetainsV1ResultCompatibility(t *testing.T) {
+	stampedAt := time.Date(2026, 7, 24, 1, 0, 0, 0, time.UTC)
+	manifest := &ImageManifest{ImageID: "pe/amd64/desktop-g2", ProfileID: "pe/amd64/desktop-v1", Generation: "g2"}
+	result := desktop.Result{
+		SchemaVersion: 1, ScenarioID: "desktop/image-baseline-v1", ProfileID: manifest.ProfileID, ImageID: manifest.ImageID,
+		State: "passed", StartedAt: stampedAt.Add(time.Minute), CompletedAt: stampedAt.Add(2 * time.Minute),
+		Steps: []desktop.StepResult{
+			{ID: "restore", Action: "restore", State: "passed", StartedAt: stampedAt.Add(time.Minute)},
+			{ID: "start", Action: "start", State: "passed", StartedAt: stampedAt.Add(time.Minute)},
+			{ID: "a11y", Action: "collect_accessibility", State: "passed", StartedAt: stampedAt.Add(time.Minute), Artifacts: []string{"tree.json"}},
+			{ID: "screenshot", Action: "screenshot", State: "passed", StartedAt: stampedAt.Add(time.Minute), Artifacts: []string{"screen.png"}},
+			{ID: "stop", Action: "stop", State: "passed", StartedAt: stampedAt.Add(time.Minute)},
+		},
+	}
+	path := writeTestJSON(t, t.TempDir(), "desktop-v1-result.json", result)
+	if err := validateDesktopPromotionEvidence(path, manifest, result.ScenarioID, stampedAt); err != nil {
+		t.Fatal(err)
+	}
+	result.ImageGeneration = manifest.Generation
+	path = writeTestJSON(t, t.TempDir(), "desktop-v1-with-v2-identity.json", result)
+	if err := validateDesktopPromotionEvidence(path, manifest, result.ScenarioID, stampedAt); err == nil {
+		t.Fatal("promotion accepted version 2 identity under desktop result schema version 1")
 	}
 }
 

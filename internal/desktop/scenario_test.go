@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -187,6 +188,33 @@ func (d *recordingDriver) Do(_ context.Context, request ActionRequest) (Observat
 	return Observation{State: "passed", Artifacts: []string{request.StepID + ".json"}}, nil
 }
 
+func TestRunResultSchemaMatchesScenarioSchema(t *testing.T) {
+	for _, version := range []int{1, 2} {
+		t.Run(fmt.Sprintf("v%d", version), func(t *testing.T) {
+			scenario := validScenario()
+			scenario.SchemaVersion = version
+			if version == 2 {
+				scenario.ImageGeneration = "desktop-g1"
+				scenario.DisplayServer = "x11"
+				scenario.ApplicationKind = "gtk"
+			}
+			if err := scenario.Validate(); err != nil {
+				t.Fatal(err)
+			}
+			result := Run(context.Background(), scenario, &recordingDriver{}, time.Now)
+			if result.SchemaVersion != version {
+				t.Fatalf("result schema_version = %d, want %d", result.SchemaVersion, version)
+			}
+			if version == 1 && (result.ImageGeneration != "" || result.DisplayServer != "" || result.ApplicationKind != "") {
+				t.Fatalf("version 1 result leaked version 2 identity: %+v", result)
+			}
+			if version == 2 && (result.ImageGeneration != scenario.ImageGeneration || result.DisplayServer != scenario.DisplayServer || result.ApplicationKind != scenario.ApplicationKind) {
+				t.Fatalf("version 2 result lost runtime identity: %+v", result)
+			}
+		})
+	}
+}
+
 func TestRunCarriesV2IdentityAndClosesAfterFailure(t *testing.T) {
 	scenario := validScenario()
 	scenario.SchemaVersion = 2
@@ -204,7 +232,7 @@ func TestRunCarriesV2IdentityAndClosesAfterFailure(t *testing.T) {
 	}
 	driver := &recordingDriver{failAt: "wait_accessible"}
 	result := Run(context.Background(), scenario, driver, time.Now)
-	if result.State != "failed" || !slices.Equal(driver.actions, []string{"restore", "start", "launch_fixture", "wait_accessible", "screenshot", "close", "stop"}) {
+	if result.SchemaVersion != 2 || result.State != "failed" || !slices.Equal(driver.actions, []string{"restore", "start", "launch_fixture", "wait_accessible", "screenshot", "close", "stop"}) {
 		t.Fatalf("cleanup actions = %v, result = %+v", driver.actions, result)
 	}
 	for _, request := range driver.requests {
