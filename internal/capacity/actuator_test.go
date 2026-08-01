@@ -109,6 +109,8 @@ func (f *fakeLedger) RetryCapacityAction(
 type fakeProvider struct {
 	provisionCalls int
 	deleteCalls    int
+	deletedID      string
+	deletedGen     int64
 	provisionErr   error
 }
 
@@ -124,10 +126,12 @@ func (f *fakeProvider) Provision(
 	}, f.provisionErr
 }
 func (f *fakeProvider) Delete(
-	context.Context,
-	*builder.CapacityInstance,
+	_ context.Context,
+	instance *builder.CapacityInstance,
 ) error {
 	f.deleteCalls++
+	f.deletedID = instance.ProviderInstanceID
+	f.deletedGen = instance.Generation
 	return nil
 }
 
@@ -207,6 +211,29 @@ func TestActuatorRetriesProviderFailure(t *testing.T) {
 	}
 }
 
+func TestActuatorScaleUpReplayDoesNotProvisionSecondInstance(t *testing.T) {
+	instance := testInstance("provisioning")
+	instance.RemoteStateRef = "state/pve/existing"
+	ledger := &fakeLedger{
+		claim: testClaim("scale-up"), instance: instance, heartbeatAfter: 1,
+	}
+	provider := &fakeProvider{}
+	actuator, err := New(
+		ledger, ProviderSet{"pve": provider}, testConfig(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	worked, err := actuator.RunOne(context.Background())
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if !worked || provider.provisionCalls != 0 || ledger.provisioned ||
+		!ledger.completed {
+		t.Fatalf("scale-up replay was not idempotent: %#v %#v", ledger, provider)
+	}
+}
+
 func TestActuatorScaleDownDrainsBeforeExactDelete(t *testing.T) {
 	ledger := &fakeLedger{
 		claim: testClaim("scale-down"), instance: testInstance("draining"),
@@ -224,8 +251,33 @@ func TestActuatorScaleDownDrainsBeforeExactDelete(t *testing.T) {
 		t.Fatalf("RunOne: %v", err)
 	}
 	if !worked || ledger.drainedCalls != 2 || !ledger.beganDelete ||
-		provider.deleteCalls != 1 || !ledger.completed {
+		provider.deleteCalls != 1 || !ledger.completed ||
+		provider.deletedID != ledger.instance.ProviderInstanceID ||
+		provider.deletedGen != ledger.instance.Generation {
 		t.Fatalf("scale-down lifecycle incomplete: %#v %#v", ledger, provider)
+	}
+}
+
+func TestActuatorScaleDownReplayResumesExactDeletingGeneration(t *testing.T) {
+	ledger := &fakeLedger{
+		claim: testClaim("scale-down"), instance: testInstance("deleting"),
+	}
+	ledger.instance.Generation = 7
+	provider := &fakeProvider{}
+	actuator, err := New(
+		ledger, ProviderSet{"pve": provider}, testConfig(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	worked, err := actuator.RunOne(context.Background())
+	if err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if !worked || ledger.beganDelete || provider.deleteCalls != 1 ||
+		provider.deletedID != ledger.instance.ProviderInstanceID ||
+		provider.deletedGen != 7 || !ledger.completed {
+		t.Fatalf("deletion replay lost exact identity/generation: %#v %#v", ledger, provider)
 	}
 }
 

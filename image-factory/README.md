@@ -6,6 +6,10 @@ not promote them automatically:
 - `base-systemd` clones an approved Gentoo seed VMID.
 - `desktop-verifier` clones the accepted base candidate VMID and adds the XFCE
   verifier environment.
+- `persistent-executor/` is a separate, minimal successor-image lane that
+  installs the listener-free executor service and binds it to one exact
+  capacity pool. It never turns the disposable `packer/` job-builder image
+  into a warm worker; see [persistent-executor/README.md](persistent-executor/README.md).
 
 `rootfs_source: "packer-base-image"` has two reviewed uses: a
 security/tooling-only base successor, or the first desktop transition from an

@@ -276,8 +276,10 @@ time-bounded suspension. High-risk administrator writes require fresh OIDC
 authentication or an independent legacy step-up key; OIDC sessions can be
 listed, individually revoked, or revoked across all replicas. A public
 community service still needs production identity-provider callback validation,
-a Vault HA/unseal/backup runbook, and a reviewed persistent-executor PVE image
-for the live actuator Gate. Schema v24 derives
+a Vault HA/unseal/backup runbook and a site-built, reviewed
+persistent-executor PVE candidate for the live actuator Gate. The repository
+now provides the separate candidate build and fail-closed Gate entry, but does
+not claim live PVE evidence without operator credentials. Schema v24 derives
 provider/zone/architecture/profile/image capacity pools, reports their demand,
 and persists fenced action/instance ownership, heartbeat, drain and deletion
 state. Heterogeneous executors use the same exact pool/capability routing, and

@@ -505,6 +505,42 @@ func testCapacityActuatorFences(
 	`).Scan(&phaseWorkID); err != nil {
 		t.Fatal(err)
 	}
+	var attemptID string
+	var attemptFence int64
+	if err := db.Pool().QueryRow(ctx, `
+		SELECT work.attempt_id::text, attempt.fence_token
+		FROM phase_work_items work
+		JOIN build_attempts attempt ON attempt.id = work.attempt_id
+		WHERE work.id = $1
+	`, phaseWorkID).Scan(&attemptID, &attemptFence); err != nil {
+		t.Fatal(err)
+	}
+	leaseID := uuid.New()
+	if _, err := db.Pool().Exec(ctx, `
+		INSERT INTO worker_leases (
+		  id, worker_id, attempt_id, fence_token, expires_at
+		) VALUES (
+		  $1, $2, $3, $4, clock_timestamp() + interval '1 minute'
+		)
+	`, leaseID, workerID, attemptID, attemptFence); err != nil {
+		t.Fatal(err)
+	}
+	drained, err := repo.CapacityInstanceDrained(
+		ctx, downClaim, draining,
+	)
+	if err != nil || drained {
+		t.Fatalf("live admission lease incorrectly drained=%v err=%v", drained, err)
+	}
+	if err := repo.BeginCapacityInstanceDelete(
+		ctx, downClaim, draining,
+	); err == nil {
+		t.Fatal("live admission lease allowed capacity deletion")
+	}
+	if _, err := db.Pool().Exec(ctx, `
+		DELETE FROM worker_leases WHERE id = $1
+	`, leaseID); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := db.Pool().Exec(ctx, `
 		UPDATE phase_work_items
 		SET execution_mode = 'active', state = 'claimed',
@@ -517,7 +553,7 @@ func testCapacityActuatorFences(
 	`, phaseWorkID); err != nil {
 		t.Fatal(err)
 	}
-	drained, err := repo.CapacityInstanceDrained(
+	drained, err = repo.CapacityInstanceDrained(
 		ctx, downClaim, draining,
 	)
 	if err != nil || drained {
@@ -536,6 +572,13 @@ func testCapacityActuatorFences(
 	`, phaseWorkID); err != nil {
 		t.Fatal(err)
 	}
+	staleGeneration := *draining
+	staleGeneration.Generation++
+	if err := repo.BeginCapacityInstanceDelete(
+		ctx, downClaim, &staleGeneration,
+	); err == nil {
+		t.Fatal("stale capacity instance generation entered deletion")
+	}
 	drained, err = repo.CapacityInstanceDrained(
 		ctx, downClaim, draining,
 	)
@@ -546,6 +589,11 @@ func testCapacityActuatorFences(
 		ctx, downClaim, draining,
 	); err != nil {
 		t.Fatal(err)
+	}
+	if err := repo.CompleteCapacityInstanceDelete(
+		ctx, downClaim, &staleGeneration,
+	); err == nil {
+		t.Fatal("stale capacity instance generation completed deletion")
 	}
 	if err := repo.CompleteCapacityInstanceDelete(
 		ctx, downClaim, draining,

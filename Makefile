@@ -1,4 +1,4 @@
-.PHONY: all build clean test run-server run-dashboard run-builder run-client build-image-factory build-desktop-runner build-migrate build-signer build-capacity-actuator lint lint-security lint-complexity
+.PHONY: all build clean test run-server run-dashboard run-builder run-client build-image-factory build-desktop-runner build-migrate build-signer build-capacity-actuator build-persistent-executor-template test-persistent-executor-gate lint lint-security lint-complexity
 
 # Variables
 BINARY_SERVER=bin/portage-server
@@ -75,6 +75,12 @@ build-capacity-actuator:
 	@echo "Building fenced capacity actuator..."
 	@mkdir -p bin
 	$(GO) build $(GOFLAGS) -o $(BINARY_CAPACITY_ACTUATOR) cmd/capacity-actuator/main.go
+
+build-persistent-executor-template:
+	image-factory/persistent-executor/run.sh
+
+test-persistent-executor-gate:
+	scripts/persistent-executor-gate.sh repo
 
 # Clean build artifacts
 clean:

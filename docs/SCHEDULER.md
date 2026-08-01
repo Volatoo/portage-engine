@@ -167,8 +167,22 @@ pre-start helper derives `CONTROL_PLANE_ID` and
 `EXECUTOR_CAPACITY_INSTANCE_ID` from that value. A persistent executor starts
 no HTTP listener and must explicitly declare the capabilities for exactly one
 immutable pool. It does not require the Worker Gateway listener private key,
-but it still needs its intentionally scoped PostgreSQL, artifact, PVE and
-workload-certificate issuer permissions to execute phases.
+and startup now rejects that credential if it is accidentally distributed to
+the executor role. It uses the Worker Gateway advertise URL and public trust
+bundles when it launches a disposable outbound-pull worker; scheduler worker
+registration and phase claims retain the existing fenced PostgreSQL contract.
+The executor still needs intentionally scoped PostgreSQL, artifact, PVE and
+workload-certificate issuer permissions at runtime. Those values are injected
+after clone and are not image inputs.
+
+The dedicated build entry is
+`image-factory/persistent-executor/run.sh`. It derives the capacity-pool ID
+from provider, zone, architecture, build mode, profile, image ID and image
+generation, and bakes exactly those labels plus the four phase labels. The
+image gate rejects a baked `capacity-instance` label, PVE/PBS management
+secret, signing key, Terraform state, API listener key, or Packer SSH
+authorization. This entry is intentionally separate from the immutable
+single-use job-builder image.
 
 Configuration:
 
@@ -247,10 +261,13 @@ explanations.
 - Provider limits are deployment-wide per provider; per-project/provider
   billing limits still use the existing admission budget rather than a
   provider invoice feed.
-- The code, real PostgreSQL, Compose role, Prometheus and WebUI gates are
-  complete. A live scale-up/scale-down PVE release gate still requires a
-  separately built and reviewed persistent-executor template; the existing
-  disposable job-builder template is deliberately rejected.
+- The code, real PostgreSQL, Compose role, Prometheus, WebUI, dedicated image
+  entry and repository-side fence/readback Gate are complete. A live
+  scale-up/scale-down PVE release Gate still requires site PVE credentials,
+  runtime secret injection and a candidate built from the operator's accepted
+  Gentoo base. The repository does not manufacture that evidence; use the
+  exact `scripts/persistent-executor-gate.sh live-once` procedure in
+  [PVE_TESTING.md](PVE_TESTING.md).
 - Estimated and settled internal cloud cost is visible per target; provider
   invoice ingestion and reconciliation require an operator-selected billing
   export and are not implemented.
