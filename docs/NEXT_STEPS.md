@@ -4,25 +4,34 @@
 
 ## 当前结论
 
-仓库内的核心控制面、对象存储发布链路、独立签名、匿名公共页面、
-PostgreSQL/Redis 状态平台、PVE 一次性 builder、镜像工厂和基础 GUI E2E
-已经形成闭环。下一阶段的重点不是继续扩展控制面功能，而是完成 Public
-Beta 所需的真实生产环境 Gate，并保存可审计的恢复和运行证据。
+`codex/next-steps-integration` 已补齐本文件中可以在仓库内安全实现和验证的切片：
+persistent executor 模板与 fail-closed Gate、CLI device authorization、公开 edge
+与身份 Gate、lease/projection observability、签名 OCI release promotion、恢复演练
+框架、GTK/Qt/WebView GUI matrix，以及默认关闭的 Distributed Build Alpha。数据库
+authority 为 schema v29，迁移顺序固定为 00027 → 00028 → 00029。
 
-当前 `main` 比 `origin/main` 领先一个提交：
+真实 PVE、正式 IdP、Vault HA、生产备份/对象存储/signer、真实 distccd、GitHub
+发布和 30 天运行窗口仍依赖部署凭据或外部环境；这些 Gate 保持 `not-run`，不能
+用 repository/static 结果代替。
 
-```text
-f79fca4 feat: complete public artifact and community surfaces
-```
+| 工作流 | 仓库/本地 Gate | 真实环境 Gate |
+| --- | --- | --- |
+| Persistent Executor | `scripts/persistent-executor-gate.sh repo` 通过 | PVE SCHED-2B `not-run` |
+| Identity / Public Edge | 配置、Nginx/Compose 与 redacted Gate 通过 | 三个 IdP 与公网主机 `not-run` |
+| Recovery | 静态 7 项通过，4 个外部阶段明确 `not-run` | Vault/PostgreSQL/object/signer `not-run` |
+| Distributed Build | 单元、race 与 PostgreSQL 并发 Gate 通过 | distccd/PVE/双 job/disconnect `not-run` |
+| GUI E2E | 签名候选契约与 GTK/Qt/WebView 场景通过 | 真实 digest/fingerprint/PVE matrix `not-run` |
+| Release | workflow/manifest/SBOM/provenance/promotion 契约通过 | GHCR push/sign/promote/rollback `not-run` |
 
 ## P0：仓库收口
 
-- [ ] 检查本地 `.playwright-mcp/` 浏览器测试输出；确认无需保留后删除，或加入
-  本地 exclude，避免测试日志进入版本控制。
-- [ ] 将 `f79fca4` 推送到 `origin/main`。
-- [ ] 统一路线图中的调度边界描述：v1 以 project 作为公平和配额边界，
+- [x] 检查本地 `.playwright-mcp/` 浏览器测试输出并加入本地 exclude，避免测试
+  日志进入版本控制。
+- [ ] 审阅并将 `codex/next-steps-integration` 合并/推送到 `origin/main`。
+- [x] 统一路线图中的调度边界描述：v1 以 project 作为公平和配额边界，
   capacity pool 负责 hard routing 与容量隔离，不默认实现 target/provider
   层级公平子队列。
+- [x] 在整合分支运行全量 Go/race、release/recovery/persistent/edge Gate 和静态检查。
 - [ ] 推送后确认 GitHub CI、CodeQL 和安全扫描全部通过。
 
 退出标准：工作区干净，远端 `main` 包含当前提交，CI 全绿，路线图不存在与
@@ -30,23 +39,18 @@ f79fca4 feat: complete public artifact and community surfaces
 
 ## P1：Persistent Executor 与真实 SCHED-2B Gate
 
-这是推荐最先实施的里程碑。调度器、capacity action/instance 账本、provider
-actuator、lease/fence、drain 和删除保护已经实现，目前缺少专用 PVE 模板与现场
-验收。
+仓库切片已实现；当前只缺真实 PVE 现场验收。
 
-- [ ] 构建独立的 persistent-executor Gentoo 模板，不能复用一次性 job builder。
-- [ ] 模板只包含 executor 所需组件，不包含签名私钥、PVE/PBS 管理凭证或 API
+- [x] 构建独立的 persistent-executor Gentoo 模板，不复用一次性 job builder。
+- [x] 模板只包含 executor 所需组件，不包含签名私钥、PVE/PBS 管理凭证或 API
   listener credential。
-- [ ] 通过 SMBIOS/instance metadata 注入数据库生成的 capacity instance ID。
-- [ ] 启动后主动连接 Worker Gateway，注册精确的 provider、zone、architecture、
+- [x] 通过 SMBIOS/instance metadata 注入数据库生成的 capacity instance ID。
+- [x] 启动后主动连接 Worker Gateway，注册精确的 provider、zone、architecture、
   build mode、profile 和 image generation capability。
-- [ ] 验证 actuator 的 create action 只能生成一个精确实例。
-- [ ] 验证重复执行、stale fence 和超时重试不会生成重复 VM。
-- [ ] 验证 scale-down 首先进入 draining。
-- [ ] 在 admission lease 或 phase lease 存活时，删除必须 fail closed。
-- [ ] 所有 lease 归零后，只按 provider instance ID、owner generation 和 exact
-  VM identity 删除。
-- [ ] 通过 PVE API readback 确认 VM 确实不存在。
+- [x] repository Gate 验证 actuator 单次精确 create、幂等/stale fence、drain、
+  live-work 删除拒绝和 exact identity 删除边界。
+- [ ] 在真实 PVE 完成 scale-up → heartbeat → job → drain → delete，并通过 PVE API
+  readback 确认 VM 不存在；当前状态 **not-run**。
 
 退出标准：完成一次真实的 scale-up → heartbeat → 执行任务 → drain → delete；
 同时完成“有 live work 时拒绝删除”的负向 Gate，并保存数据库、PVE API、日志和
@@ -56,6 +60,8 @@ actuator、lease/fence、drain 和删除保护已经实现，目前缺少专用 
 
 ### 真实身份提供方
 
+- [x] 实现 Authentik、Google、GitHub provider registry、session idle/max/revoke、
+  back-channel logout、step-up 与 equal-email 隔离的 fail-closed real-host Gate。
 - [ ] 为正式 HTTPS 域名配置 Authentik。
 - [ ] 配置 Google OAuth/OIDC application。
 - [ ] 配置 GitHub OAuth App。
@@ -69,6 +75,8 @@ membership，不来自 email 或可变 group claim。
 
 ### Vault 生产化
 
+- [x] 实现 Vault 最小 PKI role、恢复/CA 轮换输入校验与 redacted evidence 框架；
+  无真实 Vault 时明确 `not-run`。
 - [ ] 部署 Vault HA，并明确 storage、unseal 和恢复负责人。
 - [ ] 为 Worker Gateway 使用最小权限 PKI sign role。
 - [ ] 演练 Vault token 丢失和恢复。
@@ -81,6 +89,8 @@ membership，不来自 email 或可变 group claim。
 
 ### PostgreSQL、PBS 与 RPO/RTO
 
+- [x] 恢复 Gate 从部署的 `portage-migrate supported-schema` 动态取得 authority，
+  并在临时 PostgreSQL 18 上执行当前 migration/恢复 SQL；不再硬编码 v26。
 - [ ] 在最终整合后的生产 schema v29（00027 → 00028 → 00029）上配置 full、
   differential 和 WAL/PITR 备份。
 - [ ] 将 backup/WAL repository 放到 NAS，并纳入 PBS VM 备份。
@@ -94,6 +104,8 @@ membership，不来自 email 或可变 group claim。
 
 ### 对象存储容灾
 
+- [x] 实现 read、quarantine、generation-GC、signer 四类最小权限输入检查，以及
+  replication/rollback/deep-audit 的 fail-closed evidence 阶段。
 - [ ] 为 API/read、executor/signer 和 lifecycle 使用独立最小权限身份。
 - [ ] API/read 身份不具有 `DeleteObject`。
 - [ ] quarantine delete 与 generation GC 使用不同权限边界。
@@ -109,6 +121,8 @@ membership，不来自 email 或可变 group claim。
 
 ### Signer 密钥生命周期
 
+- [x] 实现离线加密备份、隔离恢复、双 key 验证、旧 generation/rollback 与私钥
+  隔离检查的 Gate 契约。
 - [ ] 建立签名私钥的离线加密备份。
 - [ ] 在隔离环境演练 signer 恢复。
 - [ ] 演练新旧 GPG key 轮换和双验证窗口。
@@ -120,10 +134,11 @@ membership，不来自 email 或可变 group claim。
 
 ### 公网入口与匿名页面
 
+- [x] 提供 HTTPS Nginx/Compose reference edge，repository Gate 已验证 backend
+  端口隔离、独立 source-IP/request/identity limit、cookie/CORS、minimal health、
+  metrics 双重认证、匿名路由和 WebShell 404。
 - [ ] 部署 HTTPS edge/reverse proxy；API 和 Dashboard 可以继续在受限私网使用
   HTTP。
-- [ ] 阻止外部直接访问 backend HTTP 端口。
-- [ ] 配置独立的 edge source-IP/request-rate limit；Redis 不是公网 DoS 边界。
 - [ ] 验证 Secure/SameSite cookie、HTTPS CORS allowlist 和 provider callback。
 - [ ] 验证匿名 `/packages`、`/docs`、`/status`、`/binpkgs/.../Packages` 和 package
   下载。
@@ -140,22 +155,24 @@ membership，不来自 email 或可变 group claim。
 
 ### 监控缺口
 
-- [ ] 增加低基数 lease expiry 指标和告警。
-- [ ] 增加 Monitor projection lag 指标和告警。
+- [x] 增加 durable、固定 7 系列的低基数 lease expiry 指标和告警。
+- [x] 增加 canonical terminal event-time Monitor projection lag 指标和告警，并以
+  PostgreSQL fresh/cached 边界回归验证 source/projected watermark 语义一致。
 - [ ] 在选定 billing export 后增加 provider invoice drift 指标。
-- [ ] 为每条告警补充 runbook URL、owner、severity 和演练记录。
+- [x] 为 lease/projection 告警补充 runbook URL、owner、severity 和本地规则验证。
 
 ### Release pipeline
 
-当前 CI 已生成 runtime SPDX SBOM、BuildKit provenance 和 SHA-256 checksum，但
-还没有完整的社区 release promotion。
+仓库 workflow 已完成，真实 registry promotion 尚未运行。
 
-- [ ] 选择 OCI registry 和命名规则。
-- [ ] 推送按角色拆分的 runtime images。
-- [ ] 对 OCI image、binary checksum 和 release manifest 签名。
-- [ ] 建立 candidate → stable promotion 和 rollback 流程。
-- [ ] 验证 SBOM/provenance 可以从发布制品独立获取和校验。
-- [ ] 建立基础镜像 digest 与安全更新策略。
+- [x] 选择 GHCR registry 和不可变 digest 命名规则。
+- [x] 为全部生产角色定义 linux/amd64、linux/arm64 runtime image build/push。
+- [x] 定义 OCI image、binary checksum 和 release manifest 的 keyless cosign 签名。
+- [x] 建立 digest-bound candidate → stable promotion、CAS 与 rollback 流程。
+- [x] 让 SPDX SBOM/provenance 可从发布制品独立获取和校验。
+- [x] 固定基础镜像 digest、GitHub Actions SHA 与安全更新策略。
+- [ ] 以受保护 GitHub environment 实际执行 candidate push/sign、stable promotion
+  与 rollback；当前状态 **not-run**。
 
 ## P2：Distributed Build Alpha（仓库切片已实现；不阻塞 Public Beta）
 
@@ -189,12 +206,15 @@ distcc 应作为独立里程碑，不能直接打开全局开关。
 
 ## P2：用户体验与 GUI E2E 扩展
 
-- [ ] 为 CLI 增加 browser-assisted/device authorization flow，减少手工复制 token。
-- [ ] 增加一个 GTK 应用的安装、启动、fixture、断言和退出场景。
-- [ ] 增加一个 Qt 应用场景。
-- [ ] 增加一个 Electron/WebView 应用场景。
+- [x] 为 CLI 增加 browser-assisted/device authorization flow；device code 只持久化
+  hash，并覆盖 pending/slow-down/deny/expiry/concurrent one-time consumption。
+- [x] 增加 GTK Mousepad 的安装、启动、fixture、断言和退出场景。
+- [x] 增加 Qt FeatherPad 场景。
+- [x] 增加 WebKitGTK surf 的 WebView 场景。
+- [ ] 注入真实签名 candidate digest/fingerprint，并在 PVE 执行完整 matrix；tracked
+  sentinel 会 fail closed，当前状态 **not-run**。
 - [ ] 基线稳定后再扩展 KDE/GNOME 模板。
-- [ ] 视觉 AI 只用于失败 triage 和候选 selector/needle 建议，不作为 release
+- [x] 视觉 AI 只用于失败 triage 和候选 selector/needle 建议，不作为 release
   oracle。
 
 ## P3：Provider invoice reconciliation
@@ -222,14 +242,13 @@ distcc 应作为独立里程碑，不能直接打开全局开关。
 
 ## 推荐执行顺序
 
-1. 仓库收口并推送当前提交。
-2. 构建 persistent-executor 模板并完成真实 PVE SCHED-2B Gate。
-3. 部署正式 HTTPS edge，并完成 Authentik、Google、GitHub 回调。
-4. 完成 Vault HA、PostgreSQL/PBS、对象存储和 signer 恢复演练。
-5. 补齐 lease/projection 告警与 release promotion/signing。
-6. 开始 30 天稳定性窗口。
-7. Public Beta 不依赖 distcc；distcc、CLI device flow 和扩展 GUI 矩阵并行作为
-   后续独立里程碑。
+1. 审阅、合并并推送 `codex/next-steps-integration`，确认 GitHub CI/CodeQL/安全扫描。
+2. 用真实 PVE 完成 persistent-executor SCHED-2B 与签名 GUI matrix Gate。
+3. 部署正式 HTTPS edge，完成 Authentik、Google、GitHub 回调与 real-host Gate。
+4. 完成 Vault HA、schema v29 PostgreSQL/PBS、对象存储和 signer 现场恢复演练。
+5. 以受保护 GitHub environment 执行真实 candidate/stable/rollback 发布。
+6. Public Beta 不依赖 distcc；有隔离网络后再执行真实 distccd 双 job/disconnect Gate。
+7. 选择实际 billing export 后实现 invoice reconciliation，随后开始 30 天稳定窗口。
 
 ## 相关文档
 
@@ -237,6 +256,9 @@ distcc 应作为独立里程碑，不能直接打开全局开关。
 - [生产部署边界](PRODUCTION_BOUNDARY.md)
 - [对象存储契约](OBJECT_STORAGE.md)
 - [调度与容量](SCHEDULER.md)
+- [监控告警与演练](OBSERVABILITY_RUNBOOKS.md)
 - [身份提供方](IDENTITY_PROVIDERS.md)
+- [Public Beta 恢复 Gate](PUBLIC_BETA_RECOVERY.md)
+- [Distributed Build Alpha](DISTRIBUTED_BUILD_ALPHA.md)
 - [PVE 验证](PVE_TESTING.md)
 - [桌面 E2E](DESKTOP_E2E.md)

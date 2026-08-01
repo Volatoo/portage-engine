@@ -214,7 +214,7 @@ validate_nginx_in_container() {
   )"
 }
 
-cd "${repo_root}"
+cd "${repo_root}" || exit 2
 
 if ! command -v jq >/dev/null 2>&1 || ! command -v rg >/dev/null 2>&1; then
   echo "jq and rg are required" >&2
