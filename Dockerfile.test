@@ -1,5 +1,5 @@
 # Test stage - Gentoo base with portage tree synced
-FROM gentoo/stage3:latest
+FROM gentoo/stage3:latest@sha256:3c0c14e5391329e05497a5fe9cfa02317e572d4e072309b496b4b9f7429be282
 
 WORKDIR /app
 

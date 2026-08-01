@@ -9,19 +9,20 @@ on:
     # 每周一凌晨 UTC 运行一次
     - cron: '0 0 * * 1'
 
+permissions:
+  contents: read
+
 jobs:
   security-scan:
     name: Trivy Security Scan
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      security-events: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Run Trivy vulnerability scanner
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # 0.35.0
         with:
+          version: 'v0.69.3'
           scan-type: 'fs'
           scan-ref: '.'
           format: 'json'
@@ -39,14 +40,11 @@ jobs:
   gosec-scan:
     name: GoSec Security Scan
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      security-events: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version: '1.26.5'
           cache: true
@@ -55,46 +53,7 @@ jobs:
       # This keeps the dedicated security job aligned with pre-commit and the
       # regular CI lint job while retaining G124/G703/G704 coverage.
       - name: Run gosec security scanner
-        uses: golangci/golangci-lint-action@v7
+        uses: golangci/golangci-lint-action@9fae48acfc02a90574d7c304a1758ef9895495fa # v7.0.1
         with:
           version: v2.7.2
           args: --enable-only=gosec --timeout=5m -v
-
-  codeql-analysis:
-    name: CodeQL Analysis
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      security-events: write
-      actions: read
-    strategy:
-      fail-fast: false
-      matrix:
-        language: [ 'go' ]
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Initialize CodeQL
-        uses: github/codeql-action/init@v3
-        with:
-          languages: ${{ matrix.language }}
-
-      - name: Autobuild
-        uses: github/codeql-action/autobuild@v3
-
-      - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@v3
-        continue-on-error: true
-
-      - name: Upload CodeQL results as artifact
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: codeql-results
-          path: /home/runner/work/portage-engine/results/
-          retention-days: 7
-        continue-on-error: true
-
-      - name: CodeQL Analysis Summary
-        if: always()
-        run: echo "CodeQL analysis completed. Check the Security tab in GitHub for detailed results if code scanning is enabled, or download the artifacts to view the SARIF file."

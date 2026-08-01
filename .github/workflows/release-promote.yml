@@ -1,0 +1,233 @@
+name: Promote release candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_manifest_ref:
+        description: Digest-only GHCR candidate manifest reference
+        required: true
+        type: string
+      expected_previous_manifest_digest:
+        description: Canonical current stable manifest SHA-256, or none for the first release
+        required: true
+        type: string
+      confirm:
+        description: Explicit stable promotion confirmation
+        required: true
+        type: choice
+        options:
+          - promote-to-stable
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-stable
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    name: Verify, promote, and sign stable manifest
+    runs-on: ubuntu-24.04
+    environment: release-stable
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v3.0.5
+
+      - uses: oras-project/setup-oras@1d808f7d7f6995cc68b7bf507bfe5c5446e1dc9d # v2.0.1
+        with:
+          version: 1.3.0
+
+      - name: Verify candidate and promotion compare-and-swap input
+        id: verify
+        env:
+          CANDIDATE_REF: ${{ inputs.candidate_manifest_ref }}
+          EXPECTED_PREVIOUS: ${{ inputs.expected_previous_manifest_digest }}
+          CONFIRM: ${{ inputs.confirm }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_REF}" != "refs/heads/${DEFAULT_BRANCH}" ] || [ "${CONFIRM}" != "promote-to-stable" ]; then
+            echo "promotion must run the default-branch workflow with explicit confirmation" >&2
+            exit 1
+          fi
+          release_repository="ghcr.io/${GITHUB_REPOSITORY,,}/releases"
+          if ! [[ "${CANDIDATE_REF}" =~ ^${release_repository}@sha256:[0-9a-f]{64}$ ]]; then
+            echo "candidate_manifest_ref must be a digest reference in ${release_repository}" >&2
+            exit 1
+          fi
+          candidate_oci_digest="${CANDIDATE_REF##*@}"
+          candidate_identity_regex="^https://github.com/${GITHUB_REPOSITORY}/\\.github/workflows/release-candidate\\.yml@refs/(heads/${DEFAULT_BRANCH}|tags/v[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?)$"
+          stable_identity_regex="^https://github.com/${GITHUB_REPOSITORY}/\\.github/workflows/release-(promote|rollback)\\.yml@refs/heads/${DEFAULT_BRANCH}$"
+          cosign verify --certificate-identity-regexp "${candidate_identity_regex}" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            "${CANDIDATE_REF}" >/dev/null
+          mkdir candidate
+          oras pull "${CANDIDATE_REF}" -o candidate
+          cosign verify-blob --bundle candidate/release-manifest.sigstore.json \
+            --certificate-identity-regexp "${candidate_identity_regex}" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            candidate/release-manifest.json
+          cosign verify-blob --bundle candidate/SHA256SUMS.sigstore.json \
+            --certificate-identity-regexp "${candidate_identity_regex}" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            candidate/SHA256SUMS
+          candidate_manifest_digest="$(python3 scripts/release_manifest.py validate --manifest candidate/release-manifest.json --root candidate)"
+          if [ "$(jq -r '.release.channel' candidate/release-manifest.json)" != "candidate" ]; then
+            echo "input OCI artifact is not a candidate manifest" >&2
+            exit 1
+          fi
+          while IFS= read -r image; do
+            cosign verify --certificate-identity-regexp "${candidate_identity_regex}" \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+              "${image}" >/dev/null
+          done < <(jq -r '.images[].reference' candidate/release-manifest.json)
+
+          stable_alias="${release_repository}:stable"
+          current_oci_digest="none"
+          if resolved="$(oras resolve "${stable_alias}" 2>/dev/null)"; then
+            current_oci_digest="${resolved}"
+          fi
+          if [ "${EXPECTED_PREVIOUS}" = "none" ]; then
+            if [ "${current_oci_digest}" != "none" ]; then
+              echo "stable already exists; first-promotion expectation is stale" >&2
+              exit 1
+            fi
+          else
+            if ! [[ "${EXPECTED_PREVIOUS}" =~ ^sha256:[0-9a-f]{64}$ ]] || [ "${current_oci_digest}" = "none" ]; then
+              echo "promotion requires an existing stable manifest and canonical expected digest" >&2
+              exit 1
+            fi
+            current_ref="${release_repository}@${current_oci_digest}"
+            cosign verify --certificate-identity-regexp "${stable_identity_regex}" \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+              "${current_ref}" >/dev/null
+            mkdir current
+            oras pull "${current_ref}" -o current
+            cosign verify-blob --bundle current/release-manifest.sigstore.json \
+              --certificate-identity-regexp "${stable_identity_regex}" \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+              current/release-manifest.json
+            current_manifest_digest="$(python3 scripts/release_manifest.py validate --manifest current/release-manifest.json --root current)"
+            if [ "${current_manifest_digest}" != "${EXPECTED_PREVIOUS}" ]; then
+              echo "current stable canonical digest does not match the promotion CAS input" >&2
+              exit 1
+            fi
+          fi
+          {
+            echo "release_repository=${release_repository}"
+            echo "candidate_oci_digest=${candidate_oci_digest}"
+            echo "candidate_manifest_digest=${candidate_manifest_digest}"
+            echo "current_oci_digest=${current_oci_digest}"
+            echo "candidate_identity_regex=${candidate_identity_regex}"
+            echo "stable_identity_regex=${stable_identity_regex}"
+          } >>"${GITHUB_OUTPUT}"
+
+      - name: Create and sign the stable release manifest
+        env:
+          EXPECTED_PREVIOUS: ${{ inputs.expected_previous_manifest_digest }}
+          CANDIDATE_OCI_DIGEST: ${{ steps.verify.outputs.candidate_oci_digest }}
+          CURRENT_OCI_DIGEST: ${{ steps.verify.outputs.current_oci_digest }}
+          RELEASE_REPOSITORY: ${{ steps.verify.outputs.release_repository }}
+          STABLE_IDENTITY_REGEX: ${{ steps.verify.outputs.stable_identity_regex }}
+        run: |
+          set -euo pipefail
+          cp -a candidate stable
+          promoted_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+          args=(
+            --candidate candidate/release-manifest.json
+            --candidate-root candidate
+            --candidate-oci-digest "${CANDIDATE_OCI_DIGEST}"
+            --expected-previous-manifest-digest "${EXPECTED_PREVIOUS}"
+            --expected-previous-oci-digest "${CURRENT_OCI_DIGEST}"
+            --promoted-at "${promoted_at}"
+            --output-root stable
+            --output stable/release-manifest.json
+          )
+          if [ "${EXPECTED_PREVIOUS}" != "none" ]; then
+            args+=(--current-stable current/release-manifest.json --current-root current)
+          fi
+          python3 scripts/release_manifest.py promote "${args[@]}"
+          stable_manifest_digest="$(python3 scripts/release_manifest.py validate --manifest stable/release-manifest.json --root stable)"
+          cosign sign-blob --yes --bundle stable/release-manifest.sigstore.json stable/release-manifest.json
+          signing_identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release-promote.yml@${GITHUB_REF}"
+          cosign verify-blob --bundle stable/release-manifest.sigstore.json \
+            --certificate-identity "${signing_identity}" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            stable/release-manifest.json
+          release_id="$(jq -r '.release.id' stable/release-manifest.json)"
+          immutable_tag="stable-${release_id}-m${stable_manifest_digest#sha256:}"
+          immutable_tag="${immutable_tag:0:80}"
+          if oras resolve "${RELEASE_REPOSITORY}:stable-${release_id}" >/dev/null 2>&1; then
+            echo "stable release ID tag already exists; refusing to overwrite it" >&2
+            exit 1
+          fi
+          (
+            cd stable
+            mapfile -t files < <(find . -type f -printf '%P\n' | sort)
+            oras push --artifact-type application/vnd.portage-engine.release.v1+json \
+              "${RELEASE_REPOSITORY}:${immutable_tag}" "${files[@]}"
+          )
+          stable_oci_digest="$(oras resolve "${RELEASE_REPOSITORY}:${immutable_tag}")"
+          cosign sign --yes "${RELEASE_REPOSITORY}@${stable_oci_digest}"
+          cosign verify --certificate-identity "${signing_identity}" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            "${RELEASE_REPOSITORY}@${stable_oci_digest}" >/dev/null
+
+          observed_current="none"
+          if resolved="$(oras resolve "${RELEASE_REPOSITORY}:stable" 2>/dev/null)"; then
+            observed_current="${resolved}"
+          fi
+          if [ "${observed_current}" != "${CURRENT_OCI_DIGEST}" ]; then
+            echo "stable alias changed during promotion; refusing the cutover" >&2
+            exit 1
+          fi
+          while IFS=$'\t' read -r repository reference; do
+            if oras resolve "${repository}:stable-${release_id}" >/dev/null 2>&1; then
+              echo "immutable role release tag already exists for ${repository}" >&2
+              exit 1
+            fi
+            oras tag "${reference}" "stable-${release_id}"
+            oras tag "${reference}" stable
+          done < <(jq -r '.images[] | [.repository, .reference] | @tsv' stable/release-manifest.json)
+          if resolved="$(oras resolve "${RELEASE_REPOSITORY}:stable" 2>/dev/null)"; then
+            observed_current="${resolved}"
+          else
+            observed_current="none"
+          fi
+          if [ "${observed_current}" != "${CURRENT_OCI_DIGEST}" ]; then
+            echo "stable alias changed before the final cutover" >&2
+            exit 1
+          fi
+          oras tag "${RELEASE_REPOSITORY}@${stable_oci_digest}" "stable-${release_id}" stable
+          if [ "$(oras resolve "${RELEASE_REPOSITORY}:stable")" != "${stable_oci_digest}" ]; then
+            echo "stable alias read-back did not bind the signed manifest" >&2
+            exit 1
+          fi
+          {
+            echo "Stable authority: \`${RELEASE_REPOSITORY}@${stable_oci_digest}\`"
+            echo "Canonical manifest digest: \`${stable_manifest_digest}\`"
+            echo "Previous stable OCI digest: \`${CURRENT_OCI_DIGEST}\`"
+          } >>"${GITHUB_STEP_SUMMARY}"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: stable-release-${{ github.run_id }}-${{ github.run_attempt }}
+          path: stable/
+          if-no-files-found: error
+          retention-days: 90
