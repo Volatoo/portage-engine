@@ -270,9 +270,10 @@ openQA/needle adapter for that oracle.
 
 The runner requires exactly one restore/start/stop sequence. After a failure it
 skips further functional input, still runs declared screenshot/log collection
-and cleanup actions, and always attempts the final stop. Result JSON records
-times, states, the version-2 runtime identity and artifact references but does
-not echo typed input.
+and cleanup actions, and always attempts the final stop. Result JSON uses the
+scenario's schema version: version 1 omits the new runtime identity, while
+version 2 requires image generation, display server and application kind.
+Both record times, states and artifact references but do not echo typed input.
 
 AI vision belongs after this deterministic gate. It may classify a failed
 screenshot or propose a candidate needle/scenario change. It must not receive
