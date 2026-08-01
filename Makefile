@@ -1,4 +1,4 @@
-.PHONY: all build clean test run-server run-dashboard run-builder run-client build-image-factory build-desktop-runner build-migrate build-signer build-capacity-actuator build-persistent-executor-template test-persistent-executor-gate lint lint-security lint-complexity
+.PHONY: all build clean test test-release run-server run-dashboard run-builder run-client build-image-factory build-desktop-runner build-migrate build-signer build-capacity-actuator build-persistent-executor-template test-persistent-executor-gate lint lint-security lint-complexity
 
 # Variables
 BINARY_SERVER=bin/portage-server
@@ -12,6 +12,7 @@ BINARY_SIGNER=bin/portage-signer
 BINARY_CAPACITY_ACTUATOR=bin/portage-capacity-actuator
 GO=go
 GOFLAGS=-v
+PYTHON ?= python3
 GOLANGCI_LINT_VERSION ?= v2.7.2
 GOLANGCI_LINT = $(GO) run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
@@ -92,6 +93,11 @@ clean:
 test:
 	@echo "Running tests..."
 	$(GO) test -v ./...
+	$(MAKE) test-release
+
+test-release:
+	@echo "Running release manifest and workflow contract tests..."
+	$(PYTHON) -m unittest -v tests.release_pipeline_test
 
 # Run server
 run-server:

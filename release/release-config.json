@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "registry": "ghcr.io",
+  "manifest_repository_suffix": "releases",
+  "platforms": [
+    "linux/amd64",
+    "linux/arm64"
+  ],
+  "binary_platforms": [
+    {
+      "os": "darwin",
+      "arch": "amd64"
+    },
+    {
+      "os": "darwin",
+      "arch": "arm64"
+    },
+    {
+      "os": "linux",
+      "arch": "amd64"
+    },
+    {
+      "os": "linux",
+      "arch": "arm64"
+    }
+  ],
+  "commands": [
+    "artifact-lifecycle",
+    "builder",
+    "capacity-actuator",
+    "client",
+    "dashboard",
+    "desktop-runner",
+    "image-factory",
+    "migrate",
+    "server",
+    "signer"
+  ],
+  "roles": [
+    {
+      "name": "actuator",
+      "target": "actuator-runtime",
+      "binary": "portage-capacity-actuator"
+    },
+    {
+      "name": "api",
+      "target": "api-runtime",
+      "binary": "portage-server"
+    },
+    {
+      "name": "artifact-lifecycle",
+      "target": "artifact-lifecycle-runtime",
+      "binary": "portage-artifact-lifecycle"
+    },
+    {
+      "name": "dashboard",
+      "target": "dashboard-runtime",
+      "binary": "portage-dashboard"
+    },
+    {
+      "name": "executor",
+      "target": "executor-runtime",
+      "binary": "portage-server"
+    },
+    {
+      "name": "migrate",
+      "target": "migrate-runtime",
+      "binary": "portage-migrate"
+    },
+    {
+      "name": "signer",
+      "target": "signer-runtime",
+      "binary": "portage-signer"
+    }
+  ]
+}

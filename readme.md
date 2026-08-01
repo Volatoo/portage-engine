@@ -123,7 +123,10 @@ deployments select the non-root `api-runtime`, `executor-runtime`,
 internet-facing API never receives PVE/SSH credentials or phase-execution
 tooling. Docker base images are pinned by multi-platform digest. CI exports an
 SPDX SBOM, BuildKit provenance and SHA-256 checksums for every production
-runtime target; binary artifacts also include per-platform checksums.
+runtime target; binary artifacts also include per-platform checksums. The
+digest-authoritative GHCR community release, keyless signing, candidate to
+stable promotion, rollback, and independent verification contract is in
+[release/README.md](release/README.md).
 
 ## Development quick start
 

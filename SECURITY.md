@@ -45,3 +45,8 @@ availability; this project does not claim a staffed 24×7 incident response.
 
 The public deployment boundary and required recovery exercises are documented
 in [docs/PRODUCTION_BOUNDARY.md](docs/PRODUCTION_BOUNDARY.md).
+
+Community OCI releases use keyless GitHub OIDC/Cosign signatures and immutable
+manifest/image digests. Operators must not treat a mutable `stable` tag as
+authority. Verification, promotion, rollback, base-image update, and retained
+evidence requirements are documented in [release/README.md](release/README.md).
