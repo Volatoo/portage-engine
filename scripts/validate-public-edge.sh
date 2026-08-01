@@ -148,9 +148,19 @@ check_backend_ports() {
 
 check_edge_static_contract() {
   local config="${repo_root}/deploy/public-edge/nginx.conf.template"
+  local device_identity_block
+  device_identity_block="$(awk '
+    $0 == "    location ^~ /api/v1/iam/device/ {" { emit = 1 }
+    emit { print }
+    emit && $0 == "    }" { exit }
+  ' "${config}")"
   rg -q 'limit_conn_zone \$binary_remote_addr zone=source_ip_connections:' "${config}" &&
     rg -q 'limit_req_zone \$binary_remote_addr zone=public_requests:' "${config}" &&
     rg -q 'limit_req_zone \$binary_remote_addr zone=identity_requests:' "${config}" &&
+    [[ -n "${device_identity_block}" ]] &&
+    rg -q 'limit_req zone=public_requests burst=10 nodelay;' <<<"${device_identity_block}" &&
+    rg -q 'limit_req zone=identity_requests burst=5 nodelay;' <<<"${device_identity_block}" &&
+    rg -q 'add_header Cache-Control "no-store" always;' <<<"${device_identity_block}" &&
     rg -q 'proxy_cookie_flags ~ secure httponly samesite=lax;' "${config}" &&
     rg -q 'location = /api/v1/instances/shell \{ return 404; \}' "${config}" &&
     rg -q 'location \^~ /shell/ \{ return 404; \}' "${config}" &&
@@ -213,7 +223,7 @@ fi
 
 run_check repository_inputs "required public deployment inputs are present" check_required_files
 run_check provider_registry "provider registry has Authentik, Google, and GitHub HTTPS callbacks without embedded secrets" check_provider_registry
-run_check edge_static_policy "edge template contains independent source-IP/request limits, cookie policy, anonymous routes, metrics auth, and WebShell denial" check_edge_static_contract
+run_check edge_static_policy "edge template contains independent source-IP/request limits, device IAM no-store policy, cookie policy, anonymous routes, metrics auth, and WebShell denial" check_edge_static_contract
 run_check production_boundary_documented "production boundary documents evidence and not-run semantics" check_documented_boundary
 
 if ! command -v docker >/dev/null 2>&1; then

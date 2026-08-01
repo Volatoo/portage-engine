@@ -28,6 +28,20 @@ func readRepositoryFile(t *testing.T, relative string) string {
 	return string(data)
 }
 
+func nginxLocationBlock(t *testing.T, config, header string) string {
+	t.Helper()
+	start := strings.Index(config, header)
+	if start < 0 {
+		t.Fatalf("nginx location %q is missing", header)
+	}
+	remainder := config[start:]
+	end := strings.Index(remainder, "\n    }")
+	if end < 0 {
+		t.Fatalf("nginx location %q is not closed", header)
+	}
+	return remainder[:end]
+}
+
 func TestPublicEdgeReferenceDeniesBackendAndWebShell(t *testing.T) {
 	compose := readRepositoryFile(t, "deploy/public-edge/docker-compose.edge.yml")
 	nginx := readRepositoryFile(t, "deploy/public-edge/nginx.conf.template")
@@ -65,6 +79,21 @@ func TestPublicEdgeReferenceDeniesBackendAndWebShell(t *testing.T) {
 	}
 	if strings.Contains(nginx, "$proxy_add_x_forwarded_for") {
 		t.Fatal("edge trusts an unreviewed client forwarding chain")
+	}
+}
+
+func TestPublicEdgeDeviceIAMUsesIdentityLimitAndNoStore(t *testing.T) {
+	nginx := readRepositoryFile(t, "deploy/public-edge/nginx.conf.template")
+	block := nginxLocationBlock(t, nginx, "location ^~ /api/v1/iam/device/ {")
+	for _, required := range []string{
+		"limit_req zone=public_requests burst=10 nodelay;",
+		"limit_req zone=identity_requests burst=5 nodelay;",
+		"add_header Cache-Control \"no-store\" always;",
+		"proxy_pass http://portage_api_backend;",
+	} {
+		if !strings.Contains(block, required) {
+			t.Errorf("device IAM edge location is missing %q", required)
+		}
 	}
 }
 
