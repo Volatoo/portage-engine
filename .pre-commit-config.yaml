@@ -5,9 +5,10 @@ repos:
       - id: trailing-whitespace
       - id: end-of-file-fixer
       - id: check-yaml
-        # Docker Compose defines the !override tag; PyYAML's generic loader
-        # does not know that valid Compose-specific tag.
-        exclude: ^docker-compose\.ha\.yml$
+        # Docker Compose defines !reset/!override tags; PyYAML's generic loader
+        # does not know those valid Compose-specific tags. These files are
+        # validated by `docker compose config` in their repository Gates.
+        exclude: ^(docker-compose\.ha\.yml|deploy/public-edge/docker-compose\.edge\.yml)$
       - id: check-added-large-files
       - id: check-merge-conflict
       - id: detect-private-key

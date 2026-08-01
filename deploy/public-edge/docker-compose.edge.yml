@@ -1,0 +1,103 @@
+# Apply after docker-compose.yml and docker-compose.public.yml. This overlay
+# removes every host-published HTTP backend port and publishes only the edge's
+# HTTP redirect and HTTPS listener. TLS and htpasswd objects are
+# deployment-owned external Docker secrets.
+
+services:
+  postgres:
+    ports: !reset []
+
+  redis:
+    ports: !reset []
+
+  minio:
+    ports: !reset []
+
+  loki:
+    ports: !reset []
+
+  tempo:
+    ports: !reset []
+
+  otel-collector:
+    ports: !reset []
+
+  prometheus:
+    ports: !reset []
+
+  grafana:
+    ports: !reset []
+
+  portage-server:
+    # Replace the inherited API+Gateway list with only the dedicated mTLS
+    # Worker Gateway on an operator-selected private/VLAN address.
+    ports: !override
+      - "${PORTAGE_WORKER_GATEWAY_BIND:?set a private worker-network bind address}:${PORTAGE_WORKER_GATEWAY_PORT:-19444}:9443"
+    expose:
+      - "8080"
+    networks:
+      - portage-net
+      - public-edge-backend
+
+  portage-dashboard:
+    ports: !reset []
+    expose:
+      - "8081"
+    networks:
+      - portage-net
+      - public-edge-backend
+
+  portage-edge:
+    image: ${PORTAGE_EDGE_IMAGE:?set a deployment-reviewed digest-pinned nginx image}
+    restart: unless-stopped
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - SETGID
+      - SETUID
+    environment:
+      PORTAGE_PUBLIC_HOST: ${PORTAGE_PUBLIC_HOST:?set the Dashboard production hostname}
+      PORTAGE_API_HOST: ${PORTAGE_API_HOST:?set the API production hostname}
+      PORTAGE_METRICS_HOST: ${PORTAGE_METRICS_HOST:?set the private metrics hostname}
+    ports:
+      - "${PORTAGE_PUBLIC_HTTP_BIND:-0.0.0.0}:80:8080"
+      - "${PORTAGE_PUBLIC_HTTPS_BIND:-0.0.0.0}:443:8443"
+    volumes:
+      - ./deploy/public-edge/nginx.conf.template:/etc/nginx/templates/default.conf.template:ro
+    secrets:
+      - portage_public_tls_cert
+      - portage_public_tls_key
+      - portage_metrics_htpasswd
+    tmpfs:
+      - /etc/nginx/conf.d:size=1m,mode=0755
+      - /var/cache/nginx:size=16m,mode=0755
+      - /var/run:size=1m,mode=0755
+    depends_on:
+      portage-server:
+        condition: service_healthy
+      portage-dashboard:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "nginx", "-t"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    networks:
+      - public-edge-backend
+
+networks:
+  public-edge-backend:
+    internal: true
+
+secrets:
+  portage_public_tls_cert:
+    external: true
+  portage_public_tls_key:
+    external: true
+  portage_metrics_htpasswd:
+    external: true

@@ -1,0 +1,131 @@
+{
+  "baseline_commit": "f79fca4",
+  "checks": [
+    {
+      "id": "authentik_login_callback",
+      "reason": "PORTAGE_GATE_RUN_LIVE=1 was not set; no production credential was used",
+      "status": "not_run",
+      "summary": "real-host check requires explicit activation and deployment-owned inputs"
+    },
+    {
+      "id": "google_login_callback",
+      "reason": "PORTAGE_GATE_RUN_LIVE=1 was not set; no production credential was used",
+      "status": "not_run",
+      "summary": "real-host check requires explicit activation and deployment-owned inputs"
+    },
+    {
+      "id": "github_login_callback",
+      "reason": "PORTAGE_GATE_RUN_LIVE=1 was not set; no production credential was used",
+      "status": "not_run",
+      "summary": "real-host check requires explicit activation and deployment-owned inputs"
+    },
+    {
+      "id": "oauth_state_nonce_pkce",
+      "reason": "PORTAGE_GATE_RUN_LIVE=1 was not set; no production credential was used",
+      "status": "not_run",
+      "summary": "real-host check requires explicit activation and deployment-owned inputs"
+    },
+    {
+      "id": "session_max_lifetime",
+      "reason": "PORTAGE_GATE_RUN_LIVE=1 was not set; no production credential was used",
+      "status": "not_run",
+      "summary": "real-host check requires explicit activation and deployment-owned inputs"
+    },
+    {
+      "id": "session_idle_timeout",
+      "reason": "PORTAGE_GATE_RUN_LIVE=1 was not set; no production credential was used",
+      "status": "not_run",
+      "summary": "real-host check requires explicit activation and deployment-owned inputs"
+    },
+    {
+      "id": "session_single_revoke",
+      "reason": "PORTAGE_GATE_RUN_LIVE=1 was not set; no production credential was used",
+      "status": "not_run",
+      "summary": "real-host check requires explicit activation and deployment-owned inputs"
+    },
+    {
+      "id": "subject_revoke_all_step_up",
+      "reason": "PORTAGE_GATE_RUN_LIVE=1 was not set; no production credential was used",
+      "status": "not_run",
+      "summary": "real-host check requires explicit activation and deployment-owned inputs"
+    },
+    {
+      "id": "dashboard_logout",
+      "reason": "PORTAGE_GATE_RUN_LIVE=1 was not set; no production credential was used",
+      "status": "not_run",
+      "summary": "real-host check requires explicit activation and deployment-owned inputs"
+    },
+    {
+      "id": "authentik_backchannel_logout",
+      "reason": "PORTAGE_GATE_RUN_LIVE=1 was not set; no production credential was used",
+      "status": "not_run",
+      "summary": "real-host check requires explicit activation and deployment-owned inputs"
+    },
+    {
+      "id": "cross_provider_email_separation",
+      "reason": "PORTAGE_GATE_RUN_LIVE=1 was not set; no production credential was used",
+      "status": "not_run",
+      "summary": "real-host check requires explicit activation and deployment-owned inputs"
+    },
+    {
+      "id": "anonymous_surfaces",
+      "reason": "PORTAGE_GATE_RUN_LIVE=1 was not set; no production credential was used",
+      "status": "not_run",
+      "summary": "real-host check requires explicit activation and deployment-owned inputs"
+    },
+    {
+      "id": "livez_minimal",
+      "reason": "PORTAGE_GATE_RUN_LIVE=1 was not set; no production credential was used",
+      "status": "not_run",
+      "summary": "real-host check requires explicit activation and deployment-owned inputs"
+    },
+    {
+      "id": "readyz_minimal",
+      "reason": "PORTAGE_GATE_RUN_LIVE=1 was not set; no production credential was used",
+      "status": "not_run",
+      "summary": "real-host check requires explicit activation and deployment-owned inputs"
+    },
+    {
+      "id": "health_system_admin",
+      "reason": "PORTAGE_GATE_RUN_LIVE=1 was not set; no production credential was used",
+      "status": "not_run",
+      "summary": "real-host check requires explicit activation and deployment-owned inputs"
+    },
+    {
+      "id": "metrics_basic_auth",
+      "reason": "PORTAGE_GATE_RUN_LIVE=1 was not set; no production credential was used",
+      "status": "not_run",
+      "summary": "real-host check requires explicit activation and deployment-owned inputs"
+    },
+    {
+      "id": "https_cors",
+      "reason": "PORTAGE_GATE_RUN_LIVE=1 was not set; no production credential was used",
+      "status": "not_run",
+      "summary": "real-host check requires explicit activation and deployment-owned inputs"
+    },
+    {
+      "id": "webshell_not_routed",
+      "reason": "PORTAGE_GATE_RUN_LIVE=1 was not set; no production credential was used",
+      "status": "not_run",
+      "summary": "real-host check requires explicit activation and deployment-owned inputs"
+    },
+    {
+      "id": "backend_http_not_public",
+      "reason": "PORTAGE_GATE_RUN_LIVE=1 was not set; no production credential was used",
+      "status": "not_run",
+      "summary": "real-host check requires explicit activation and deployment-owned inputs"
+    },
+    {
+      "id": "edge_rate_limit",
+      "reason": "PORTAGE_GATE_RUN_LIVE=1 was not set; no production credential was used",
+      "status": "not_run",
+      "summary": "real-host check requires explicit activation and deployment-owned inputs"
+    }
+  ],
+  "credentials_used": false,
+  "gate": "public_identity_real_host",
+  "generated_at": "2026-08-01T05:04:09Z",
+  "schema_version": 1,
+  "secrets_persisted": false,
+  "status": "not_run"
+}

@@ -22,7 +22,10 @@ import (
 	"github.com/slchris/portage-engine/pkg/config"
 )
 
-const oidcFlowCookie = "pe_oidc_flow"
+const (
+	oidcFlowCookie     = "pe_oidc_flow"
+	oidcFlowCookiePath = "/auth/"
+)
 
 type oidcRuntime struct {
 	id           string
@@ -184,7 +187,7 @@ func (d *Dashboard) handleProviderStart(
 	}
 	// #nosec G124 -- HTTP is an explicit trusted-LAN mode; HttpOnly and SameSite remain enforced.
 	http.SetCookie(w, &http.Cookie{
-		Name: oidcFlowCookie, Value: sealed, Path: "/auth/",
+		Name: oidcFlowCookie, Value: sealed, Path: oidcFlowCookiePath,
 		MaxAge: 600, HttpOnly: true, Secure: d.secureCookie(r),
 		SameSite: http.SameSiteLaxMode,
 	})
@@ -281,7 +284,7 @@ func (d *Dashboard) handleProviderCallback(
 	})
 	// #nosec G124 -- HTTP is an explicit trusted-LAN mode; HttpOnly and SameSite remain enforced.
 	http.SetCookie(w, &http.Cookie{
-		Name: oidcFlowCookie, Value: "", Path: "/auth/",
+		Name: oidcFlowCookie, Value: "", Path: oidcFlowCookiePath,
 		MaxAge: -1, HttpOnly: true, Secure: d.secureCookie(r),
 		SameSite: http.SameSiteLaxMode,
 	})

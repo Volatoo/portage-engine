@@ -30,6 +30,11 @@ services:
       AUTH_PROVIDERS_PATH: /etc/portage-engine/configs/auth-providers.json
       AUTH_ADMIN_IDENTITIES: ${PORTAGE_AUTH_ADMIN_IDENTITIES:?set immutable provider:subject admins}
       DEVICE_AUTHORIZATION_VERIFICATION_URI: ${PORTAGE_DEVICE_AUTHORIZATION_VERIFICATION_URI:?set HTTPS Dashboard /device URL}
+      OIDC_SESSION_IDLE_MINUTES: ${PORTAGE_OIDC_SESSION_IDLE_MINUTES:?set the server-side idle timeout}
+      OIDC_SESSION_MAX_MINUTES: ${PORTAGE_OIDC_SESSION_MAX_MINUTES:?set the absolute session lifetime}
+      OIDC_STEP_UP_MAX_AGE_MINUTES: ${PORTAGE_OIDC_STEP_UP_MAX_AGE_MINUTES:?set the fresh-auth step-up window}
+      OIDC_STEP_UP_AMR_VALUES: ${PORTAGE_OIDC_STEP_UP_AMR_VALUES:-}
+      OIDC_STEP_UP_ACR_VALUES: ${PORTAGE_OIDC_STEP_UP_ACR_VALUES:-}
       API_KEY: ""
       STEP_UP_API_KEY: ""
       CORS_ALLOWED_ORIGINS: ${PORTAGE_CORS_ALLOWED_ORIGINS:?set HTTPS origins}
@@ -151,8 +156,11 @@ services:
       - /tmp:size=256m,mode=1777
     environment:
       DEPLOYMENT_MODE: public
+      AUTH_ENABLED: "true"
       ALLOW_ANONYMOUS: "false"
       COOKIE_SECURE: "true"
+      JWT_SECRET: ${PORTAGE_DASHBOARD_JWT_SECRET:?set a unique dashboard cookie-encryption secret}
+      AUTH_PROVIDERS_PATH: /etc/portage-engine/configs/auth-providers.json
       ADMIN_USER: ""
       ADMIN_PASSWORD: ""
       SERVER_API_KEY: ""
