@@ -4,6 +4,11 @@
 .vscode
 .local
 bin
+# Dockerfile.test is a `COPY . .` build. Both of these exist on a normal working
+# copy - gitignored, not absent - and hold database dumps, pgBackRest WAL
+# archives, and the compose secrets readme.md tells operators to create.
+backups
+.env.compose
 
 **/.terraform
 **/*.tfstate

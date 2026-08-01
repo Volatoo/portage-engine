@@ -4,6 +4,8 @@ package builder
 import (
 	"sync"
 	"time"
+
+	"github.com/slchris/portage-engine/internal/metrics"
 )
 
 // BuilderInfo represents information about a registered builder.
@@ -83,6 +85,7 @@ func (r *Registry) Register(info *BuilderInfo) {
 		}
 		r.builders[info.ID] = info
 	}
+	r.publishInventoryGaugesLocked()
 }
 
 // Unregister removes a builder from the registry.
@@ -90,6 +93,35 @@ func (r *Registry) Unregister(builderID string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	delete(r.builders, builderID)
+	r.publishInventoryGaugesLocked()
+}
+
+// publishInventoryGaugesLocked republishes the executor inventory gauges from
+// the registry that heartbeats actually maintain. The builder panels and the
+// capacity alert read these gauges and nothing ever set them, so a fully
+// healthy cluster reported zero active and zero healthy builders — the worst
+// possible reading during an incident. checkStaleBuilders marks a timed-out
+// builder offline in place: it clears neither Enabled nor the entry itself, so
+// active and capacity must exclude offline builders as well. Counting them
+// would keep the "Active Builders" stat green and the capacity alert quiet with
+// every executor in the cluster down, which is the same misreading with the
+// sign flipped. Callers hold r.mu.
+func (r *Registry) publishInventoryGaugesLocked() {
+	var active, healthy, capacity int64
+	for _, info := range r.builders {
+		if !info.Enabled || info.Status == "offline" {
+			continue
+		}
+		active++
+		if info.Status == "online" || info.Status == "busy" {
+			healthy++
+		}
+		capacity += int64(info.Capacity)
+	}
+	registry := metrics.Default()
+	registry.SetBuildersActive(active)
+	registry.SetBuildersHealthy(healthy)
+	registry.SetBuilderCapacity(capacity)
 }
 
 // Get retrieves a builder by ID.
@@ -130,6 +162,7 @@ func (r *Registry) UpdateStatus(builderID, status string) bool {
 	}
 	builder.Status = status
 	builder.LastHeartbeat = time.Now()
+	r.publishInventoryGaugesLocked()
 	return true
 }
 
@@ -272,6 +305,7 @@ func (r *Registry) checkStaleBuilders() {
 			builder.Status = "offline"
 		}
 	}
+	r.publishInventoryGaugesLocked()
 }
 
 // Close stops the registry cleanup goroutine.

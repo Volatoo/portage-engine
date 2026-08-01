@@ -24,18 +24,23 @@ type IAMSessionPolicy struct {
 // IAMSession is a redacted token/session record. Raw bearer bytes are never
 // written to PostgreSQL or returned by the API.
 type IAMSession struct {
-	ID                string     `json:"id"`
-	SubjectID         string     `json:"subject_id"`
-	ProviderSessionID string     `json:"provider_session_id,omitempty"`
-	ProviderTokenID   string     `json:"provider_token_id,omitempty"`
-	IssuedAt          time.Time  `json:"issued_at"`
-	AuthenticatedAt   *time.Time `json:"authenticated_at,omitempty"`
-	ExpiresAt         time.Time  `json:"expires_at"`
-	LastSeenAt        time.Time  `json:"last_seen_at"`
-	ACR               string     `json:"acr,omitempty"`
-	AMR               []string   `json:"amr,omitempty"`
-	RevokedAt         *time.Time `json:"revoked_at,omitempty"`
-	RevokeReason      string     `json:"revoke_reason,omitempty"`
+	ID string `json:"id"`
+	// Kind and DerivedFromSessionID expose the device-flow lineage: a cli
+	// session is a token minted from the browser session that approved it and
+	// is revoked with that parent.
+	Kind                 string     `json:"kind"`
+	DerivedFromSessionID string     `json:"derived_from_session_id,omitempty"`
+	SubjectID            string     `json:"subject_id"`
+	ProviderSessionID    string     `json:"provider_session_id,omitempty"`
+	ProviderTokenID      string     `json:"provider_token_id,omitempty"`
+	IssuedAt             time.Time  `json:"issued_at"`
+	AuthenticatedAt      *time.Time `json:"authenticated_at,omitempty"`
+	ExpiresAt            time.Time  `json:"expires_at"`
+	LastSeenAt           time.Time  `json:"last_seen_at"`
+	ACR                  string     `json:"acr,omitempty"`
+	AMR                  []string   `json:"amr,omitempty"`
+	RevokedAt            *time.Time `json:"revoked_at,omitempty"`
+	RevokeReason         string     `json:"revoke_reason,omitempty"`
 }
 
 // AuthorizeSession registers or refreshes one verified OIDC token and rejects
@@ -103,7 +108,9 @@ func (r *IAMRepository) AuthorizeSession(
 			      clock_timestamp() - make_interval(secs => $11)
 			  AND iam_sessions.issued_at >
 			      clock_timestamp() - make_interval(secs => $12)
-			RETURNING id::text, subject_id::text, provider_session_id,
+			RETURNING id::text, session_kind,
+			          COALESCE(derived_from_session_id::text, ''),
+			          subject_id::text, provider_session_id,
 			          provider_token_id, issued_at, authenticated_at,
 			          expires_at, last_seen_at, acr, amr, revoked_at,
 			          revoke_reason
@@ -114,7 +121,8 @@ func (r *IAMRepository) AuthorizeSession(
 			int64(policy.IdleTimeout/time.Second),
 			int64(policy.MaxLifetime/time.Second),
 		).Scan(
-			&session.ID, &session.SubjectID, &session.ProviderSessionID,
+			&session.ID, &session.Kind, &session.DerivedFromSessionID,
+			&session.SubjectID, &session.ProviderSessionID,
 			&session.ProviderTokenID, &session.IssuedAt,
 			&session.AuthenticatedAt, &session.ExpiresAt,
 			&session.LastSeenAt, &session.ACR, &session.AMR,
@@ -196,7 +204,9 @@ func (r *IAMRepository) ListSessions(
 	subjectID string,
 ) ([]IAMSession, error) {
 	rows, err := r.db.pool.Query(ctx, `
-		SELECT id::text, subject_id::text, provider_session_id,
+		SELECT id::text, session_kind,
+		       COALESCE(derived_from_session_id::text, ''),
+		       subject_id::text, provider_session_id,
 		       provider_token_id, issued_at, authenticated_at, expires_at,
 		       last_seen_at, acr, amr, revoked_at, revoke_reason
 		FROM iam_sessions
@@ -212,7 +222,8 @@ func (r *IAMRepository) ListSessions(
 	for rows.Next() {
 		var session IAMSession
 		if err := rows.Scan(
-			&session.ID, &session.SubjectID, &session.ProviderSessionID,
+			&session.ID, &session.Kind, &session.DerivedFromSessionID,
+			&session.SubjectID, &session.ProviderSessionID,
 			&session.ProviderTokenID, &session.IssuedAt,
 			&session.AuthenticatedAt, &session.ExpiresAt,
 			&session.LastSeenAt, &session.ACR, &session.AMR,
@@ -232,21 +243,43 @@ func (r *IAMRepository) RevokeSession(
 	allowOtherSubjects bool,
 ) (IAMSession, error) {
 	var session IAMSession
+	// Revocation follows derivation: a CLI token minted from this session is
+	// the same credential in another shape, so it dies with its parent. The
+	// walk is recursive because a CLI session can itself approve a device
+	// authorization.
 	err := r.db.pool.QueryRow(ctx, `
-		UPDATE iam_sessions
-		SET revoked_at = COALESCE(revoked_at, clock_timestamp()),
-		    revoked_by_subject_id = CASE
-		      WHEN revoked_at IS NULL THEN NULLIF($2, '')::uuid
-		      ELSE revoked_by_subject_id END,
-		    revoke_reason = CASE
-		      WHEN revoked_at IS NULL THEN $3 ELSE revoke_reason END
+		WITH RECURSIVE lineage AS (
+		  SELECT id FROM iam_sessions
+		  WHERE id = $1
+		    AND ($4::boolean OR subject_id = NULLIF($2, '')::uuid)
+		  UNION ALL
+		  SELECT derived.id
+		  FROM iam_sessions derived
+		  JOIN lineage ON derived.derived_from_session_id = lineage.id
+		), revoked AS (
+		  UPDATE iam_sessions
+		  SET revoked_at = COALESCE(revoked_at, clock_timestamp()),
+		      revoked_by_subject_id = CASE
+		        WHEN revoked_at IS NULL THEN NULLIF($2, '')::uuid
+		        ELSE revoked_by_subject_id END,
+		      revoke_reason = CASE
+		        WHEN revoked_at IS NULL THEN $3 ELSE revoke_reason END
+		  WHERE id IN (SELECT id FROM lineage)
+		  RETURNING id, session_kind, derived_from_session_id, subject_id,
+		            provider_session_id, provider_token_id, issued_at,
+		            authenticated_at, expires_at, last_seen_at, acr, amr,
+		            revoked_at, revoke_reason
+		)
+		SELECT id::text, session_kind,
+		       COALESCE(derived_from_session_id::text, ''), subject_id::text,
+		       provider_session_id, provider_token_id, issued_at,
+		       authenticated_at, expires_at, last_seen_at, acr, amr,
+		       revoked_at, revoke_reason
+		FROM revoked
 		WHERE id = $1
-		  AND ($4::boolean OR subject_id = NULLIF($2, '')::uuid)
-		RETURNING id::text, subject_id::text, provider_session_id,
-		          provider_token_id, issued_at, authenticated_at, expires_at,
-		          last_seen_at, acr, amr, revoked_at, revoke_reason
 	`, sessionID, requester.SubjectID, reason, allowOtherSubjects).Scan(
-		&session.ID, &session.SubjectID, &session.ProviderSessionID,
+		&session.ID, &session.Kind, &session.DerivedFromSessionID,
+		&session.SubjectID, &session.ProviderSessionID,
 		&session.ProviderTokenID, &session.IssuedAt,
 		&session.AuthenticatedAt, &session.ExpiresAt,
 		&session.LastSeenAt, &session.ACR, &session.AMR,

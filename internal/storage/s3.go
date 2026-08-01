@@ -129,11 +129,12 @@ func NewS3StorageWithConfig(cfg S3Config) (*S3Storage, error) {
 
 // Upload creates an immutable object. Repeating an upload with identical bytes
 // is idempotent; attempting to replace the key with different bytes fails.
-func (s *S3Storage) Upload(localPath, remotePath string) error {
+func (s *S3Storage) Upload(localPath, remotePath string) (err error) {
 	key, err := s.objectKey(remotePath)
 	if err != nil {
 		return err
 	}
+	defer func() { recordWrite(err) }()
 	file, err := os.Open(localPath) // #nosec G304 -- source path is selected by the caller.
 	if err != nil {
 		return fmt.Errorf("open S3 upload source: %w", err)
@@ -313,7 +314,7 @@ func (s *S3Storage) CompareAndSwap(
 }
 
 // Delete removes an object only for a separately configured lifecycle client.
-func (s *S3Storage) Delete(remotePath string) error {
+func (s *S3Storage) Delete(remotePath string) (err error) {
 	if !s.allowDelete {
 		return ErrDeleteDisabled
 	}
@@ -321,6 +322,7 @@ func (s *S3Storage) Delete(remotePath string) error {
 	if err != nil {
 		return err
 	}
+	defer func() { recordWrite(err) }()
 	ctx, cancel := context.WithTimeout(context.Background(), s.requestTimeout)
 	defer cancel()
 	_, err = s.client.DeleteObject(ctx, &s3.DeleteObjectInput{
@@ -335,6 +337,22 @@ func (s *S3Storage) Delete(remotePath string) error {
 
 // List lists object paths relative to the configured prefix.
 func (s *S3Storage) List(prefix string) ([]string, error) {
+	objects, err := s.ListModified(prefix)
+	if err != nil {
+		return nil, err
+	}
+	files := make([]string, 0, len(objects))
+	for _, object := range objects {
+		files = append(files, object.Key)
+	}
+	return files, nil
+}
+
+// ListModified lists the same objects with the bucket's own LastModified. That
+// value rides along on every ListObjectsV2 entry, so an age sweep over a whole
+// generation costs one paginated call rather than one HeadObject per key on
+// every five-minute round.
+func (s *S3Storage) ListModified(prefix string) ([]ObjectInfo, error) {
 	relativePrefix, err := cleanS3ListPrefix(prefix)
 	if err != nil {
 		return nil, err
@@ -345,7 +363,7 @@ func (s *S3Storage) List(prefix string) ([]string, error) {
 		Prefix: aws.String(fullPrefix),
 	}
 	paginator := s3.NewListObjectsV2Paginator(s.client, input)
-	files := make([]string, 0)
+	objects := make([]ObjectInfo, 0)
 	ctx, cancel := context.WithTimeout(context.Background(), s.requestTimeout)
 	defer cancel()
 	for paginator.HasMorePages() {
@@ -358,11 +376,14 @@ func (s *S3Storage) List(prefix string) ([]string, error) {
 			if !strings.HasPrefix(key, s.prefix) {
 				continue
 			}
-			files = append(files, strings.TrimPrefix(key, s.prefix))
+			objects = append(objects, ObjectInfo{
+				Key:      strings.TrimPrefix(key, s.prefix),
+				Modified: aws.ToTime(object.LastModified),
+			})
 		}
 	}
-	sort.Strings(files)
-	return files, nil
+	sort.Slice(objects, func(i, j int) bool { return objects[i].Key < objects[j].Key })
+	return objects, nil
 }
 
 // GetURL returns either the configured read-only public URL or an s3:// URI.
@@ -396,6 +417,32 @@ func (s *S3Storage) Exists(remotePath string) (bool, error) {
 		return false, nil
 	}
 	return false, fmt.Errorf("head S3 object %q: %w", key, err)
+}
+
+// ObjectModified reports the bucket's own last-modified time for an object.
+// The control plane uses it to age out orphaned quarantine prefixes without
+// trusting any single replica's in-memory view of what is still in flight.
+func (s *S3Storage) ObjectModified(remotePath string) (time.Time, error) {
+	key, err := s.objectKey(remotePath)
+	if err != nil {
+		return time.Time{}, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), s.requestTimeout)
+	defer cancel()
+	output, err := s.client.HeadObject(ctx, &s3.HeadObjectInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(key),
+	})
+	if isNotFound(err) {
+		return time.Time{}, fmt.Errorf("%w: s3://%s/%s", ErrObjectNotFound, s.bucket, key)
+	}
+	if err != nil {
+		return time.Time{}, fmt.Errorf("head S3 object %q: %w", key, err)
+	}
+	if output.LastModified == nil {
+		return time.Time{}, fmt.Errorf("S3 object %q has no last-modified time", key)
+	}
+	return *output.LastModified, nil
 }
 
 func (s *S3Storage) objectDigestMatches(key, expected string) (bool, error) {

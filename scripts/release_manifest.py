@@ -316,6 +316,17 @@ def load_canonical_manifest(path: Path, root: Path, config: dict[str, Any]) -> d
     return manifest
 
 
+def reference_config(override: str | None, config: dict[str, Any]) -> dict[str, Any]:
+    # A signed bundle carries the release config it was built against and is
+    # validated against that copy, never the caller's working tree. The role set
+    # and the command/platform matrix are exact-equality assertions, so without
+    # this the first merge that adds a cmd/ target would strand every manifest
+    # signed before it: un-promotable, and unverifiable by its own operators.
+    if not override:
+        return config
+    return load_config(Path(override))
+
+
 def load_inventory(path: Path, context: str) -> list[dict[str, Any]]:
     value = load_json(path)
     if not isinstance(value, list):
@@ -389,7 +400,11 @@ def cmd_promote(args: argparse.Namespace, config: dict[str, Any]) -> None:
         require_digest(expected_oci, "expected previous stable OCI digest")
         if current_path is None or not args.current_root:
             raise ManifestError("promotion CAS requires the current stable manifest and root")
-        current = load_canonical_manifest(current_path, Path(args.current_root), config)
+        current = load_canonical_manifest(
+            current_path,
+            Path(args.current_root),
+            reference_config(args.current_config, config),
+        )
         if current["release"]["channel"] != "stable" or file_digest(current_path) != expected:
             raise ManifestError("current stable manifest does not satisfy the promotion CAS digest")
         if current["registry"] != candidate["registry"]:
@@ -418,7 +433,11 @@ def cmd_promote(args: argparse.Namespace, config: dict[str, Any]) -> None:
 def cmd_rollback(args: argparse.Namespace, config: dict[str, Any]) -> None:
     current_path = Path(args.current)
     target_path = Path(args.target)
-    current = load_canonical_manifest(current_path, Path(args.current_root), config)
+    current = load_canonical_manifest(
+        current_path,
+        Path(args.current_root),
+        reference_config(args.current_config, config),
+    )
     target = load_canonical_manifest(target_path, Path(args.target_root), config)
     if current["release"]["channel"] != "stable" or target["release"]["channel"] != "stable":
         raise ManifestError("rollback requires stable current and target manifests")
@@ -483,6 +502,7 @@ def build_parser() -> argparse.ArgumentParser:
     promote.add_argument("--expected-previous-oci-digest", required=True)
     promote.add_argument("--current-stable")
     promote.add_argument("--current-root")
+    promote.add_argument("--current-config")
     promote.add_argument("--promoted-at", required=True)
     promote.add_argument("--output-root", required=True)
     promote.add_argument("--output", required=True)
@@ -490,6 +510,7 @@ def build_parser() -> argparse.ArgumentParser:
     rollback = subparsers.add_parser("rollback")
     rollback.add_argument("--current", required=True)
     rollback.add_argument("--current-root", required=True)
+    rollback.add_argument("--current-config")
     rollback.add_argument("--target", required=True)
     rollback.add_argument("--target-root", required=True)
     rollback.add_argument("--target-oci-digest", required=True)

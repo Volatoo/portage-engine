@@ -8,7 +8,7 @@
 persistent executor 模板与 fail-closed Gate、CLI device authorization、公开 edge
 与身份 Gate、lease/projection observability、签名 OCI release promotion、恢复演练
 框架、GTK/Qt/WebView GUI matrix，以及默认关闭的 Distributed Build Alpha。数据库
-authority 为 schema v29，迁移顺序固定为 00027 → 00028 → 00029。
+authority 为 schema v30，迁移顺序固定为 00027 → 00028 → 00029 → 00030。
 
 真实 PVE、正式 IdP、Vault HA、生产备份/对象存储/signer、真实 distccd、GitHub
 发布和 30 天运行窗口仍依赖部署凭据或外部环境；这些 Gate 保持 `not-run`，不能
@@ -91,7 +91,7 @@ membership，不来自 email 或可变 group claim。
 
 - [x] 恢复 Gate 从部署的 `portage-migrate supported-schema` 动态取得 authority，
   并在临时 PostgreSQL 18 上执行当前 migration/恢复 SQL；不再硬编码 v26。
-- [ ] 在最终整合后的生产 schema v29（00027 → 00028 → 00029）上配置 full、
+- [ ] 在最终整合后的生产 schema v30（00027 → 00028 → 00029 → 00030）上配置 full、
   differential 和 WAL/PITR 备份。
 - [ ] 将 backup/WAL repository 放到 NAS，并纳入 PBS VM 备份。
 - [ ] 保持 PostgreSQL `PGDATA` 位于可靠本地块存储，不直接放在 NFS。
@@ -245,7 +245,7 @@ distcc 应作为独立里程碑，不能直接打开全局开关。
 1. 审阅、合并并推送 `codex/next-steps-integration`，确认 GitHub CI/CodeQL/安全扫描。
 2. 用真实 PVE 完成 persistent-executor SCHED-2B 与签名 GUI matrix Gate。
 3. 部署正式 HTTPS edge，完成 Authentik、Google、GitHub 回调与 real-host Gate。
-4. 完成 Vault HA、schema v29 PostgreSQL/PBS、对象存储和 signer 现场恢复演练。
+4. 完成 Vault HA、schema v30 PostgreSQL/PBS、对象存储和 signer 现场恢复演练。
 5. 以受保护 GitHub environment 执行真实 candidate/stable/rollback 发布。
 6. Public Beta 不依赖 distcc；有隔离网络后再执行真实 distccd 双 job/disconnect Gate。
 7. 选择实际 billing export 后实现 invoice reconciliation，随后开始 30 天稳定窗口。

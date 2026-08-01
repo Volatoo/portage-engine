@@ -140,6 +140,58 @@ func TestConfigureDistCCBlockedRejectsRequestWithoutEligiblePackage(t *testing.T
 	}
 }
 
+func TestConfigureDistCCUsesTheLeaseEligibleAtomsForVersionedBundleAtoms(t *testing.T) {
+	_, network, _ := net.ParseCIDR("10.44.0.0/24")
+	policy, err := distcc.NewBuilderPolicy(distcc.BuilderPolicy{
+		Enabled: true, Allowlist: []string{"dev-qt/qtwebengine"},
+		IsolatedNetworks: []*net.IPNet{network}, Architecture: "amd64",
+		CHOST:           "x86_64-pc-linux-gnu",
+		CompilerDigest:  builderDistCCPool().CompilerDigest,
+		ImageGeneration: "gentoo-g1", CPUFeatures: []string{"avx2"},
+		NetworkZone: "build-a",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	poolID, _ := builderDistCCPool().ID()
+	lease := &distcc.Lease{
+		ID: "lease-a", WorkerID: "worker-a", WorkerEndpoint: "10.44.0.9:3632",
+		BuilderID: "builder-a", BuilderNetworkIdentity: "worker-cert:a",
+		AttemptID: "attempt-a", AttemptFence: 5,
+		Fence: 7, Slots: 2, PoolID: poolID, Pool: builderDistCCPool(),
+		FallbackPolicy: distcc.FallbackBlocked,
+		ExpiresAt:      time.Now().Add(time.Minute),
+		EligibleAtoms:  []string{"dev-qt/qtwebengine"},
+	}
+	root := t.TempDir()
+	executor := NewBuildExecutorWithOptions(t.TempDir(), t.TempDir(), BuildOptions{
+		Format: "gpkg", DistCCPolicy: policy,
+	})
+	// The client's own bundle carries the versioned form the control plane
+	// reserved a compile slot for.
+	bundle := &ConfigBundle{
+		Config: &PortageConfig{},
+		Packages: &BuildPackageSpec{Packages: []PackageSpec{
+			{Atom: "=dev-qt/qtwebengine-6.7.2"},
+		}},
+	}
+	job := &BuildJob{ID: "job-a", Request: &LocalBuildRequest{
+		ProjectID: lease.Pool.ProjectTrustDomain,
+		AttemptID: lease.AttemptID, AttemptFence: lease.AttemptFence,
+		CompileLease: lease,
+	}}
+	if err := executor.configureDistCC(root, bundle, job); err != nil {
+		t.Fatal(err)
+	}
+	mapping, err := os.ReadFile(filepath.Join(root, "etc", "portage", "package.env", "90-portage-engine-distcc"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(mapping) != "dev-qt/qtwebengine portage-engine-distcc-lease\n" {
+		t.Fatalf("unexpected package mapping %q", mapping)
+	}
+}
+
 func TestBuildEnvironmentCannotGloballyEnableDistCC(t *testing.T) {
 	executor := NewBuildExecutor(t.TempDir(), t.TempDir())
 	env := executor.buildEnvironment(

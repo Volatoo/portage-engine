@@ -62,6 +62,7 @@ jobs:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           set -euo pipefail
+          source scripts/oras-resolve.sh
           if [ "${GITHUB_REF}" != "refs/heads/${DEFAULT_BRANCH}" ] || [ "${CONFIRM}" != "promote-to-stable" ]; then
             echo "promotion must run the default-branch workflow with explicit confirmation" >&2
             exit 1
@@ -87,7 +88,13 @@ jobs:
             --certificate-identity-regexp "${candidate_identity_regex}" \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com \
             candidate/SHA256SUMS
-          candidate_manifest_digest="$(python3 scripts/release_manifest.py validate --manifest candidate/release-manifest.json --root candidate)"
+          # Validate each pulled bundle against the release config it shipped
+          # with; the workflow's own checkout is a later commit than the release.
+          [ -f candidate/release-config.json ] || {
+            echo "candidate bundle does not carry its release config" >&2
+            exit 1
+          }
+          candidate_manifest_digest="$(python3 scripts/release_manifest.py --config candidate/release-config.json validate --manifest candidate/release-manifest.json --root candidate)"
           if [ "$(jq -r '.release.channel' candidate/release-manifest.json)" != "candidate" ]; then
             echo "input OCI artifact is not a candidate manifest" >&2
             exit 1
@@ -99,10 +106,7 @@ jobs:
           done < <(jq -r '.images[].reference' candidate/release-manifest.json)
 
           stable_alias="${release_repository}:stable"
-          current_oci_digest="none"
-          if resolved="$(oras resolve "${stable_alias}" 2>/dev/null)"; then
-            current_oci_digest="${resolved}"
-          fi
+          oras_resolve_into current_oci_digest "${stable_alias}"
           if [ "${EXPECTED_PREVIOUS}" = "none" ]; then
             if [ "${current_oci_digest}" != "none" ]; then
               echo "stable already exists; first-promotion expectation is stale" >&2
@@ -123,7 +127,11 @@ jobs:
               --certificate-identity-regexp "${stable_identity_regex}" \
               --certificate-oidc-issuer https://token.actions.githubusercontent.com \
               current/release-manifest.json
-            current_manifest_digest="$(python3 scripts/release_manifest.py validate --manifest current/release-manifest.json --root current)"
+            [ -f current/release-config.json ] || {
+              echo "current stable bundle does not carry its release config" >&2
+              exit 1
+            }
+            current_manifest_digest="$(python3 scripts/release_manifest.py --config current/release-config.json validate --manifest current/release-manifest.json --root current)"
             if [ "${current_manifest_digest}" != "${EXPECTED_PREVIOUS}" ]; then
               echo "current stable canonical digest does not match the promotion CAS input" >&2
               exit 1
@@ -147,6 +155,7 @@ jobs:
           STABLE_IDENTITY_REGEX: ${{ steps.verify.outputs.stable_identity_regex }}
         run: |
           set -euo pipefail
+          source scripts/oras-resolve.sh
           cp -a candidate stable
           promoted_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
           args=(
@@ -160,10 +169,13 @@ jobs:
             --output stable/release-manifest.json
           )
           if [ "${EXPECTED_PREVIOUS}" != "none" ]; then
-            args+=(--current-stable current/release-manifest.json --current-root current)
+            args+=(
+              --current-stable current/release-manifest.json --current-root current
+              --current-config current/release-config.json
+            )
           fi
-          python3 scripts/release_manifest.py promote "${args[@]}"
-          stable_manifest_digest="$(python3 scripts/release_manifest.py validate --manifest stable/release-manifest.json --root stable)"
+          python3 scripts/release_manifest.py --config candidate/release-config.json promote "${args[@]}"
+          stable_manifest_digest="$(python3 scripts/release_manifest.py --config stable/release-config.json validate --manifest stable/release-manifest.json --root stable)"
           cosign sign-blob --yes --bundle stable/release-manifest.sigstore.json stable/release-manifest.json
           signing_identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release-promote.yml@${GITHUB_REF}"
           cosign verify-blob --bundle stable/release-manifest.sigstore.json \
@@ -173,7 +185,8 @@ jobs:
           release_id="$(jq -r '.release.id' stable/release-manifest.json)"
           immutable_tag="stable-${release_id}-m${stable_manifest_digest#sha256:}"
           immutable_tag="${immutable_tag:0:80}"
-          if oras resolve "${RELEASE_REPOSITORY}:stable-${release_id}" >/dev/null 2>&1; then
+          oras_resolve_into existing_release_tag "${RELEASE_REPOSITORY}:stable-${release_id}"
+          if [ "${existing_release_tag}" != "none" ]; then
             echo "stable release ID tag already exists; refusing to overwrite it" >&2
             exit 1
           fi
@@ -183,40 +196,81 @@ jobs:
             oras push --artifact-type application/vnd.portage-engine.release.v1+json \
               "${RELEASE_REPOSITORY}:${immutable_tag}" "${files[@]}"
           )
-          stable_oci_digest="$(oras resolve "${RELEASE_REPOSITORY}:${immutable_tag}")"
+          oras_resolve_into stable_oci_digest "${RELEASE_REPOSITORY}:${immutable_tag}"
+          if [ "${stable_oci_digest}" = "none" ]; then
+            echo "pushed stable bundle did not resolve to a digest" >&2
+            exit 1
+          fi
+          # Sign before anything aliases or tags this revision. Every later
+          # promotion and rollback resolves `:stable` and re-verifies the
+          # signature on whatever it finds, so a cutover that lands and is then
+          # followed by a failed or cancelled `cosign sign` leaves the channel
+          # unverifiable AND unreplaceable -- and the release ID guard above
+          # refuses the re-run that would repair it. Signing first bounds the
+          # worst case to a revision reachable only under its content-addressed
+          # `-m<digest>` tag: never aliased, never carrying the release ID tag,
+          # never the answer to "what is stable", and safe to promote again.
           cosign sign --yes "${RELEASE_REPOSITORY}@${stable_oci_digest}"
           cosign verify --certificate-identity "${signing_identity}" \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com \
             "${RELEASE_REPOSITORY}@${stable_oci_digest}" >/dev/null
 
-          observed_current="none"
-          if resolved="$(oras resolve "${RELEASE_REPOSITORY}:stable" 2>/dev/null)"; then
-            observed_current="${resolved}"
-          fi
+          oras_resolve_into observed_current "${RELEASE_REPOSITORY}:stable"
           if [ "${observed_current}" != "${CURRENT_OCI_DIGEST}" ]; then
             echo "stable alias changed during promotion; refusing the cutover" >&2
             exit 1
           fi
-          while IFS=$'\t' read -r repository reference; do
-            if oras resolve "${repository}:stable-${release_id}" >/dev/null 2>&1; then
-              echo "immutable role release tag already exists for ${repository}" >&2
+          # Role `:stable` moves ahead of the release `:stable` so the manifest
+          # that answers "what is stable" is never authoritative before the
+          # images it names are reachable under that alias. Each move is an
+          # idempotent write to a fixed digest and nothing write-once is
+          # recorded here, so a run that dies halfway through the loop is
+          # repaired by re-running the same inputs.
+          while IFS=$'\t' read -r repository reference digest; do
+            oras_resolve_into existing_role_tag "${repository}:stable-${release_id}"
+            # A record binding the digest this run would write belongs to an
+            # attempt that won its cutover and died in the role loop below;
+            # re-running the same inputs finishes it. Only a record binding
+            # different content is a release ID being reused.
+            if [ "${existing_role_tag}" != "none" ] && [ "${existing_role_tag}" != "${digest}" ]; then
+              echo "release ID ${release_id} already records ${existing_role_tag} for ${repository}" >&2
               exit 1
             fi
-            oras tag "${reference}" "stable-${release_id}"
             oras tag "${reference}" stable
-          done < <(jq -r '.images[] | [.repository, .reference] | @tsv' stable/release-manifest.json)
-          if resolved="$(oras resolve "${RELEASE_REPOSITORY}:stable" 2>/dev/null)"; then
-            observed_current="${resolved}"
-          else
-            observed_current="none"
-          fi
+          done < <(jq -r '.images[] | [.repository, .reference, .digest] | @tsv' stable/release-manifest.json)
+          oras_resolve_into observed_current "${RELEASE_REPOSITORY}:stable"
           if [ "${observed_current}" != "${CURRENT_OCI_DIGEST}" ]; then
             echo "stable alias changed before the final cutover" >&2
             exit 1
           fi
-          oras tag "${RELEASE_REPOSITORY}@${stable_oci_digest}" "stable-${release_id}" stable
-          if [ "$(oras resolve "${RELEASE_REPOSITORY}:stable")" != "${stable_oci_digest}" ]; then
+          oras tag "${RELEASE_REPOSITORY}@${stable_oci_digest}" stable
+          oras_resolve_into bound_alias "${RELEASE_REPOSITORY}:stable"
+          if [ "${bound_alias}" != "${stable_oci_digest}" ]; then
             echo "stable alias read-back did not bind the signed manifest" >&2
+            exit 1
+          fi
+          # Every `stable-${release_id}` tag is written here and nowhere
+          # earlier, one tag per `oras tag` so no call can half-apply. Role
+          # records go first and the release repository's goes last, because
+          # that last write is the only guard a re-run cannot walk over: the
+          # role guard above accepts a record that already binds the same
+          # digest, while the release-ID guard before the push is strict. An
+          # attempt that dies anywhere in this block therefore leaves nothing
+          # that blocks replaying the same inputs, and an attempt that reaches
+          # the final tag has finished. Writing them only once the alias is
+          # bound and read back is what keeps that true.
+          while IFS=$'\t' read -r repository reference digest; do
+            oras tag "${reference}" "stable-${release_id}"
+            oras_resolve_into bound_role_tag "${repository}:stable-${release_id}"
+            if [ "${bound_role_tag}" != "${digest}" ]; then
+              echo "role release ID tag read-back did not bind ${repository}@${digest}" >&2
+              exit 1
+            fi
+          done < <(jq -r '.images[] | [.repository, .reference, .digest] | @tsv' stable/release-manifest.json)
+          oras tag "${RELEASE_REPOSITORY}@${stable_oci_digest}" "stable-${release_id}"
+          oras_resolve_into bound_release_tag "${RELEASE_REPOSITORY}:stable-${release_id}"
+          if [ "${bound_release_tag}" != "${stable_oci_digest}" ]; then
+            echo "stable release ID tag read-back did not bind the signed manifest" >&2
             exit 1
           fi
           {

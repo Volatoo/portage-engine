@@ -25,13 +25,16 @@ const (
 	OutcomeHit      = "hit"
 	OutcomeFallback = "fallback"
 
-	maxCPUFeatures = 64
-	poolHashBytes  = 16
+	maxCPUFeatures    = 64
+	poolHashBytes     = 16
+	maxEligibleAtoms  = 512
+	atomOperatorChars = "!=<>~"
 )
 
 var (
 	dimensionPattern      = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9+._/@:-]{0,255}$`)
 	atomPattern           = regexp.MustCompile(`^[a-zA-Z0-9+_.-]+/[a-zA-Z0-9+_.-]+$`)
+	atomVersionPattern    = regexp.MustCompile(`^[0-9]+(\.[0-9]+)*[a-z]?(_(alpha|beta|pre|rc|p)[0-9]*)*(-r[0-9]+)?$`)
 	compilerDigestPattern = regexp.MustCompile(`^sha256:[a-f0-9]{64}$`)
 	failureReasons        = map[string]struct{}{
 		"": {}, "capacity": {}, "connect": {}, "lease-expired": {},
@@ -190,6 +193,12 @@ type Lease struct {
 	Pump                   bool          `json:"pump"`
 	ExpiresAt              time.Time     `json:"expires_at"`
 	QueueTime              time.Duration `json:"-"`
+	// EligibleAtoms is the reduced category/name set the control plane decided
+	// this reservation covers. Eligibility is decided once, from the request's
+	// own package set, because the control plane reserves the slot while the
+	// builder writes the package.env mapping: if the two re-derive it
+	// independently they can disagree on atom form and silently waste the slot.
+	EligibleAtoms []string `json:"eligible_atoms,omitempty"`
 }
 
 // Validate checks the complete builder-visible lease shape.
@@ -214,6 +223,14 @@ func (l Lease) Validate(now time.Time) error {
 	}
 	if !l.ExpiresAt.After(now) {
 		return fmt.Errorf("distcc lease is expired")
+	}
+	if len(l.EligibleAtoms) > maxEligibleAtoms {
+		return fmt.Errorf("distcc lease eligible atom count exceeds %d", maxEligibleAtoms)
+	}
+	for _, atom := range l.EligibleAtoms {
+		if !ValidAtom(atom) {
+			return fmt.Errorf("invalid distcc lease eligible atom %q", atom)
+		}
 	}
 	if err := ValidateEndpoint(l.WorkerEndpoint, nil); err != nil {
 		return err
@@ -305,3 +322,38 @@ func ValidateEndpoint(endpoint string, isolatedNetworks []*net.IPNet) error {
 
 // ValidAtom reports whether atom is a package-level category/name atom.
 func ValidAtom(atom string) bool { return atomPattern.MatchString(atom) }
+
+// NormalizeAtom reduces any dependency-atom form a client's package set may
+// carry — blockers, version operators, versions, slots, repository and USE
+// qualifiers — to the category/name identity distcc eligibility is decided on.
+// The reviewed allowlist is package-level, so "=dev-qt/qtwebengine-6.7.2" and
+// "dev-lang/python:3.11" must reduce to the same key the allowlist holds.
+func NormalizeAtom(atom string) (string, bool) {
+	atom = strings.TrimLeft(strings.TrimSpace(atom), atomOperatorChars)
+	if index := strings.Index(atom, "["); index >= 0 {
+		atom = atom[:index]
+	}
+	if index := strings.Index(atom, ":"); index >= 0 {
+		atom = atom[:index]
+	}
+	atom = strings.TrimSuffix(atom, "*")
+	slash := strings.Index(atom, "/")
+	if slash < 0 {
+		return "", false
+	}
+	category, name := atom[:slash], atom[slash+1:]
+	// A Gentoo package name ends at the last "-" that begins a complete
+	// version, so "docbook-xml-dtd-4.5" keeps its dashed name while
+	// "qtwebengine-6.7.2" loses only the version.
+	for index := strings.LastIndex(name, "-"); index > 0; index = strings.LastIndex(name[:index], "-") {
+		if atomVersionPattern.MatchString(name[index+1:]) {
+			name = name[:index]
+			break
+		}
+	}
+	reduced := category + "/" + name
+	if !ValidAtom(reduced) {
+		return "", false
+	}
+	return reduced, true
+}

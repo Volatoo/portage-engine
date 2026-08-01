@@ -25,6 +25,9 @@ services:
       STORAGE_TYPE: s3
       STORAGE_S3_ALLOW_DELETE: "false"
       DATABASE_REQUIRED: "true"
+      # The base stack pins PGSSLMODE=disable for its private host bridge; a
+      # public deployment reaches a remote database and must not inherit it.
+      PGSSLMODE: ${PORTAGE_POSTGRES_SSLMODE:-verify-full}
       REDIS_REQUIRED: "true"
       AUTH_MODE: oidc
       AUTH_PROVIDERS_PATH: /etc/portage-engine/configs/auth-providers.json
@@ -38,6 +41,11 @@ services:
       API_KEY: ""
       STEP_UP_API_KEY: ""
       CORS_ALLOWED_ORIGINS: ${PORTAGE_CORS_ALLOWED_ORIGINS:?set HTTPS origins}
+      # Without this the edge is not a trusted hop, so clientAddress falls back
+      # to RemoteAddr and every anonymous caller behind it shares one pre-auth
+      # rate-limit bucket. It has no safe default: the value is the address
+      # range the edge actually connects from, which only this deployment knows.
+      TRUSTED_PROXY_CIDRS: ${PORTAGE_TRUSTED_PROXY_CIDRS:?set the edge/ingress CIDRs the API may trust X-Forwarded-For from}
       GPG_ENABLED: "true"
       GPG_AUTO_CREATE: "false"
       GPG_KEY_ID: ${PORTAGE_SIGNER_GPG_KEY_ID:?set approved release key}
@@ -52,6 +60,23 @@ services:
       CLOUD_SSH_KEY_PATH: ""
       CLOUD_PVE_INSECURE: "false"
       CLOUD_SSH_INSECURE_HOST_KEY: "false"
+
+  # Both of these inherit `build: context: .` from the base stack, whose default
+  # final stage is trusted-runtime: no USER directive, and bash, gnupg,
+  # openssh-client and terraform alongside every binary. The public API and the
+  # executor both gate their startup on the migration job, so it may not be the
+  # broadest image in the deployment while holding the database owner password.
+  portage-migrate:
+    image: portage-engine-migrate:local
+    build:
+      context: .
+      target: migrate-runtime
+
+  portage-capacity-actuator:
+    image: portage-engine-actuator:local
+    build:
+      context: .
+      target: actuator-runtime
 
   portage-executor:
     image: portage-engine-executor:local

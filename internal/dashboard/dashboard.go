@@ -27,13 +27,26 @@ import (
 //go:embed assets/xterm.min.js assets/xterm.css
 var xtermAssets embed.FS
 
+// appleCSSDigest is derived from the compiled-in stylesheet, so it changes
+// exactly when the bytes do and stays stable across restarts and replicas
+// (a per-process random tag would break revalidation behind a load balancer).
+// It names the bytes for both consumers: the ETag below and the ?v= every
+// page links the stylesheet with.
+var appleCSSDigest = func() string {
+	digest := sha256.Sum256([]byte(appleCSS))
+	return hex.EncodeToString(digest[:16])
+}()
+
+var appleCSSETag = `"` + appleCSSDigest + `"`
+
 // Dashboard represents the web dashboard.
 type Dashboard struct {
-	config     *config.DashboardConfig
-	templates  *template.Template
-	httpClient *http.Client
-	oidc       *oidcRuntime
-	providers  map[string]*oidcRuntime
+	config       *config.DashboardConfig
+	templates    *template.Template
+	httpClient   *http.Client
+	streamClient *http.Client
+	oidc         *oidcRuntime
+	providers    map[string]*oidcRuntime
 }
 
 // ClusterStatus represents the overall cluster status.
@@ -64,14 +77,23 @@ func New(cfg *config.DashboardConfig) *Dashboard {
 	template.Must(tmpl.New("shell").Parse(shellHTML))
 
 	return &Dashboard{
-		config:     cfg,
-		templates:  tmpl,
-		httpClient: &http.Client{Timeout: 10 * time.Second},
+		config:    cfg,
+		templates: tmpl,
+		// httpClient carries control-plane JSON, where a wedged backend must
+		// not pin a browser request open. streamClient carries the two bodies
+		// with no bounded length — binary-package downloads and the job event
+		// stream. Client.Timeout is a whole-request deadline, not an idle one,
+		// so the 10s ceiling truncates a package download mid-transfer (the
+		// server hashes the file before the first byte) and tears down an
+		// EventSource every 10 seconds; those two are bounded by the caller's
+		// request context instead.
+		httpClient:   &http.Client{Timeout: 10 * time.Second},
+		streamClient: &http.Client{},
 	}
 }
 
 // pageData is the payload every page template receives.
-func (d *Dashboard) pageData(extra map[string]interface{}) map[string]interface{} {
+func (d *Dashboard) pageData(r *http.Request, extra map[string]interface{}) map[string]interface{} {
 	providers := make([]identityProviderView, 0, len(d.providers))
 	stepUp, _ := extra["StepUp"].(bool)
 	returnTo, _ := extra["ReturnTo"].(string)
@@ -94,11 +116,17 @@ func (d *Dashboard) pageData(extra map[string]interface{}) map[string]interface{
 			LoginURL: loginURLWithContext("/auth/oidc/start", stepUp, returnTo),
 		})
 	}
+	language := resolveLanguage(r)
 	data := map[string]interface{}{
 		"AuthEnabled":       d.config.AuthEnabled,
 		"OIDCEnabled":       len(providers) > 0,
 		"IdentityProviders": providers,
 		"LocalLoginEnabled": d.config.AdminUser != "" && d.config.AdminPassword != "",
+		// Lang / HTMLLang let the template emit the right strings and <html
+		// lang> in the first paint, instead of shipping English and letting
+		// client-side i18n rewrite it a frame later.
+		"Lang":     language,
+		"HTMLLang": htmlLanguageTag(language),
 	}
 	for k, v := range extra {
 		data[k] = v
@@ -131,11 +159,96 @@ func safeReturnTo(raw string) string {
 }
 
 // renderPage executes a page template with the standard payload.
-func (d *Dashboard) renderPage(w http.ResponseWriter, name string, extra map[string]interface{}) {
-	if err := d.templates.ExecuteTemplate(w, name, d.pageData(extra)); err != nil {
+func (d *Dashboard) renderPage(
+	w http.ResponseWriter, r *http.Request, name string, extra map[string]interface{},
+) {
+	// The rendered language depends on the request, so a shared cache must not
+	// hand a Chinese page to the next English reader.
+	w.Header().Add("Vary", "Cookie, Accept-Language")
+	if err := d.templates.ExecuteTemplate(w, name, d.pageData(r, extra)); err != nil {
 		http.Error(w, "Failed to render template", http.StatusInternalServerError)
 		log.Printf("Template error (%s): %v", name, err)
 	}
+}
+
+// languageCookie records the reader's explicit language choice so the server
+// can pick it before the first byte of HTML. It is deliberately not HttpOnly:
+// the page's own toggle reads and writes it, and it carries no authority.
+const languageCookie = "pe_lang"
+
+// resolveLanguage picks the page language server-side: an explicit choice
+// (cookie) first, then what the browser asked for, then English.
+func resolveLanguage(r *http.Request) string {
+	if r == nil {
+		return "en"
+	}
+	if cookie, err := r.Cookie(languageCookie); err == nil {
+		if language := normalizeLanguage(cookie.Value); language != "" {
+			return language
+		}
+	}
+	if language := normalizeLanguage(r.Header.Get("Accept-Language")); language != "" {
+		return language
+	}
+	return "en"
+}
+
+// normalizeLanguage reduces a cookie value or an Accept-Language list to one of
+// the two languages ui.go ships strings for, or "" when neither is requested.
+func normalizeLanguage(raw string) string {
+	for _, tag := range strings.Split(raw, ",") {
+		tag = strings.ToLower(strings.TrimSpace(strings.SplitN(tag, ";", 2)[0]))
+		switch {
+		case tag == "zh" || strings.HasPrefix(tag, "zh-"):
+			return "zh"
+		case tag == "en" || strings.HasPrefix(tag, "en-"):
+			return "en"
+		}
+	}
+	return ""
+}
+
+// htmlLanguageTag maps the internal language key to the BCP 47 tag that belongs
+// in <html lang>.
+func htmlLanguageTag(language string) string {
+	if language == "zh" {
+		return "zh-CN"
+	}
+	return "en"
+}
+
+// handleLanguagePreference persists the reader's language choice. The toggle
+// posts here so the next navigation is already rendered in that language; the
+// endpoint touches no backend and is public for the same reason the pages it
+// serves are.
+func (d *Dashboard) handleLanguagePreference(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var preference struct {
+		Lang string `json:"lang"`
+	}
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<10))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&preference); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	language := normalizeLanguage(preference.Lang)
+	if language == "" {
+		http.Error(w, "unsupported language", http.StatusBadRequest)
+		return
+	}
+	// #nosec G124 -- HTTP is an explicit trusted-LAN mode; this cookie is a
+	// display preference and is readable by the page's toggle by design.
+	http.SetCookie(w, &http.Cookie{
+		Name: languageCookie, Value: language, Path: "/",
+		MaxAge: int((365 * 24 * time.Hour).Seconds()),
+		Secure: d.secureCookie(r), SameSite: http.SameSiteLaxMode,
+	})
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{"lang": language})
 }
 
 // Router returns the HTTP router for the dashboard.
@@ -167,6 +280,7 @@ func (d *Dashboard) Router() http.Handler {
 	mux.HandleFunc("/api/public/binhosts", d.handlePublicBinhosts)
 	mux.HandleFunc("/api/public/packages", d.handlePublicPackages)
 	mux.HandleFunc("/api/public/status", d.handlePublicStatus)
+	mux.HandleFunc("/api/preferences/language", d.handleLanguagePreference)
 	mux.HandleFunc("/api/settings/cloud", d.handleCloudSettingsProxy)
 	mux.HandleFunc("/api/settings/cloud/test", d.handleCloudSettingsTestProxy)
 	mux.HandleFunc("/api/builds", d.handleBuilds)
@@ -211,6 +325,7 @@ func (d *Dashboard) Router() http.Handler {
 	// Web shell: page + websocket bridge to the server's SSH session.
 	mux.HandleFunc("/shell/", d.handleShellPage)
 	mux.HandleFunc("/api/shell", d.handleShellProxy)
+	mux.HandleFunc("/api/shell/preflight", d.handleShellPreflight)
 	mux.HandleFunc("/static/xterm.js", func(w http.ResponseWriter, _ *http.Request) {
 		data, _ := xtermAssets.ReadFile("assets/xterm.min.js")
 		w.Header().Set("Content-Type", "application/javascript")
@@ -224,10 +339,15 @@ func (d *Dashboard) Router() http.Handler {
 		_, _ = w.Write(data)
 	})
 
-	mux.HandleFunc("/static/apple.css", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/static/apple.css", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/css; charset=utf-8")
-		w.Header().Set("Cache-Control", "no-cache")
-		_, _ = w.Write([]byte(appleCSS))
+		// Every page requests this with a ?v= query, so the URL itself is the
+		// cache key and the bytes behind it never change: immutable here, a
+		// bumped ?v= on the page when the stylesheet changes. The ETag still
+		// answers a revalidation (an old ?v= in a bookmark) with a 304.
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		w.Header().Set("ETag", appleCSSETag)
+		http.ServeContent(w, r, "apple.css", time.Time{}, strings.NewReader(appleCSS))
 	})
 	mux.HandleFunc("/static/", d.handleStatic)
 
@@ -260,7 +380,7 @@ func (d *Dashboard) handleLanding(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	d.renderPage(w, "landing", nil)
+	d.renderPage(w, r, "landing", nil)
 }
 
 // handleLoginRoute renders the login page (GET) and issues a session (POST).
@@ -272,7 +392,7 @@ func (d *Dashboard) handleLoginRoute(w http.ResponseWriter, r *http.Request) {
 			http.Redirect(w, r, "/overview", http.StatusFound)
 			return
 		}
-		d.renderPage(w, "login", map[string]interface{}{
+		d.renderPage(w, r, "login", map[string]interface{}{
 			"StepUp":   r.URL.Query().Get("step_up") == "1",
 			"ReturnTo": safeReturnTo(r.URL.Query().Get("return_to")),
 		})
@@ -347,7 +467,7 @@ func (d *Dashboard) handleDeviceAuthorizationPage(w http.ResponseWriter, r *http
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Pragma", "no-cache")
-	d.renderPage(w, "device", map[string]interface{}{
+	d.renderPage(w, r, "device", map[string]interface{}{
 		"UserCode": strings.ToUpper(strings.TrimSpace(r.URL.Query().Get("user_code"))),
 	})
 }
@@ -490,17 +610,17 @@ func (d *Dashboard) secureCookie(r *http.Request) bool {
 }
 
 // handleOverview serves the authed overview page.
-func (d *Dashboard) handleOverview(w http.ResponseWriter, _ *http.Request) {
-	d.renderPage(w, "overview", nil)
+func (d *Dashboard) handleOverview(w http.ResponseWriter, r *http.Request) {
+	d.renderPage(w, r, "overview", nil)
 }
 
 // handleSettingsPage serves the cloud settings management page.
-func (d *Dashboard) handleSettingsPage(w http.ResponseWriter, _ *http.Request) {
-	d.renderPage(w, "settings", nil)
+func (d *Dashboard) handleSettingsPage(w http.ResponseWriter, r *http.Request) {
+	d.renderPage(w, r, "settings", nil)
 }
 
-func (d *Dashboard) handleImageFactoryPage(w http.ResponseWriter, _ *http.Request) {
-	d.renderPage(w, "image-factory", nil)
+func (d *Dashboard) handleImageFactoryPage(w http.ResponseWriter, r *http.Request) {
+	d.renderPage(w, r, "image-factory", nil)
 }
 
 func (d *Dashboard) handleImageFactoryStatusProxy(w http.ResponseWriter, r *http.Request) {
@@ -589,7 +709,7 @@ func (d *Dashboard) handleGPGStatusProxy(w http.ResponseWriter, r *http.Request)
 // handleShellPage renders the web-shell page for an instance.
 func (d *Dashboard) handleShellPage(w http.ResponseWriter, r *http.Request) {
 	instanceID := strings.TrimPrefix(r.URL.Path, "/shell/")
-	d.renderPage(w, "shell", map[string]interface{}{"InstanceID": instanceID})
+	d.renderPage(w, r, "shell", map[string]interface{}{"InstanceID": instanceID})
 }
 
 var shellUpgrader = websocket.Upgrader{
@@ -611,8 +731,86 @@ var shellUpgrader = websocket.Upgrader{
 	},
 }
 
+// shellStepUpState reports whether the control plane would accept a shell
+// handshake from this caller right now and, when it would not, which
+// authentication fixes it ("federated", "local") or that none can
+// ("unavailable"). A refused WebSocket handshake reaches page script as a bare
+// error event with no status, so the same decision has to be answerable over
+// plain HTTP before the socket is opened.
+func (d *Dashboard) shellStepUpState(r *http.Request) (bool, string) {
+	session := sessionToken(r)
+	if isFederatedSession(session) {
+		// Only the control plane can answer for a federated principal: its
+		// step-up is a property of the platform token's own auth_time, AMR and
+		// ACR, none of which the dashboard ever sees.
+		resp, err := d.serverGet(
+			strings.TrimRight(d.config.ServerURL, "/")+"/api/v1/iam/me", r,
+		)
+		if err != nil {
+			return false, "federated"
+		}
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusOK {
+			return false, "federated"
+		}
+		var identity struct {
+			Principal struct {
+				StepUp bool `json:"step_up"`
+			} `json:"principal"`
+		}
+		if err := json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).
+			Decode(&identity); err != nil {
+			return false, "federated"
+		}
+		return identity.Principal.StepUp, "federated"
+	}
+	// A local session travels upstream as SERVER_API_KEY, whose step-up is the
+	// independent SERVER_STEP_UP_API_KEY the dashboard attaches for ten minutes
+	// after an administrator re-enters their password. Without that key, without
+	// the credentials to re-enter, or without a session to bind the elevation
+	// to, no request this dashboard makes can ever satisfy the route: say so,
+	// rather than leaving the reader with a socket that closes silently.
+	if d.config.ServerStepUpAPIKey == "" || session == "" ||
+		d.config.AdminUser == "" || d.config.AdminPassword == "" {
+		return false, "unavailable"
+	}
+	return d.validLocalStepUp(r, session), "local"
+}
+
+// handleShellPreflight lets the shell page establish the step-up credential
+// before it opens the terminal socket, and answers in the shape the page's
+// elevation branch reads.
+func (d *Dashboard) handleShellPreflight(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	satisfied, method := d.shellStepUpState(r)
+	if satisfied {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"step_up": true, "method": method,
+		})
+		return
+	}
+	code, message := "step_up_required", "fresh step-up authentication required"
+	if method == "unavailable" {
+		code = "step_up_unavailable"
+		message = "this dashboard holds no step-up credential for the web shell"
+	}
+	w.WriteHeader(http.StatusPreconditionRequired)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"error": message, "code": code, "method": method,
+	})
+}
+
 // handleShellProxy bridges the browser's WebSocket to the server's SSH shell
-// endpoint, attaching the server API key (browsers cannot send it on a WS).
+// endpoint, attaching the caller's credential (browsers cannot set headers on
+// a WS handshake). The credential mapping is the shared one, so the step-up
+// the control plane demands on this route travels with the handshake; a
+// federated session that fails to resolve is refused rather than widened to
+// the legacy admin key.
 func (d *Dashboard) handleShellProxy(w http.ResponseWriter, r *http.Request) {
 	instanceID := r.URL.Query().Get("id")
 	if instanceID == "" {
@@ -623,14 +821,7 @@ func (d *Dashboard) handleShellProxy(w http.ResponseWriter, r *http.Request) {
 	serverWS := strings.Replace(d.config.ServerURL, "http://", "ws://", 1)
 	serverWS = strings.Replace(serverWS, "https://", "wss://", 1)
 	hdr := http.Header{}
-	if cookie, err := r.Cookie(sessionCookie); err == nil {
-		if token, tokenErr := d.oidcTokenFromSession(r.Context(), cookie.Value); tokenErr == nil {
-			hdr.Set("Authorization", "Bearer "+token)
-		}
-	}
-	if hdr.Get("Authorization") == "" && d.config.ServerAPIKey != "" {
-		hdr.Set("X-API-Key", d.config.ServerAPIKey)
-	}
+	d.applyBackendAuthHeaders(r, hdr)
 	upstream, resp, err := websocket.DefaultDialer.Dial(serverWS+"/api/v1/instances/shell?id="+url.QueryEscape(instanceID), hdr)
 	if resp != nil {
 		defer func() { _ = resp.Body.Close() }()
@@ -690,6 +881,14 @@ func (d *Dashboard) handleCloudSettingsTestProxy(w http.ResponseWriter, r *http.
 // proxyServer forwards a request (with body) to the backend server, attaching
 // the server API key, and relays status + body back honestly.
 func (d *Dashboard) proxyServer(w http.ResponseWriter, r *http.Request, method, url string) {
+	d.proxyServerVia(d.httpClient, w, r, method, url)
+}
+
+// proxyServerVia is proxyServer with an explicit client, so endpoints whose
+// response body is open-ended (SSE) can opt out of the control-plane deadline.
+func (d *Dashboard) proxyServerVia(
+	client *http.Client, w http.ResponseWriter, r *http.Request, method, url string,
+) {
 	// #nosec G704 -- url is assembled only from the startup-validated,
 	// operator-controlled SERVER_URL and fixed API paths.
 	req, err := http.NewRequestWithContext(r.Context(), method, url, r.Body)
@@ -705,7 +904,7 @@ func (d *Dashboard) proxyServer(w http.ResponseWriter, r *http.Request, method, 
 		req.Header.Set("X-Project-ID", projectID)
 	}
 	// #nosec G704 -- the request target is the validated backend origin above.
-	resp, err := d.httpClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		writeBackendError(w, err)
 		return
@@ -799,8 +998,9 @@ func (d *Dashboard) proxyPublicRead(w http.ResponseWriter, r *http.Request, targ
 		writeBackendError(w, err)
 		return
 	}
-	// #nosec G704 -- see target construction above.
-	resp, err := d.httpClient.Do(req)
+	// #nosec G704 -- see target construction above. This path streams whole
+	// binary packages through /binpkgs/, so it uses the deadline-free client.
+	resp, err := d.streamClient.Do(req)
 	if err != nil {
 		writeBackendError(w, err)
 		return
@@ -815,7 +1015,14 @@ func (d *Dashboard) proxyPublicRead(w http.ResponseWriter, r *http.Request, targ
 		}
 	}
 	w.WriteHeader(resp.StatusCode)
-	_, _ = io.Copy(w, resp.Body)
+	// The status line is already on the wire, so a short body is the only
+	// remaining signal: log it, and leave the forwarded Content-Length unmet so
+	// net/http closes the connection instead of letting a truncated package
+	// look like a complete download.
+	if copied, copyErr := io.Copy(w, resp.Body); copyErr != nil {
+		log.Printf("Public proxy body truncated after %d bytes for %q: %v", // #nosec G706 -- value is safely quoted.
+			copied, target, copyErr)
+	}
 }
 
 // handleBuilds returns the list of builds from the server.
@@ -867,20 +1074,20 @@ func (d *Dashboard) handleInstances(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleBuildsPage serves the builds list page.
-func (d *Dashboard) handleBuildsPage(w http.ResponseWriter, _ *http.Request) {
-	d.renderPage(w, "builds", nil)
+func (d *Dashboard) handleBuildsPage(w http.ResponseWriter, r *http.Request) {
+	d.renderPage(w, r, "builds", nil)
 }
 
 // handleBuildDetail serves the build detail page.
 func (d *Dashboard) handleBuildDetail(w http.ResponseWriter, r *http.Request) {
 	jobID := strings.TrimPrefix(r.URL.Path, "/build/")
-	d.renderPage(w, "build-detail", map[string]interface{}{"JobID": jobID})
+	d.renderPage(w, r, "build-detail", map[string]interface{}{"JobID": jobID})
 }
 
 // handleBuildLogs serves the real-time build logs page.
 func (d *Dashboard) handleBuildLogs(w http.ResponseWriter, r *http.Request) {
 	jobID := strings.TrimPrefix(r.URL.Path, "/logs/")
-	d.renderPage(w, "logs", map[string]interface{}{"JobID": jobID})
+	d.renderPage(w, r, "logs", map[string]interface{}{"JobID": jobID})
 }
 
 // handleBuildDetailAPI returns detailed information about a specific build.
@@ -928,21 +1135,21 @@ func (d *Dashboard) handleBuildLogsAPI(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleBuildersMonitor serves the builders status monitor page.
-func (d *Dashboard) handleBuildersMonitor(w http.ResponseWriter, _ *http.Request) {
-	d.renderPage(w, "monitor", nil)
+func (d *Dashboard) handleBuildersMonitor(w http.ResponseWriter, r *http.Request) {
+	d.renderPage(w, r, "monitor", nil)
 }
 
 // handleDocs serves the documentation page.
-func (d *Dashboard) handleDocs(w http.ResponseWriter, _ *http.Request) {
-	d.renderPage(w, "docs", nil)
+func (d *Dashboard) handleDocs(w http.ResponseWriter, r *http.Request) {
+	d.renderPage(w, r, "docs", nil)
 }
 
-func (d *Dashboard) handlePackagesPage(w http.ResponseWriter, _ *http.Request) {
-	d.renderPage(w, "packages", nil)
+func (d *Dashboard) handlePackagesPage(w http.ResponseWriter, r *http.Request) {
+	d.renderPage(w, r, "packages", nil)
 }
 
-func (d *Dashboard) handlePublicStatusPage(w http.ResponseWriter, _ *http.Request) {
-	d.renderPage(w, "status", nil)
+func (d *Dashboard) handlePublicStatusPage(w http.ResponseWriter, r *http.Request) {
+	d.renderPage(w, r, "status", nil)
 }
 
 // fetchServerPublicKey retrieves the server's real GPG public key (armored).
@@ -1109,7 +1316,9 @@ func (d *Dashboard) handleJobEventsProxy(w http.ResponseWriter, r *http.Request)
 	if projectID := strings.TrimSpace(r.URL.Query().Get("project_id")); projectID != "" {
 		target += "?project_id=" + url.QueryEscape(projectID)
 	}
-	d.proxyServer(w, r, http.MethodGet, target)
+	// The event stream never ends on its own: it runs until the browser closes
+	// the EventSource, so it cannot share the deadline-bearing client.
+	d.proxyServerVia(d.streamClient, w, r, http.MethodGet, target)
 }
 
 // handleStatic serves static files.
@@ -1276,6 +1485,8 @@ func (d *Dashboard) authMiddleware(next http.Handler) http.Handler {
 			r.URL.Path == "/api/public/binhosts" ||
 			r.URL.Path == "/api/public/packages" ||
 			r.URL.Path == "/api/public/status" ||
+			// A display preference on pages that are themselves public.
+			r.URL.Path == "/api/preferences/language" ||
 			r.URL.Path == "/auth/oidc/start" || r.URL.Path == "/auth/oidc/callback" ||
 			strings.HasPrefix(r.URL.Path, "/auth/provider/") ||
 			strings.HasPrefix(r.URL.Path, "/binpkgs/") ||
@@ -1284,12 +1495,7 @@ func (d *Dashboard) authMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		token := extractBearer(r.Header.Get("Authorization"))
-		if token == "" {
-			if c, err := r.Cookie(sessionCookie); err == nil {
-				token = c.Value
-			}
-		}
+		token := sessionToken(r)
 
 		// Allow anonymous access if enabled and no token was presented.
 		if d.config.AllowAnonymous && token == "" {
@@ -1411,6 +1617,30 @@ func extractBearer(header string) string {
 		return strings.TrimPrefix(header, "Bearer ")
 	}
 	return header
+}
+
+// sessionToken resolves the caller's dashboard session, header before cookie.
+// Everything that decides what to send upstream must resolve it through here:
+// when authMiddleware accepted a header-borne session but the credential
+// mapper only looked at the cookie, the request authenticated as a user and
+// then travelled on as SERVER_API_KEY, which the control plane maps to a
+// system administrator.
+func sessionToken(r *http.Request) string {
+	if token := extractBearer(r.Header.Get("Authorization")); token != "" {
+		return token
+	}
+	if cookie, err := r.Cookie(sessionCookie); err == nil {
+		return cookie.Value
+	}
+	return ""
+}
+
+// isFederatedSession reports whether a session carries a control-plane
+// principal of its own. Such a session must always travel upstream as that
+// principal's bearer — never as SERVER_API_KEY, which would promote any
+// signed-in viewer to the legacy system administrator.
+func isFederatedSession(token string) bool {
+	return strings.HasPrefix(token, "oidc.") || strings.HasPrefix(token, "federated.")
 }
 
 // loggingMiddleware provides request logging.

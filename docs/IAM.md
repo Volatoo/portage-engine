@@ -424,9 +424,44 @@ or zone is never used as fallback.
 replica. With an empty `EXECUTOR_CAPABILITIES`, that replica derives its labels
 only from catalog profiles whose provider and zone match its configuration.
 An explicit capability list is an exact override for specialized pools such
-as a desktop verifier. The HA Compose overlay provides a separate secondary
-override, so enabling a new VM or replica affects only the capabilities it
-advertises rather than every VM in the cluster.
+as a desktop verifier. It must carry the `egress:<policy-id>@sha256:<digest>`
+label — at most one — whenever the profiles it is meant to serve resolve an
+egress policy; the requirement set is all-of, so an override missing that
+single label produces a worker that registers healthy, publishes capacity, and
+then claims nothing for the rest of its life. The HA Compose overlay provides
+a separate secondary override, so enabling a new VM or replica affects only
+the capabilities it advertises rather than every VM in the cluster.
+
+A `SERVER_RUNTIME_ROLE=executor` process — the role `docker-compose.public.yml`
+runs — derives nothing, because it holds no catalog to derive from. Startup
+validation rejects it unless `EXECUTOR_CAPABILITIES` is the exact set its image
+was built to claim: exactly one `capacity-pool`, `provider`, `zone`, `arch`,
+`build-mode`, `profile` and `image` label, all four `phase:` labels, and at
+most one `egress` label. `image` must bind the generation as
+`image:<id>@<generation>`, and `egress`, when present, must bind the policy
+digest as `egress:<policy-id>@sha256:<64 lowercase hex>` — a policy ID alone
+routes nothing, because the requirement set the catalog writes carries the
+digest and matching is all-of. `capacity-pool` is derived rather than chosen:
+`<provider>-<zone>-<arch>-` plus the first 24 hex characters of the SHA-256
+over provider, zone, arch, build mode, profile ID, image ID and image
+generation joined by NUL. `capacity-instance` is refused outright; that label
+comes only from SMBIOS.
+
+The image factory emits the whole string from the same inputs that produced the
+template — `image-factory/persistent-executor/provision.sh` writes it into
+`/etc/portage-engine/executor.env` and appends `PE_EGRESS_CAPABILITY` when the
+profile's egress policy is enforced. Prefer that over hand-assembly, which has
+to reproduce the pool hash exactly:
+
+```ini
+EXECUTOR_CAPABILITIES=capacity-pool:pve-default-amd64-ba2d34177f713b19a0c975e3,provider:pve,zone:default,arch:amd64,build-mode:native-gentoo,profile:pe/amd64/glibc/systemd/base-v1,image:pe/amd64/base-g1@g1,phase:provision,phase:build,phase:verify,phase:publish,egress:egress/candidate-internal@sha256:<64 hex from the workspace egress-policy-evidence.json>
+```
+
+Include the `egress` label when, and only when, the resolved profile declares
+an enforced policy. Either mismatch fails the same silent way rather than at
+startup: the executor registers green, every phase requirement set carries a
+label it does not advertise or lacks one it does, and it claims exactly zero
+phases while the work sits `unschedulable`.
 
 Admission requires at least one live matching capability worker before it
 claims a queued job. The subsequent phase claim repeats the same match in the
@@ -508,6 +543,18 @@ The primary key cannot be reused as the step-up key. The local Dashboard asks
 the administrator to re-enter local credentials, then grants a ten-minute
 HttpOnly, SameSite=Strict elevation bound to that exact Dashboard session. It
 forwards `SERVER_STEP_UP_API_KEY` only while that elevation is valid.
+
+The Dashboard web shell is gated on that same elevation end to end, which
+makes `STEP_UP_API_KEY` on the server and `SERVER_STEP_UP_API_KEY` on the
+Dashboard a deployment prerequisite rather than a hardening option: a
+Dashboard configured without it — or without `ADMIN_USER`/`ADMIN_PASSWORD` to
+re-authenticate against — can never satisfy the route, so `GET
+/api/shell/preflight` answers `428` with `code: step_up_unavailable` and the
+shell page prints that instead of opening a terminal that would close without
+a reason. A federated Dashboard session is elevated by the provider instead:
+its platform token must satisfy `OIDC_STEP_UP_MAX_AGE_MINUTES`,
+`OIDC_STEP_UP_AMR_VALUES` and `OIDC_STEP_UP_ACR_VALUES`, and the page sends
+the operator back through the provider with `prompt=login` when it does not.
 
 High-risk operations include creating projects, changing project members or
 admission policy, deleting jobs, global session revocation, and non-read

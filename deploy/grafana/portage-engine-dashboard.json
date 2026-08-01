@@ -40,6 +40,7 @@
     },
     {
       "title": "Builds Queued",
+      "description": "Refreshed from the durable scheduler snapshot at scrape time, so it reflects the queue depth of the whole control plane rather than one replica's memory.",
       "type": "stat",
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "gridPos": { "h": 4, "w": 4, "x": 12, "y": 1 },
@@ -91,27 +92,30 @@
     },
     {
       "title": "Active Builders",
+      "description": "Worker Gateway executors with a durable heartbeat inside the 45s freshness window. portage_builders_* is not charted here: it counts only the legacy /api/v1/builders/register + /heartbeat registry, which nothing writes under the mTLS gateway topology, so it reads 0 on a full cluster.",
       "type": "stat",
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "gridPos": { "h": 4, "w": 6, "x": 0, "y": 14 },
-      "targets": [{ "expr": "portage_builders_active", "legendFormat": "" }],
+      "targets": [{ "expr": "portage_gateway_workers_active", "legendFormat": "" }],
       "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 1 }] } } }
     },
     {
-      "title": "Healthy Builders",
+      "title": "Capability-Labeled Builders",
+      "description": "Fresh gateway executors advertising at least one capability label, so capability-constrained jobs are dispatchable. Active but zero capability-labeled means such jobs queue behind idle workers.",
       "type": "stat",
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "gridPos": { "h": 4, "w": 6, "x": 6, "y": 14 },
-      "targets": [{ "expr": "portage_builders_healthy", "legendFormat": "" }],
+      "targets": [{ "expr": "portage_gateway_workers_capability_labeled", "legendFormat": "" }],
       "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 1 }] } } }
     },
     {
-      "title": "Builder Capacity",
+      "title": "Stale Builders",
+      "description": "Registered gateway executors with no heartbeat inside the freshness window. Watch this rising rather than the active count alone: a fleet losing workers holds its active count until each one ages out.",
       "type": "stat",
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "gridPos": { "h": 4, "w": 6, "x": 12, "y": 14 },
-      "targets": [{ "expr": "portage_builder_capacity", "legendFormat": "" }],
-      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "steps": [{ "color": "blue", "value": null }] } } }
+      "targets": [{ "expr": "portage_gateway_workers_stale", "legendFormat": "" }],
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "steps": [{ "color": "blue", "value": null }, { "color": "orange", "value": 1 }] } } }
     },
     {
       "title": "Goroutines",
@@ -174,8 +178,8 @@
       "fieldConfig": { "defaults": { "unit": "ops", "min": 0 } }
     },
     {
-      "title": "Monitor Projection Lag",
-      "description": "Durable terminal-event time distance from the cached projection watermark to its source watermark. Before the first projection it is source-event age by database clock. Zero means current or empty; warning threshold is 120 seconds.",
+      "title": "Monitor Read-Model Age",
+      "description": "Age of the cached Monitor snapshot being served. Zero when freshly loaded or empty, bounded above by the 30s read-through cache TTL. Not alerted: a fresh read is always current, so there is no threshold this can cross.",
       "type": "timeseries",
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "gridPos": { "h": 7, "w": 6, "x": 12, "y": 24 },
@@ -184,7 +188,7 @@
         "defaults": {
           "unit": "s",
           "min": 0,
-          "thresholds": { "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 120 }] }
+          "thresholds": { "steps": [{ "color": "green", "value": null }] }
         }
       }
     },

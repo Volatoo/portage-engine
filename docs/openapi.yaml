@@ -69,6 +69,7 @@ paths:
           content:
             application/pgp-keys:
               schema: {type: string}
+        "404": {description: Signing is disabled on this deployment}
         "503": {description: Signing public key is unavailable}
   /api/v1/iam/device/authorization:
     post:
@@ -222,9 +223,9 @@ components:
         interval: {type: integer, minimum: 1, maximum: 60}
     Binhost:
       type: object
-      required: [id, arch, profile_path, binhost_path, sync_path]
+      required: [profile_id, arch, profile_path, binhost_path, sync_path, default]
       properties:
-        id: {type: string}
+        profile_id: {type: string}
         arch: {type: string}
         profile_path: {type: string}
         channel: {type: string}

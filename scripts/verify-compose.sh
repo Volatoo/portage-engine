@@ -342,6 +342,10 @@ jq -e --arg expected_enabled "${worker_gateway_enabled}" '
 scheduler_status="$(
   curl_server -fsS "http://127.0.0.1:${server_port}/api/v1/scheduler/status"
 )"
+# alert_threshold_seconds is the monitor read-through cache TTL that bounds
+# lag_seconds, so it tracks monitorCacheTTL in internal/persistence/monitor.go
+# rather than being a tunable number. Pinned here so moving one without the
+# other is caught before a reader starts scaling a lag against the wrong bound.
 jq -e '
   .authority == "postgresql" and
   .queued_tasks >= 0 and .unschedulable_tasks >= 0 and
@@ -355,7 +359,7 @@ jq -e '
   .lease_expiries.phase_reclaimed >= 0 and
   .target_history.projection.valid == true and
   .target_history.projection.lag_seconds >= 0 and
-  .target_history.projection.alert_threshold_seconds == 120 and
+  .target_history.projection.alert_threshold_seconds == 30 and
   (.autoscaler.mode == "off" or .autoscaler.mode == "observe") and
   (.autoscaler.recommendation == "off" or
    .autoscaler.recommendation == "hold" or

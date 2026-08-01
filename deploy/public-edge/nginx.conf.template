@@ -11,7 +11,16 @@ log_format portage_edge
 limit_conn_zone $binary_remote_addr zone=source_ip_connections:10m;
 limit_req_zone $binary_remote_addr zone=public_requests:10m rate=20r/s;
 limit_req_zone $binary_remote_addr zone=identity_requests:10m rate=10r/m;
+# Device token polling is protocol-paced, not user-paced: the server advertises
+# a 5s interval over a 10-minute code TTL, so it needs at least 12r/m of its own
+# and must not share a budget with the operator's browser login.
+limit_req_zone $binary_remote_addr zone=device_token_requests:10m rate=30r/m;
 limit_req_zone $binary_remote_addr zone=metrics_requests:10m rate=2r/s;
+
+# nginx answers a tripped limit with 503, which a client cannot tell apart from
+# an upstream outage and which carries no retry semantics.
+limit_req_status 429;
+limit_conn_status 429;
 
 upstream portage_dashboard_backend {
     server portage-dashboard:8081;
@@ -156,6 +165,27 @@ server {
     location ^~ /api/v1/iam/providers/ {
         limit_req zone=public_requests burst=10 nodelay;
         limit_req zone=identity_requests burst=5 nodelay;
+        proxy_pass http://portage_api_backend;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Request-ID $request_id;
+        add_header Cache-Control "no-store" always;
+        add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+        add_header X-Content-Type-Options nosniff always;
+        add_header Referrer-Policy no-referrer always;
+    }
+
+    # The poll endpoint is the one part of the device flow whose request rate is
+    # dictated by the protocol rather than by a human, and an exact-match
+    # location wins over the prefix below. Sharing the 10r/m identity budget
+    # exhausted it roughly 2.5 minutes into a 10-minute code, discarding a still
+    # valid device code every time an operator took that long to finish MFA.
+    location = /api/v1/iam/device/token {
+        limit_req zone=public_requests burst=10 nodelay;
+        limit_req zone=device_token_requests burst=10 nodelay;
         proxy_pass http://portage_api_backend;
         proxy_http_version 1.1;
         proxy_set_header Host $host;

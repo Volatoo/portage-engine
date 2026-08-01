@@ -781,6 +781,81 @@ func testDeviceAuthorizationAtomicConsumption(
 		slowDown.IntervalSeconds != 10 {
 		t.Fatalf("slow-down poll=%+v err=%v", slowDown, err)
 	}
+
+	// A CLI token is the approving browser session in another shape, so it
+	// must carry that lineage and die with it.
+	parentRaw := "pe1_postgres-derivation-parent"
+	parentDigest := sha256.Sum256([]byte(parentRaw))
+	parentNow := time.Now().UTC()
+	parent, err := repo.AuthorizeSession(ctx, approver, iam.ExternalIdentity{
+		Issuer: approver.Issuer, Subject: approver.Subject,
+		TokenHash:       hex.EncodeToString(parentDigest[:]),
+		ProviderTokenID: "token-derivation-parent",
+		IssuedAt:        parentNow.Add(-time.Minute),
+		ExpiresAt:       parentNow.Add(time.Hour),
+		AMR:             []string{"pwd"},
+	}, policy)
+	if err != nil || parent.SessionID == "" {
+		t.Fatalf("authorize derivation parent=%+v err=%v", parent, err)
+	}
+	defer func() {
+		// The cascade deletes the derived row with its parent.
+		if _, cleanupErr := db.Pool().Exec(
+			ctx, `DELETE FROM iam_sessions WHERE id = $1`, parent.SessionID,
+		); cleanupErr != nil {
+			t.Errorf("clean up derivation parent session: %v", cleanupErr)
+		}
+	}()
+	derivationRaw := "ped1_postgres-derivation"
+	derivationDigest := sha256.Sum256([]byte(derivationRaw))
+	derivationHash := hex.EncodeToString(derivationDigest[:])
+	if created, err := repo.CreateDeviceAuthorization(
+		ctx, derivationHash, "3456-789A", 600, 5,
+	); err != nil || !created {
+		t.Fatalf("create derivation device created=%t err=%v", created, err)
+	}
+	if _, err := repo.DecideDeviceAuthorization(
+		ctx, "3456-789A", parent, true, policy,
+	); err != nil {
+		t.Fatalf("approve derivation device: %v", err)
+	}
+	derivedRaw := "pe1_postgres-derived-token"
+	derivedDigest := sha256.Sum256([]byte(derivedRaw))
+	derived, err := repo.PollDeviceAuthorization(
+		ctx, derivationHash, hex.EncodeToString(derivedDigest[:]), policy,
+	)
+	if err != nil || derived.Status != persistence.DeviceAuthorizationApproved ||
+		derived.Principal.SessionID == "" {
+		t.Fatalf("derivation poll=%+v err=%v", derived, err)
+	}
+	sessions, err := repo.ListSessions(ctx, approver.SubjectID)
+	if err != nil {
+		t.Fatalf("list derivation sessions: %v", err)
+	}
+	var derivedRow, parentRow persistence.IAMSession
+	for _, session := range sessions {
+		switch session.ID {
+		case derived.Principal.SessionID:
+			derivedRow = session
+		case parent.SessionID:
+			parentRow = session
+		}
+	}
+	if derivedRow.Kind != "cli" ||
+		derivedRow.DerivedFromSessionID != parent.SessionID ||
+		parentRow.Kind != "browser" || parentRow.DerivedFromSessionID != "" {
+		t.Fatalf(
+			"session lineage derived=%+v parent=%+v", derivedRow, parentRow,
+		)
+	}
+	if _, err := repo.RevokeSession(
+		ctx, parent, parent.SessionID, "integration-derivation", false,
+	); err != nil {
+		t.Fatalf("revoke derivation parent: %v", err)
+	}
+	if _, err := repo.AuthorizePlatformSession(ctx, derivedRaw, policy); err == nil {
+		t.Fatal("CLI session outlived the browser session it was derived from")
+	}
 }
 
 func testMonitorTerminalEventWatermarkFallback(
@@ -859,6 +934,26 @@ func testMonitorTerminalEventWatermarkFallback(
 				snapshotKind, projection, err,
 			)
 		}
+	}
+	// A terminal event arriving behind a cached snapshot makes the projected
+	// watermark trail the source by the gap between the two events. Reported
+	// lag must stay the age of the snapshot being served, which the cache TTL
+	// bounds, instead of that ten-minute gap.
+	if _, err := db.Pool().Exec(ctx, `
+		UPDATE build_jobs SET completed_at = clock_timestamp() WHERE id = $1
+	`, status.JobID); err != nil {
+		t.Fatalf("advance monitor source watermark: %v", err)
+	}
+	runtime, err := projectionRepo.RuntimeStatus(ctx)
+	projection := runtime.TargetHistory.Projection
+	if err != nil || projection.State != "lagging" ||
+		projection.LagSeconds < 0 || projection.LagSeconds > 30 {
+		t.Fatalf("cached monitor projection lag=%+v err=%v", projection, err)
+	}
+	if _, err := db.Pool().Exec(ctx, `
+		UPDATE build_jobs SET completed_at = NULL WHERE id = $1
+	`, status.JobID); err != nil {
+		t.Fatalf("restore monitor watermark fixture: %v", err)
 	}
 	if err := repo.HideJob(ctx, &completed, "monitor watermark fixture cleanup"); err != nil {
 		t.Fatalf("hide monitor watermark fixture: %v", err)
@@ -1656,6 +1751,31 @@ func TestProjectResourceAndArtifactMigrationsRequireDrainedAttempts(t *testing.T
 		t.Fatalf(
 			"distcc tables workers=%q leases=%q observations=%q err=%v",
 			compileWorkers, compileLeases, compileObservations, err,
+		)
+	}
+	if _, err := runner.Provider().UpTo(ctx, 30); err != nil {
+		t.Fatalf("schema v30 CLI session derivation migration failed: %v", err)
+	}
+	if version, err := runner.Provider().GetDBVersion(ctx); err != nil ||
+		version != 30 {
+		t.Fatalf("CLI session derivation migration version=%d err=%v", version, err)
+	}
+	var derivedIndex, sessionKindDefault string
+	if err := fixture.QueryRow(ctx, `
+		SELECT to_regclass('iam_sessions_derived_from_idx')::text,
+		       (
+		         SELECT column_default
+		         FROM information_schema.columns
+		         WHERE table_schema = current_schema()
+		           AND table_name = 'iam_sessions'
+		           AND column_name = 'session_kind'
+		       )
+	`).Scan(&derivedIndex, &sessionKindDefault); err != nil ||
+		derivedIndex != "iam_sessions_derived_from_idx" ||
+		!strings.HasPrefix(sessionKindDefault, "'browser'") {
+		t.Fatalf(
+			"session derivation index=%q kind default=%q err=%v",
+			derivedIndex, sessionKindDefault, err,
 		)
 	}
 }
@@ -2516,8 +2636,25 @@ func testDurablePhaseWorkQueue(
 		!strings.Contains(err.Error(), "lock claimed phase work") {
 		t.Fatalf("stale phase fence completed reclaimed work: %v", err)
 	}
+	// The renewal ticker runs beside the phase-executing goroutine and both
+	// hold this pointer, so renewal must extend only the durable lease and
+	// leave the shared claim untouched.
+	claimedExpiry := reclaimed.LeaseExpiresAt
 	if err := jobRepo.RenewPhaseWork(ctx, reclaimed, time.Minute); err != nil {
 		t.Fatal(err)
+	}
+	var renewedExpiry time.Time
+	if err := db.Pool().QueryRow(ctx, `
+		SELECT lease_expires_at FROM phase_work_items WHERE id = $1
+	`, reclaimed.ID).Scan(&renewedExpiry); err != nil {
+		t.Fatal(err)
+	}
+	if !reclaimed.LeaseExpiresAt.Equal(claimedExpiry) ||
+		!renewedExpiry.After(claimedExpiry) {
+		t.Fatalf(
+			"phase renewal claim=%s claimed=%s durable=%s",
+			reclaimed.LeaseExpiresAt, claimedExpiry, renewedExpiry,
+		)
 	}
 	if err := jobRepo.CompletePhaseWork(ctx, reclaimed); err != nil {
 		t.Fatal(err)

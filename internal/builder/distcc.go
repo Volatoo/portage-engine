@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -27,12 +28,7 @@ func (be *BuildExecutor) configureDistCC(
 		return nil
 	}
 	lease := job.Request.CompileLease
-	eligible := make([]string, 0, len(bundle.Packages.Packages))
-	for _, pkg := range bundle.Packages.Packages {
-		if be.opts.DistCCPolicy.Allowed(pkg.Atom) {
-			eligible = append(eligible, pkg.Atom)
-		}
-	}
+	eligible := eligibleDistCCAtoms(bundle, lease, be.opts.DistCCPolicy)
 	if len(eligible) == 0 {
 		if lease.FallbackPolicy == distcc.FallbackBlocked {
 			return fmt.Errorf("distcc is required but no reviewed C/C++ package is eligible")
@@ -124,6 +120,33 @@ func (be *BuildExecutor) configureDistCC(
 		lease.PoolID, lease.Fence, len(eligible), lease.FallbackPolicy,
 	))
 	return nil
+}
+
+// eligibleDistCCAtoms takes the lease's control-plane-decided atom set as the
+// single source of eligibility and keeps this builder's own reviewed allowlist
+// as an independent veto. Only a lease issued before the eligible set existed
+// falls back to the bundle, and then through the same reduction, so the two
+// sides can never disagree about a versioned or slotted atom's identity.
+func eligibleDistCCAtoms(
+	bundle *ConfigBundle,
+	lease *distcc.Lease,
+	policy distcc.BuilderPolicy,
+) []string {
+	candidates := append([]string(nil), lease.EligibleAtoms...)
+	if len(candidates) == 0 && bundle != nil && bundle.Packages != nil {
+		for _, pkg := range bundle.Packages.Packages {
+			if reduced, ok := distcc.NormalizeAtom(pkg.Atom); ok {
+				candidates = append(candidates, reduced)
+			}
+		}
+	}
+	eligible := make([]string, 0, len(candidates))
+	for _, atom := range candidates {
+		if policy.Allowed(atom) && !slices.Contains(eligible, atom) {
+			eligible = append(eligible, atom)
+		}
+	}
+	return eligible
 }
 
 // writeDistCCCompilerWrapper permits only C/C++ object compilation during the

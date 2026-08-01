@@ -3,6 +3,8 @@ package builder
 import (
 	"testing"
 	"time"
+
+	"github.com/slchris/portage-engine/internal/metrics"
 )
 
 func TestNewRegistry(t *testing.T) {
@@ -480,6 +482,69 @@ func TestCleanupStaleBuilders(t *testing.T) {
 	builder, _ = r.Get("builder-1")
 	if builder.Status != "offline" {
 		t.Errorf("Status = %s, want offline after timeout", builder.Status)
+	}
+}
+
+// TestRegistryPublishesExecutorInventoryGauges pins the builder gauges to the
+// heartbeat inventory. They previously had no writer at all, so the builder
+// panels reported an empty cluster while every executor was healthy.
+func TestRegistryPublishesExecutorInventoryGauges(t *testing.T) {
+	registry := metrics.New(&metrics.Config{Enabled: true})
+	r := NewRegistry(100*time.Millisecond, 50*time.Millisecond)
+	defer r.Close()
+
+	r.Register(&BuilderInfo{ID: "builder-1", Status: "online", Capacity: 4})
+	r.Register(&BuilderInfo{ID: "builder-2", Status: "offline", Capacity: 2})
+	// An offline executor takes no work and lends no capacity, so it belongs in
+	// none of the three gauges — only in the total the operator listing shows.
+	snapshot := registry.GetSnapshot()
+	if snapshot["builders_active"].(int64) != 1 ||
+		snapshot["builders_healthy"].(int64) != 1 ||
+		snapshot["builder_capacity"].(int64) != 4 {
+		t.Fatalf("executor inventory gauges = %+v", snapshot)
+	}
+
+	r.Unregister("builder-1")
+	snapshot = registry.GetSnapshot()
+	if snapshot["builders_active"].(int64) != 0 ||
+		snapshot["builder_capacity"].(int64) != 0 {
+		t.Fatalf("gauges kept an unregistered executor: %+v", snapshot)
+	}
+}
+
+// TestRegistryInventoryGaugesDropAStaleExecutor covers the transition the
+// heartbeat timeout actually performs. checkStaleBuilders marks a silent
+// builder offline in place — it neither disables nor removes the entry — so
+// gauges keyed only on Enabled never fall, and the "Active Builders" stat stays
+// above its red threshold long after the last executor stopped answering.
+func TestRegistryInventoryGaugesDropAStaleExecutor(t *testing.T) {
+	registry := metrics.New(&metrics.Config{Enabled: true})
+	r := NewRegistry(time.Minute, time.Hour)
+	defer r.Close()
+
+	r.Register(&BuilderInfo{ID: "builder-1", Status: "online", Capacity: 4})
+	snapshot := registry.GetSnapshot()
+	if snapshot["builders_active"].(int64) != 1 ||
+		snapshot["builder_capacity"].(int64) != 4 {
+		t.Fatalf("gauges did not follow a live executor: %+v", snapshot)
+	}
+
+	// Age the heartbeat rather than sleeping the cleanup interval away, so the
+	// timeout transition is exercised without a timing-dependent test.
+	r.mu.Lock()
+	r.builders["builder-1"].LastHeartbeat = time.Now().Add(-2 * time.Minute)
+	r.mu.Unlock()
+	r.checkStaleBuilders()
+
+	stale, exists := r.Get("builder-1")
+	if !exists || stale.Status != "offline" || !stale.Enabled {
+		t.Fatalf("stale executor was removed or disabled instead of marked offline: %+v", stale)
+	}
+	snapshot = registry.GetSnapshot()
+	if snapshot["builders_active"].(int64) != 0 ||
+		snapshot["builders_healthy"].(int64) != 0 ||
+		snapshot["builder_capacity"].(int64) != 0 {
+		t.Fatalf("gauges still count a timed-out executor: %+v", snapshot)
 	}
 }
 

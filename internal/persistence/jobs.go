@@ -60,6 +60,10 @@ type JobRepository struct {
 	monitorMu sync.Mutex
 	monitorAt time.Time
 	monitor   builder.TargetHistoryStatus
+
+	buildTotalsMu sync.Mutex
+	buildTotalsAt time.Time
+	buildTotals   BuildOutcomeTotals
 }
 
 type cachedWorker struct {

@@ -104,6 +104,7 @@ test:
 	@echo "Running tests..."
 	$(GO) test -v ./...
 	$(MAKE) test-release
+	$(MAKE) test-recovery
 
 test-release:
 	@echo "Running release manifest and workflow contract tests..."

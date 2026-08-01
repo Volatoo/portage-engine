@@ -122,6 +122,151 @@ func TestDeviceAuthorizationPollingHonorsServerInterval(t *testing.T) {
 	}
 }
 
+// The public edge answers a tripped rate limit with a 429 whose body is nginx
+// HTML, and a 5xx or a dropped connection says nothing about the device code
+// either. Only RFC 8628's terminal error codes may end the flow; anything else
+// has to keep polling until expires_in runs out, or one unlucky poll discards a
+// device code the user is still in the middle of approving.
+func TestDeviceAuthorizationPollingSurvivesNonOAuthFailures(t *testing.T) {
+	polls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		polls++
+		switch polls {
+		case 1:
+			w.Header().Set("Retry-After", "7")
+			w.Header().Set("Content-Type", "text/html")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte("<html><head><title>429 Too Many Requests</title></head></html>"))
+		case 2:
+			w.WriteHeader(http.StatusBadGateway)
+			_, _ = w.Write([]byte("<html>502</html>"))
+		case 3:
+			// An OAuth error object outside the terminal set is still not a
+			// reason to stop polling.
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]any{"error": "server_error"})
+		default:
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"access_token": "pe1_device-session", "token_type": "Bearer",
+				"expires_in": 900,
+			})
+		}
+	}))
+	defer server.Close()
+
+	var waits []time.Duration
+	result, err := pollDeviceAuthorization(
+		context.Background(), server.Client(), server.URL, "ped1_secret", 5,
+		func(_ context.Context, duration time.Duration) error {
+			waits = append(waits, duration)
+			return nil
+		},
+	)
+	if err != nil || result.AccessToken != "pe1_device-session" {
+		t.Fatalf("poll = %+v, %v", result, err)
+	}
+	// Retry-After moves the cadence to 7s and it stays there: neither the 502
+	// nor the non-terminal OAuth code advertises an interval of its own.
+	wantWaits := []time.Duration{
+		5 * time.Second, 7 * time.Second, 7 * time.Second, 7 * time.Second,
+	}
+	if len(waits) != len(wantWaits) {
+		t.Fatalf("waits=%v, want %v", waits, wantWaits)
+	}
+	for index := range wantWaits {
+		if waits[index] != wantWaits[index] {
+			t.Fatalf("waits=%v, want %v", waits, wantWaits)
+		}
+	}
+}
+
+// Retry-After on a body that is not an OAuth error object comes from whatever
+// answered — an edge, a CDN, a proxy — not from the authorization server, so it
+// may only slow the cadence down. An edge answering its own tripped rate limit
+// with Retry-After: 1 would otherwise drive the CLI five times faster than the
+// published interval for the rest of expires_in, re-tripping the very limiter
+// that emitted the 429.
+func TestDeviceAuthorizationRetryAfterOnlySlowsPolling(t *testing.T) {
+	const published = 5
+	retryAfter := []string{"1", "900", "1"}
+	polls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		polls++
+		if polls > len(retryAfter) {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"access_token": "pe1_device-session", "token_type": "Bearer",
+				"expires_in": 900,
+			})
+			return
+		}
+		w.Header().Set("Retry-After", retryAfter[polls-1])
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte("<html><head><title>429 Too Many Requests</title></head></html>"))
+	}))
+	defer server.Close()
+
+	var waits []time.Duration
+	result, err := pollDeviceAuthorization(
+		context.Background(), server.Client(), server.URL, "ped1_secret", published,
+		func(_ context.Context, duration time.Duration) error {
+			waits = append(waits, duration)
+			return nil
+		},
+	)
+	if err != nil || result.AccessToken != "pe1_device-session" {
+		t.Fatalf("poll = %+v, %v", result, err)
+	}
+	// Retry-After: 1 is ignored twice — once below the published 5s, once below
+	// the raised 60s — and Retry-After: 900 is capped at the same 60s ceiling
+	// slow_down uses rather than parking the CLI for a quarter of an hour.
+	wantWaits := []time.Duration{
+		published * time.Second, published * time.Second,
+		60 * time.Second, 60 * time.Second,
+	}
+	if len(waits) != len(wantWaits) {
+		t.Fatalf("waits=%v, want %v", waits, wantWaits)
+	}
+	for index := range wantWaits {
+		if waits[index] != wantWaits[index] {
+			t.Fatalf("waits=%v, want %v", waits, wantWaits)
+		}
+	}
+	for _, wait := range waits {
+		if wait < published*time.Second {
+			t.Fatalf("wait %v is below the server-published %ds interval; a "+
+				"middlebox header sped the client up", wait, published)
+		}
+	}
+}
+
+// invalid_grant is terminal even though it never reaches the retry path above.
+func TestDeviceAuthorizationStopsOnTerminalOAuthCodes(t *testing.T) {
+	for _, code := range []string{
+		"access_denied", "expired_token", "invalid_grant",
+		"invalid_request", "unauthorized_client",
+	} {
+		polls := 0
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			polls++
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]any{"error": code})
+		}))
+		_, err := pollDeviceAuthorization(
+			context.Background(), server.Client(), server.URL, "ped1_secret", 5,
+			func(context.Context, time.Duration) error { return nil },
+		)
+		server.Close()
+		var oauthError *deviceTokenError
+		if !errors.As(err, &oauthError) || oauthError.Code != code {
+			t.Errorf("%s: err=%v", code, err)
+		}
+		if polls != 1 {
+			t.Errorf("%s: polled %d times, want 1", code, polls)
+		}
+	}
+}
+
 func TestDeviceAuthorizationRejectsMismatchedCompleteURI(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{

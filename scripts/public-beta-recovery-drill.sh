@@ -284,7 +284,7 @@ run_static() {
     --generation-gc-principal fixture-generation-gc
   run_shell_check object-contract false "immutable object recovery contract" \
     "rg -q 'CompareAndSwap' internal/storage/s3_integration_test.go && rg -q 'ReplicatePublishedChannel' internal/storage/s3_integration_test.go && rg -q 'GarbageCollectPublishedGenerations' internal/storage/s3_integration_test.go" \
-    "CAS, replication, audit, rollback closure, and reference-aware GC are covered"
+    "CAS, replication, and generation-GC cases are declared in the object integration source"
   run_shell_check signer-boundary false "signer private-key boundary" \
     "test \"$(rg -l 'portage-signer-key:/var/lib/portage-signer' docker-compose.yml docker-compose.public.yml | wc -l | tr -d ' ')\" = 1 && ! sed -n '/FROM runtime-base AS api-runtime/,/FROM runtime-base AS dashboard-runtime/p' Dockerfile | rg -q 'gnupg' && ! sed -n '/FROM runtime-base AS dashboard-runtime/,/FROM runtime-base AS migrate-runtime/p' Dockerfile | rg -q 'gnupg'" \
     "only signer receives its private volume; API and Dashboard images contain no GnuPG"
@@ -292,6 +292,11 @@ run_static() {
     append_not_run "${live_gate}-live" \
       "external ${live_gate} environment was not supplied;现场 Gate intentionally not run"
   done
+  # object-contract above reads source, not results: s3_integration_test.go
+  # skips itself unless PORTAGE_S3_INTEGRATION=1, which no workflow and no make
+  # target sets. Behaviour coverage is a live gate, and it did not run.
+  append_not_run object-integration-live \
+    "internal/storage/s3_integration_test.go requires PORTAGE_S3_INTEGRATION=1 and a live object store; CAS, replication, audit, rollback closure, and reference-aware GC behaviour was not executed"
 }
 
 run_vault() {
@@ -495,6 +500,11 @@ command -v python3 >/dev/null 2>&1 || {
   echo "python3 is required for machine-readable drill evidence" >&2
   exit 2
 }
+# The PGDATA storage prohibition is a bare `if rg ...`, and set -e is suppressed
+# inside an `if` condition, so a missing ripgrep (rc 127) would take the else
+# branch and certify NFS-backed PGDATA as safe. Refuse the drill instead.
+command -v rg >/dev/null 2>&1 ||
+  preflight_fail "ripgrep is required for the repository and PGDATA storage assertions"
 
 case "${gate}" in
   static)

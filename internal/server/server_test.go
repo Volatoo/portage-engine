@@ -15,6 +15,8 @@ import (
 	"github.com/slchris/portage-engine/internal/builder"
 	"github.com/slchris/portage-engine/internal/catalog"
 	"github.com/slchris/portage-engine/internal/iam"
+	"github.com/slchris/portage-engine/internal/metrics"
+	"github.com/slchris/portage-engine/internal/persistence"
 	"github.com/slchris/portage-engine/pkg/config"
 )
 
@@ -106,6 +108,41 @@ func TestSchedulerMetricsSnapshotUsesOnlyBoundedObservabilityFields(t *testing.T
 		!snapshot.ProjectionConfigured || !snapshot.ProjectionSnapshotValid ||
 		!snapshot.ProjectionSourcePresent || snapshot.ProjectionLagSeconds != 37 {
 		t.Fatalf("scheduler metric snapshot=%+v", snapshot)
+	}
+}
+
+// The Worker Gateway executor census reaches the exposition only through this
+// mapper. Left unmapped, portage_gateway_workers_* reads zero on a cluster with
+// executors connected and the Active Builders panel renders its red <1 state,
+// which is exactly what portage_builders_* already does under this topology.
+// The three counts are deliberately distinct so a transposed pair fails too.
+func TestSchedulerMetricsSnapshotCarriesGatewayWorkerCensus(t *testing.T) {
+	snapshot := schedulerMetricsSnapshotFromStatus(map[string]any{
+		"authority":          "postgresql",
+		"active_workers":     6,
+		"capability_workers": 4,
+		"stale_workers":      2,
+	})
+	if snapshot.GatewayWorkersActive != 6 ||
+		snapshot.GatewayWorkersCapability != 4 ||
+		snapshot.GatewayWorkersStale != 2 {
+		t.Fatalf("gateway worker census=%+v", snapshot)
+	}
+}
+
+// The census is the only source of completion counters on a scraped replica:
+// the phase executor increments the in-process ones in a different process.
+// Each field is a distinct value so swapping any two assignments fails, and
+// submitted is larger than succeeded+failed so collapsing it onto the terminal
+// counts fails as well.
+func TestApplyBuildOutcomeCensusFillsCompletionCounters(t *testing.T) {
+	var snapshot metrics.SchedulerSnapshot
+	applyBuildOutcomeCensus(&snapshot, persistence.BuildOutcomeTotals{
+		Submitted: 20, Succeeded: 9, Failed: 3,
+	})
+	if snapshot.JobsSubmitted != 20 || snapshot.JobsSucceeded != 9 ||
+		snapshot.JobsFailed != 3 {
+		t.Fatalf("census snapshot=%+v", snapshot)
 	}
 }
 
@@ -233,6 +270,9 @@ func TestIAMRouteClassification(t *testing.T) {
 		{http.MethodPost, "/api/v1/iam/sessions/revoke-all", true},
 		{http.MethodPost, "/api/v1/worker-gateway/certificates/revoke", true},
 		{http.MethodPost, "/api/v1/worker-gateway/issuers/revoke", true},
+		{http.MethodGet, "/api/v1/instances/shell", true},
+		{http.MethodGet, "/api/v1/instances", false},
+		{http.MethodPost, "/api/v1/iam/device/decision", true},
 	} {
 		request := httptest.NewRequest(test.method, test.path, nil)
 		if got := stepUpRequired(request); got != test.want {
@@ -1421,5 +1461,61 @@ func TestHandleBuildRequestRejectsEmptyPackage(t *testing.T) {
 	server.handleBuildRequest(w, req)
 	if w.Result().StatusCode != http.StatusBadRequest {
 		t.Errorf("empty package: expected 400, got %d", w.Result().StatusCode)
+	}
+}
+
+// TestLedgerReadinessRequiresLoadedProjection pins the readiness criterion to
+// projection freshness: a ledger whose LoadVisible never succeeded has no
+// LastError once any write lands, and ClaimNext records one on every empty poll.
+func TestLedgerReadinessRequiresLoadedProjection(t *testing.T) {
+	s := New(&config.ServerConfig{BinpkgPath: t.TempDir(), MaxWorkers: 1})
+	defer s.builder.Shutdown()
+	s.jobLedger = persistence.NewJobRepository(nil)
+	s.ledgerStaleAfter = time.Minute
+
+	if ok, status := s.checkLedgerHealth(); ok || status["projection_stale"] != true {
+		t.Fatalf("ledger without a loaded projection reported healthy: %#v", status)
+	}
+	recorder := httptest.NewRecorder()
+	s.handleReadyz(recorder, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if recorder.Code != http.StatusServiceUnavailable ||
+		!strings.Contains(recorder.Body.String(), "projection is stale") {
+		t.Fatalf("readyz with an empty projection: %d %s", recorder.Code, recorder.Body.String())
+	}
+
+	s.jobLedger.RecordProjectionSync(nil)
+	if ok, status := s.checkLedgerHealth(); !ok || status["projection_stale"] != false {
+		t.Fatalf("freshly loaded projection reported unhealthy: %#v", status)
+	}
+}
+
+// TestWebShellRequiresStepUp covers the one high-impact GET: the web shell
+// opens an interactive root SSH session, so it must cost at least as much as
+// the writes that already demand an independent credential.
+func TestWebShellRequiresStepUp(t *testing.T) {
+	cfg := &config.ServerConfig{
+		BinpkgPath: t.TempDir(), MaxWorkers: 1,
+		APIKey: "primary-key", StepUpAPIKey: "second-key",
+	}
+	router := New(cfg).Router()
+	shell := func(stepUp string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/instances/shell?id=vm-1", nil)
+		req.Header.Set("X-API-Key", "primary-key")
+		if stepUp != "" {
+			req.Header.Set("X-Step-Up-Key", stepUp)
+		}
+		recorder := httptest.NewRecorder()
+		router.ServeHTTP(recorder, req)
+		return recorder
+	}
+	if result := shell(""); result.Code != http.StatusPreconditionRequired ||
+		!strings.Contains(result.Body.String(), "step_up_required") {
+		t.Fatalf("web shell without step-up response=%d %s",
+			result.Code, result.Body.String())
+	}
+	// With step-up satisfied the handler runs and refuses the unknown instance,
+	// which is the authorization boundary this test is about.
+	if result := shell("second-key"); result.Code != http.StatusNotFound {
+		t.Fatalf("stepped-up web shell status=%d %s", result.Code, result.Body.String())
 	}
 }

@@ -10,6 +10,7 @@ import (
 	"encoding/pem"
 	"math/big"
 	"net"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -78,6 +79,120 @@ func issuePullTestServerCertificate(
 		t.Fatal(err)
 	}
 	return certificate
+}
+
+func TestPullAgentTransferClientHasNoWholeRequestDeadline(t *testing.T) {
+	_, clients := pullTestClients(t)
+	if clients.control.Timeout != 40*time.Second {
+		t.Fatalf("control client timeout = %s", clients.control.Timeout)
+	}
+	// Client.Timeout also covers the request body write, so a multi-hundred-MB
+	// artifact PUT must not carry one.
+	if clients.transfer.Timeout != 0 {
+		t.Fatalf("transfer client carries a whole-request deadline of %s", clients.transfer.Timeout)
+	}
+	transport, ok := clients.transfer.Transport.(*http.Transport)
+	if !ok || transport.ResponseHeaderTimeout == 0 || transport.IdleConnTimeout == 0 {
+		t.Fatalf("transfer transport is unbounded: %#v", clients.transfer.Transport)
+	}
+}
+
+// TestPullAgentTransportsBoundConnectionEstablishment covers what
+// ResponseHeaderTimeout cannot: it does not start until the request body has
+// finished writing, and the HTTP/2 transport ignores it entirely, so a
+// blackholed dial or a stalled handshake would otherwise be bounded by nothing
+// but the agent's process-lifetime context.
+func TestPullAgentTransportsBoundConnectionEstablishment(t *testing.T) {
+	_, clients := pullTestClients(t)
+	for name, client := range map[string]*http.Client{
+		"control": clients.control, "transfer": clients.transfer,
+	} {
+		transport, ok := client.Transport.(*http.Transport)
+		if !ok {
+			t.Fatalf("%s client does not use a *http.Transport", name)
+		}
+		if transport.DialContext == nil {
+			t.Fatalf("%s transport has no bounded dialer; a blackholed dial parks client.Do forever", name)
+		}
+		if transport.TLSHandshakeTimeout != pullTLSHandshakeTimeout {
+			t.Fatalf("%s transport TLS handshake timeout = %s, want %s",
+				name, transport.TLSHandshakeTimeout, pullTLSHandshakeTimeout)
+		}
+		// A dialer that answers is the only proof the field is wired to a real
+		// one rather than to a func that ignores its bounds.
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		connection, err := transport.DialContext(
+			context.Background(), "tcp", listener.Addr().String(),
+		)
+		if err != nil {
+			t.Fatalf("%s transport dialer refused a live listener: %v", name, err)
+		}
+		_ = connection.Close()
+		_ = listener.Close()
+	}
+	if pullDialTimeout <= 0 {
+		t.Fatal("the shared pull dialer has no connect timeout")
+	}
+}
+
+// TestPullAgentTaskContextBoundsOnlyTheLeasedUpload pins the per-task deadline
+// to the one task that streams over the network. RunPullAgent's context is
+// cancelled at process shutdown only, so without this an artifact PUT has no
+// deadline at all — while a build legitimately runs for hours and must not
+// acquire one.
+func TestPullAgentTaskContextBoundsOnlyTheLeasedUpload(t *testing.T) {
+	collect, cancelCollect := pullTaskContext(context.Background(), workergateway.ActionCollect)
+	defer cancelCollect()
+	deadline, ok := collect.Deadline()
+	if !ok {
+		t.Fatal("a collect task inherits no upload deadline")
+	}
+	if remaining := time.Until(deadline); remaining > pullUploadLease ||
+		remaining < pullUploadLease-time.Minute {
+		t.Fatalf("collect deadline is %s away, want the %s upload lease", remaining, pullUploadLease)
+	}
+	for _, action := range []string{workergateway.ActionBuild, workergateway.ActionVerify} {
+		ctx, cancel := pullTaskContext(context.Background(), action)
+		if _, bounded := ctx.Deadline(); bounded {
+			cancel()
+			t.Fatalf("%s task carries a wall-clock deadline; long compiles would be killed", action)
+		}
+		cancel()
+	}
+}
+
+func pullTestClients(t *testing.T) (string, *pullClients) {
+	t.Helper()
+	caPEM, caKeyPEM, _, _ := issuePullTestCA(t)
+	certPEM, keyPEM, err := workergateway.IssueWorkerCertificate(
+		caPEM, caKeyPEM, workergateway.Identity{
+			WorkerID: "worker-test", JobID: "job-test",
+			AttemptID: "attempt-test", FenceToken: 1,
+		}, 30*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	temp := t.TempDir()
+	for name, document := range map[string][]byte{
+		"worker.crt": certPEM, "worker.key": keyPEM, "ca.crt": caPEM,
+	} {
+		if err := os.WriteFile(filepath.Join(temp, name), document, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	baseURL, clients, err := pullHTTPClients(&config.BuilderConfig{
+		WorkerGatewayURL: "https://gateway.example:8443",
+		WorkerTLSCert:    filepath.Join(temp, "worker.crt"),
+		WorkerTLSKey:     filepath.Join(temp, "worker.key"),
+		WorkerTLSCA:      filepath.Join(temp, "ca.crt"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return baseURL, clients
 }
 
 func TestPullAgentStreamsArtifactOverRealMTLS(t *testing.T) {
