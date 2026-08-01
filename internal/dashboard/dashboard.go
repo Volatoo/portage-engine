@@ -50,6 +50,7 @@ type ClusterStatus struct {
 func New(cfg *config.DashboardConfig) *Dashboard {
 	tmpl := template.Must(template.New("landing").Parse(landingHTML))
 	template.Must(tmpl.New("login").Parse(loginHTML))
+	template.Must(tmpl.New("device").Parse(deviceAuthorizationHTML))
 	template.Must(tmpl.New("overview").Parse(overviewHTML))
 	template.Must(tmpl.New("builds").Parse(buildsPageHTML))
 	template.Must(tmpl.New("build-detail").Parse(buildDetailHTML))
@@ -73,21 +74,24 @@ func New(cfg *config.DashboardConfig) *Dashboard {
 func (d *Dashboard) pageData(extra map[string]interface{}) map[string]interface{} {
 	providers := make([]identityProviderView, 0, len(d.providers))
 	stepUp, _ := extra["StepUp"].(bool)
+	returnTo, _ := extra["ReturnTo"].(string)
 	for _, provider := range d.config.IdentityProviders {
 		if stepUp && provider.Type == "github" {
 			continue
 		}
 		if d.providers[provider.ID] != nil {
+			loginURL := "/auth/provider/" + provider.ID + "/start"
+			loginURL = loginURLWithContext(loginURL, stepUp, returnTo)
 			providers = append(providers, identityProviderView{
 				ID: provider.ID, DisplayName: provider.DisplayName,
-				LoginURL: "/auth/provider/" + provider.ID + "/start",
+				LoginURL: loginURL,
 			})
 		}
 	}
 	if len(providers) == 0 && (d.oidc != nil || d.config.OIDCEnabled) {
 		providers = append(providers, identityProviderView{
 			ID: "oidc", DisplayName: "Identity provider",
-			LoginURL: "/auth/oidc/start",
+			LoginURL: loginURLWithContext("/auth/oidc/start", stepUp, returnTo),
 		})
 	}
 	data := map[string]interface{}{
@@ -100,6 +104,30 @@ func (d *Dashboard) pageData(extra map[string]interface{}) map[string]interface{
 		data[k] = v
 	}
 	return data
+}
+
+func loginURLWithContext(path string, stepUp bool, returnTo string) string {
+	query := url.Values{}
+	if stepUp {
+		query.Set("step_up", "1")
+	}
+	if returnTo != "" {
+		query.Set("return_to", returnTo)
+	}
+	if encoded := query.Encode(); encoded != "" {
+		return path + "?" + encoded
+	}
+	return path
+}
+
+func safeReturnTo(raw string) string {
+	raw = strings.TrimSpace(raw)
+	parsed, err := url.Parse(raw)
+	if err != nil || raw == "" || !strings.HasPrefix(raw, "/") ||
+		strings.HasPrefix(raw, "//") || parsed.IsAbs() || parsed.Host != "" {
+		return ""
+	}
+	return parsed.RequestURI()
 }
 
 // renderPage executes a page template with the standard payload.
@@ -118,6 +146,7 @@ func (d *Dashboard) Router() http.Handler {
 	mux.HandleFunc("/", d.handleLanding)
 	mux.HandleFunc("/login", d.handleLoginRoute)
 	mux.HandleFunc("/logout", d.handleLogout)
+	mux.HandleFunc("/device", d.handleDeviceAuthorizationPage)
 	mux.HandleFunc("/auth/oidc/start", d.handleOIDCStart)
 	mux.HandleFunc("/auth/oidc/callback", d.handleOIDCCallback)
 	mux.HandleFunc("/auth/provider/", d.handleIdentityProviderRoute)
@@ -161,6 +190,7 @@ func (d *Dashboard) Router() http.Handler {
 	mux.HandleFunc("/api/iam/me", d.handleIAMMeProxy)
 	mux.HandleFunc("/api/iam/sessions", d.handleIAMSessionsProxy)
 	mux.HandleFunc("/api/iam/sessions/revoke-all", d.handleIAMRevokeAllProxy)
+	mux.HandleFunc("/api/iam/device/decision", d.handleIAMDeviceDecisionProxy)
 	mux.HandleFunc("/api/projects/policy", d.handleProjectPolicyProxy)
 
 	// Key management endpoints
@@ -243,7 +273,8 @@ func (d *Dashboard) handleLoginRoute(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		d.renderPage(w, "login", map[string]interface{}{
-			"StepUp": r.URL.Query().Get("step_up") == "1",
+			"StepUp":   r.URL.Query().Get("step_up") == "1",
+			"ReturnTo": safeReturnTo(r.URL.Query().Get("return_to")),
 		})
 	case http.MethodPost:
 		d.handleLoginSubmit(w, r)
@@ -303,9 +334,33 @@ func (d *Dashboard) handleLoginSubmit(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]string{
-		"token": token,
-		"user":  creds.Username,
+		"token":       token,
+		"user":        creds.Username,
+		"redirect_to": safeReturnTo(r.URL.Query().Get("return_to")),
 	})
+}
+
+func (d *Dashboard) handleDeviceAuthorizationPage(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Pragma", "no-cache")
+	d.renderPage(w, "device", map[string]interface{}{
+		"UserCode": strings.ToUpper(strings.TrimSpace(r.URL.Query().Get("user_code"))),
+	})
+}
+
+func (d *Dashboard) handleIAMDeviceDecisionProxy(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Pragma", "no-cache")
+	d.proxyServer(w, r, http.MethodPost,
+		strings.TrimRight(d.config.ServerURL, "/")+"/api/v1/iam/device/decision")
 }
 
 // handleLogout clears the session cookie and returns to the landing page.
@@ -1244,7 +1299,12 @@ func (d *Dashboard) authMiddleware(next http.Handler) http.Handler {
 
 		if token == "" || d.verifyDashboardSession(r.Context(), token) != nil {
 			if isPageRequest(r) {
-				http.Redirect(w, r, "/login", http.StatusFound)
+				returnTo := safeReturnTo(r.URL.RequestURI())
+				target := "/login"
+				if returnTo != "" {
+					target += "?return_to=" + url.QueryEscape(returnTo)
+				}
+				http.Redirect(w, r, target, http.StatusFound)
 				return
 			}
 			http.Error(w, "Unauthorized: invalid or expired token", http.StatusUnauthorized)
@@ -1356,7 +1416,11 @@ func extractBearer(header string) string {
 // loggingMiddleware provides request logging.
 func (d *Dashboard) loggingMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		log.Printf("%s %q %q", r.Method, r.RequestURI, r.RemoteAddr) // #nosec G706 -- values are safely quoted.
+		requestURI := r.RequestURI
+		if r.URL.Path == "/device" || strings.Contains(r.URL.RawQuery, "user_code") {
+			requestURI = r.URL.Path + "?<redacted>"
+		}
+		log.Printf("%s %q %q", r.Method, requestURI, r.RemoteAddr) // #nosec G706 -- values are safely quoted.
 		next.ServeHTTP(w, r)
 	})
 }

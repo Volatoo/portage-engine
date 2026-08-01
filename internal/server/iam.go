@@ -8,8 +8,10 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"regexp"
 	"sort"
 	"strings"
@@ -24,6 +26,27 @@ import (
 
 var projectNamePattern = regexp.MustCompile(`^[a-z][a-z0-9-]{1,62}$`)
 
+const (
+	deviceAuthorizationTTL      = 10 * time.Minute
+	deviceAuthorizationInterval = 5
+	deviceGrantType             = "urn:ietf:params:oauth:grant-type:device_code"
+)
+
+const deviceUserCodeAlphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+
+type deviceAuthorizationStore interface {
+	CreateDeviceAuthorization(
+		context.Context, string, string, int, int,
+	) (bool, error)
+	DecideDeviceAuthorization(
+		context.Context, string, iam.Principal, bool,
+		persistence.IAMSessionPolicy,
+	) (persistence.DeviceAuthorization, error)
+	PollDeviceAuthorization(
+		context.Context, string, string, persistence.IAMSessionPolicy,
+	) (persistence.DeviceAuthorizationPoll, error)
+}
+
 func (s *Server) initIAM() error {
 	s.identityVerifiers = make(map[string]iam.IdentityVerifier)
 	s.oidcVerifiers = make(map[string]iam.Verifier)
@@ -32,6 +55,7 @@ func (s *Server) initIAM() error {
 	s.identityAdmins = make(map[string]struct{})
 	if s.database != nil {
 		s.iamRepository = persistence.NewIAMRepository(s.database)
+		s.deviceAuthorizations = s.iamRepository
 	}
 	mode := s.authMode()
 	if mode == iam.ModeLegacy {
@@ -161,6 +185,8 @@ func publicControlPlanePath(path string) bool {
 	return path == "/readyz" || path == "/livez" ||
 		path == "/metrics" || path == "/metrics/prometheus" ||
 		path == "/api/v1/iam/exchange" ||
+		path == "/api/v1/iam/device/authorization" ||
+		path == "/api/v1/iam/device/token" ||
 		backchannelProviderID(path) != "" ||
 		path == "/api/v1/binhosts" ||
 		path == "/api/v1/gpg/public-key" ||
@@ -473,6 +499,290 @@ func (s *Server) handleIAMExchange(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Server) handleIAMDeviceAuthorization(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	verificationURI := strings.TrimSpace(s.config.DeviceAuthorizationVerificationURI)
+	if s.authMode() == iam.ModeLegacy || s.deviceAuthorizations == nil ||
+		verificationURI == "" {
+		writeDeviceOAuthError(w, http.StatusServiceUnavailable,
+			"temporarily_unavailable", "device authorization is unavailable", 0)
+		return
+	}
+	parsedVerificationURI, err := url.Parse(verificationURI)
+	if err != nil || parsedVerificationURI.Host == "" ||
+		parsedVerificationURI.User != nil || parsedVerificationURI.RawQuery != "" ||
+		parsedVerificationURI.Fragment != "" || parsedVerificationURI.Path != "/device" ||
+		(parsedVerificationURI.Scheme != "https" && parsedVerificationURI.Scheme != "http") {
+		writeDeviceOAuthError(w, http.StatusServiceUnavailable,
+			"temporarily_unavailable", "device authorization is unavailable", 0)
+		return
+	}
+
+	var rawDeviceCode, userCode string
+	for attempt := 0; attempt < 5; attempt++ {
+		rawDeviceCode, err = randomDeviceCode()
+		if err != nil {
+			break
+		}
+		userCode, err = randomDeviceUserCode()
+		if err != nil {
+			break
+		}
+		digest := sha256.Sum256([]byte(rawDeviceCode))
+		createCtx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+		created, createErr := s.deviceAuthorizations.CreateDeviceAuthorization(
+			createCtx, fmt.Sprintf("%x", digest[:]), userCode,
+			int(deviceAuthorizationTTL/time.Second),
+			deviceAuthorizationInterval,
+		)
+		cancel()
+		if createErr != nil {
+			err = createErr
+			break
+		}
+		if created {
+			err = nil
+			break
+		}
+		rawDeviceCode, userCode = "", ""
+	}
+	if err != nil || rawDeviceCode == "" || userCode == "" {
+		writeDeviceOAuthError(w, http.StatusServiceUnavailable,
+			"temporarily_unavailable", "device authorization is unavailable", 0)
+		return
+	}
+	completeURI := *parsedVerificationURI
+	query := completeURI.Query()
+	query.Set("user_code", userCode)
+	completeURI.RawQuery = query.Encode()
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Pragma", "no-cache")
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"device_code":               rawDeviceCode,
+		"user_code":                 userCode,
+		"verification_uri":          parsedVerificationURI.String(),
+		"verification_uri_complete": completeURI.String(),
+		"expires_in":                int64(deviceAuthorizationTTL / time.Second),
+		"interval":                  deviceAuthorizationInterval,
+	})
+}
+
+func (s *Server) handleIAMDeviceDecision(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Pragma", "no-cache")
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	principal, ok := iam.PrincipalFromContext(r.Context())
+	if !ok || principal.Authentication != "federated-session" ||
+		principal.SubjectID == "" || principal.SessionID == "" ||
+		s.deviceAuthorizations == nil {
+		writeIAMError(w, http.StatusForbidden,
+			"an authenticated federated platform session is required")
+		return
+	}
+	var request struct {
+		UserCode string `json:"user_code"`
+		Decision string `json:"decision"`
+	}
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&request); err != nil ||
+		decoder.Decode(&struct{}{}) != io.EOF {
+		writeIAMError(w, http.StatusBadRequest, "invalid device authorization decision")
+		return
+	}
+	userCode, ok := normalizeDeviceUserCode(request.UserCode)
+	decision := strings.ToLower(strings.TrimSpace(request.Decision))
+	if !ok || (decision != "approve" && decision != "deny") {
+		writeIAMError(w, http.StatusBadRequest, "invalid device authorization decision")
+		return
+	}
+	decisionCtx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+	device, err := s.deviceAuthorizations.DecideDeviceAuthorization(
+		decisionCtx, userCode, principal, decision == "approve", s.iamSessionPolicy(),
+	)
+	cancel()
+	if err != nil {
+		s.auditRequest(r, principal, "iam.device.decision", "iam_device_authorization",
+			"", "", "denied", map[string]any{"decision": decision})
+		writeIAMError(w, http.StatusBadRequest,
+			"device code is invalid, expired, or already decided")
+		return
+	}
+	s.auditRequest(r, principal, "iam.device.decision", "iam_device_authorization",
+		device.ID, "", "success", map[string]any{"decision": decision})
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Pragma", "no-cache")
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"status": device.Status,
+	})
+}
+
+func (s *Server) handleIAMDeviceToken(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.authMode() == iam.ModeLegacy || s.deviceAuthorizations == nil {
+		writeDeviceOAuthError(w, http.StatusServiceUnavailable,
+			"temporarily_unavailable", "device authorization is unavailable", 0)
+		return
+	}
+	mediaType := strings.ToLower(strings.TrimSpace(
+		strings.Split(r.Header.Get("Content-Type"), ";")[0],
+	))
+	if mediaType != "application/x-www-form-urlencoded" {
+		writeDeviceOAuthError(w, http.StatusBadRequest, "invalid_request",
+			"form-encoded device token request is required", 0)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
+	if err := r.ParseForm(); err != nil ||
+		len(r.PostForm) != 2 ||
+		len(r.PostForm["grant_type"]) != 1 ||
+		len(r.PostForm["device_code"]) != 1 ||
+		r.PostForm.Get("grant_type") != deviceGrantType {
+		writeDeviceOAuthError(w, http.StatusBadRequest, "invalid_request",
+			"device_code and the device grant_type are required", 0)
+		return
+	}
+	rawDeviceCode := strings.TrimSpace(r.PostForm.Get("device_code"))
+	if rawDeviceCode == "" || len(rawDeviceCode) > 256 {
+		writeDeviceOAuthError(w, http.StatusBadRequest, "expired_token",
+			"device code is invalid or expired", 0)
+		return
+	}
+	deviceDigest := sha256.Sum256([]byte(rawDeviceCode))
+	rawAccessToken, err := randomPlatformSession()
+	if err != nil {
+		writeDeviceOAuthError(w, http.StatusServiceUnavailable,
+			"temporarily_unavailable", "session authority is unavailable", 0)
+		return
+	}
+	accessDigest := sha256.Sum256([]byte(rawAccessToken))
+	pollCtx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+	result, err := s.deviceAuthorizations.PollDeviceAuthorization(
+		pollCtx, fmt.Sprintf("%x", deviceDigest[:]),
+		fmt.Sprintf("%x", accessDigest[:]), s.iamSessionPolicy(),
+	)
+	cancel()
+	if err != nil {
+		writeDeviceOAuthError(w, http.StatusServiceUnavailable,
+			"temporarily_unavailable", "session authority is unavailable", 0)
+		return
+	}
+	switch result.Status {
+	case persistence.DeviceAuthorizationPending:
+		writeDeviceOAuthError(w, http.StatusBadRequest, "authorization_pending",
+			"authorization is still pending", result.IntervalSeconds)
+		return
+	case persistence.DeviceAuthorizationSlowDown:
+		writeDeviceOAuthError(w, http.StatusBadRequest, "slow_down",
+			"polling too quickly", result.IntervalSeconds)
+		return
+	case persistence.DeviceAuthorizationDenied:
+		writeDeviceOAuthError(w, http.StatusBadRequest, "access_denied",
+			"the user denied the request", 0)
+		return
+	case persistence.DeviceAuthorizationExpired:
+		writeDeviceOAuthError(w, http.StatusBadRequest, "expired_token",
+			"device code is invalid, expired, or already consumed", 0)
+		return
+	case persistence.DeviceAuthorizationApproved:
+	default:
+		writeDeviceOAuthError(w, http.StatusServiceUnavailable,
+			"temporarily_unavailable", "session authority is unavailable", 0)
+		return
+	}
+	principal := result.Principal
+	principal.ProviderID = s.providerIDForIssuer(principal.Issuer)
+	principal.SystemAdmin = s.isIdentityAdmin(principal.Issuer, principal.Subject)
+	principal.StepUp = s.oidcStepUpSatisfied(principal, time.Now())
+	expiresIn := int64(time.Until(principal.TokenExpiresAt).Seconds())
+	if expiresIn < 1 {
+		// The database already atomically consumed the code and created this
+		// session. Never turn a sub-second truncation into a lost response that
+		// tempts the client to replay; authorization still checks expires_at.
+		expiresIn = 1
+	}
+	s.auditRequest(r, principal, "iam.device.consume", "iam_session",
+		principal.SessionID, "", "success", nil)
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Pragma", "no-cache")
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"access_token": rawAccessToken,
+		"token_type":   "Bearer",
+		"expires_in":   expiresIn,
+	})
+}
+
+func randomDeviceCode() (string, error) {
+	value := make([]byte, 32)
+	if _, err := rand.Read(value); err != nil {
+		return "", err
+	}
+	return "ped1_" + base64.RawURLEncoding.EncodeToString(value), nil
+}
+
+func randomPlatformSession() (string, error) {
+	value := make([]byte, 32)
+	if _, err := rand.Read(value); err != nil {
+		return "", err
+	}
+	return "pe1_" + base64.RawURLEncoding.EncodeToString(value), nil
+}
+
+func randomDeviceUserCode() (string, error) {
+	value := make([]byte, 8)
+	if _, err := rand.Read(value); err != nil {
+		return "", err
+	}
+	for index := range value {
+		value[index] = deviceUserCodeAlphabet[int(value[index])&31]
+	}
+	return string(value[:4]) + "-" + string(value[4:]), nil
+}
+
+func normalizeDeviceUserCode(raw string) (string, bool) {
+	compact := strings.NewReplacer("-", "", " ", "").Replace(
+		strings.ToUpper(strings.TrimSpace(raw)),
+	)
+	if len(compact) != 8 {
+		return "", false
+	}
+	for _, character := range compact {
+		if !strings.ContainsRune(deviceUserCodeAlphabet, character) {
+			return "", false
+		}
+	}
+	return compact[:4] + "-" + compact[4:], true
+}
+
+func writeDeviceOAuthError(
+	w http.ResponseWriter, status int, code, description string, interval int,
+) {
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Pragma", "no-cache")
+	w.Header().Set("Content-Type", "application/json")
+	if interval > 0 {
+		w.Header().Set("Retry-After", fmt.Sprintf("%d", interval))
+	}
+	w.WriteHeader(status)
+	payload := map[string]any{"error": code, "error_description": description}
+	if interval > 0 {
+		payload["interval"] = interval
+	}
+	_ = json.NewEncoder(w).Encode(payload)
+}
+
 func (s *Server) handleIAMProviderLifecycle(w http.ResponseWriter, r *http.Request) {
 	providerID := backchannelProviderID(r.URL.Path)
 	provider := s.providerConfigs[providerID]
@@ -562,11 +872,10 @@ func (s *Server) issueFederatedSession(
 	if err != nil {
 		return "", iam.Principal{}, err
 	}
-	tokenBytes := make([]byte, 32)
-	if _, err := rand.Read(tokenBytes); err != nil {
+	raw, err := randomPlatformSession()
+	if err != nil {
 		return "", iam.Principal{}, fmt.Errorf("generate platform session: %w", err)
 	}
-	raw := "pe1_" + base64.RawURLEncoding.EncodeToString(tokenBytes)
 	digest := sha256.Sum256([]byte(raw))
 	sessionIdentity := identity
 	sessionIdentity.TokenHash = fmt.Sprintf("%x", digest[:])

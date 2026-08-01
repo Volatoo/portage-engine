@@ -54,6 +54,83 @@ func TestRouter(t *testing.T) {
 	}
 }
 
+func TestDeviceAuthorizationUsesExistingFederatedSession(t *testing.T) {
+	const platformSession = "pe1_browser-session-fixture"
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/iam/device/decision" ||
+			r.Header.Get("Authorization") != "Bearer "+platformSession ||
+			r.URL.RawQuery != "" {
+			t.Errorf("backend request path=%q query=%q auth=%q",
+				r.URL.Path, r.URL.RawQuery, r.Header.Get("Authorization"))
+			http.Error(w, "bad request", http.StatusUnauthorized)
+			return
+		}
+		var decision map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&decision); err != nil ||
+			decision["user_code"] != "ABCD-EFGH" ||
+			decision["decision"] != "approve" {
+			t.Errorf("decision=%v err=%v", decision, err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"approved"}`))
+	}))
+	defer backend.Close()
+
+	cfg := &config.DashboardConfig{
+		ServerURL: backend.URL, AuthEnabled: true,
+		JWTSecret: "test-secret-that-is-at-least-32-chars-long",
+	}
+	dashboard := New(cfg)
+	sealed, err := dashboard.seal("oidc-session", oidcSession{
+		AccessToken: platformSession, ProviderID: "fixture",
+		Expires: time.Now().Add(time.Hour).Unix(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cookie := &http.Cookie{Name: sessionCookie, Value: "federated." + sealed}
+
+	pageRequest := httptest.NewRequest(http.MethodGet, "/device?user_code=ABCD-EFGH", nil)
+	pageRequest.Header.Set("Accept", "text/html")
+	pageRequest.AddCookie(cookie)
+	pageResponse := httptest.NewRecorder()
+	dashboard.Router().ServeHTTP(pageResponse, pageRequest)
+	if pageResponse.Code != http.StatusOK ||
+		!strings.Contains(pageResponse.Body.String(), "ABCD-EFGH") ||
+		pageResponse.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("device page status=%d body=%s", pageResponse.Code, pageResponse.Body.String())
+	}
+
+	decisionRequest := httptest.NewRequest(http.MethodPost, "/api/iam/device/decision",
+		bytes.NewBufferString(`{"user_code":"ABCD-EFGH","decision":"approve"}`))
+	decisionRequest.Header.Set("Content-Type", "application/json")
+	decisionRequest.AddCookie(cookie)
+	decisionResponse := httptest.NewRecorder()
+	dashboard.Router().ServeHTTP(decisionResponse, decisionRequest)
+	if decisionResponse.Code != http.StatusOK ||
+		!strings.Contains(decisionResponse.Body.String(), "approved") {
+		t.Fatalf("decision status=%d body=%s",
+			decisionResponse.Code, decisionResponse.Body.String())
+	}
+}
+
+func TestDeviceAuthorizationLoginRedirectPreservesCode(t *testing.T) {
+	dashboard := New(&config.DashboardConfig{
+		AuthEnabled: true,
+		JWTSecret:   "test-secret-that-is-at-least-32-chars-long",
+	})
+	request := httptest.NewRequest(http.MethodGet, "/device?user_code=ABCD-EFGH", nil)
+	request.Header.Set("Accept", "text/html")
+	response := httptest.NewRecorder()
+	dashboard.Router().ServeHTTP(response, request)
+	if response.Code != http.StatusFound ||
+		response.Header().Get("Location") !=
+			"/login?return_to=%2Fdevice%3Fuser_code%3DABCD-EFGH" {
+		t.Fatalf("redirect status=%d location=%q",
+			response.Code, response.Header().Get("Location"))
+	}
+}
+
 // TestHandleIndex tests the index page handler.
 func TestHandleIndex(t *testing.T) {
 	cfg := &config.DashboardConfig{

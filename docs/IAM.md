@@ -104,6 +104,53 @@ Dashboard process.
 Local `ADMIN_USER`/`ADMIN_PASSWORD` may coexist in `hybrid` mode as a
 break-glass system-administrator path. Remove them for an OIDC-only Dashboard.
 
+## CLI browser-assisted login
+
+The recommended CLI login does not accept an upstream provider token:
+
+```bash
+export PORTAGE_ENGINE_TOKEN="$(
+  portage-client login -server=https://api.portage.example.org
+)"
+```
+
+Use `-no-browser` on a headless host or `-out=<path>` to write the final
+platform session with mode `0600`. `device-login` is an alias. The existing
+`token-exchange` command remains compatible for clients that already possess
+an upstream provider credential.
+
+The authorization boundary is deliberately asymmetric:
+
+- device start and polling are unauthenticated public-client operations,
+  bounded by the normal pre-authentication rate limit;
+- `/device` redirects through the existing provider login while preserving
+  only the short `user_code` return target;
+- approval/denial requires an active `federated-session`; local/legacy
+  administrator sessions fail closed;
+- the 256-bit device capability and final `pe1_` bearer are carried only in
+  POST bodies/responses, are never placed in a URL, and are persisted only as
+  SHA-256 digests;
+- PostgreSQL serializes polling and creates the platform session in the same
+  transaction that consumes an approval, so concurrent polls yield exactly
+  one bearer and replay yields `expired_token`;
+- expiry, denial, an invalid approver session, and a success response lost in
+  transit never permit a second issue from the same code.
+
+The approved identity is the stable provider `(issuer, subject)`. Device login
+does not derive permission from email, username, group, repository membership
+or provider role claims. Every use of the resulting platform session reads
+current project roles from PostgreSQL `project_memberships`, so approval does
+not freeze or amplify access.
+
+Set the control plane's external Dashboard route:
+
+```ini
+DEVICE_AUTHORIZATION_VERIFICATION_URI=https://portage.example.org/device
+```
+
+See [IDENTITY_PROVIDERS.md](IDENTITY_PROVIDERS.md) for protocol responses,
+headless use and operational checks.
+
 ## Bootstrap projects and members
 
 Use a system-administrator identity to create a project:
@@ -685,10 +732,11 @@ Operational references:
 
 ## Remaining public-service IAM work
 
-IAM-0 through IAM-1G now establish identity, isolation, manual and automatic
+IAM-0 through IAM-1H now establish identity, isolation, manual and automatic
 suspension, atomic queued/active limits, UTC-daily submission/runtime/cost
 caps, dual-layer short-burst limiting, durable per-attempt accounting,
-cross-replica token/session revocation, administrator step-up, and exact
+cross-replica token/session revocation, one-time CLI device authorization,
+administrator step-up, and exact
 heterogeneous executor routing, plus a durable workload leaf/issuer revocation
 boundary plus a real external Vault PKI issuer, listener-bound trust rollover,
 and failure recovery Gate. They do not make the service ready for unrestricted

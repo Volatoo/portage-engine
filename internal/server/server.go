@@ -37,43 +37,44 @@ var (
 
 // Server represents the Portage Engine server.
 type Server struct {
-	config             *config.ServerConfig
-	binpkgRoot         string
-	binpkgStore        *binpkg.Store
-	binpkgMu           sync.RWMutex
-	binpkgStores       map[string]*binpkg.Store
-	binhostProfiles    map[string]binhostProfile
-	defaultBinhost     string
-	builder            *builder.Manager
-	builderRegistry    *builder.Registry
-	metrics            *metrics.Metrics
-	startTime          time.Time
-	store              *ServerStore
-	persister          *ServerPersister
-	database           *persistence.Database
-	jobLedger          *persistence.JobRepository
-	iamRepository      *persistence.IAMRepository
-	oidcVerifier       iam.Verifier
-	identityVerifiers  map[string]iam.IdentityVerifier
-	oidcVerifiers      map[string]iam.Verifier
-	providerIssuers    map[string]string
-	providerConfigs    map[string]config.IdentityProviderConfig
-	identityAdmins     map[string]struct{}
-	databaseInitErr    string
-	cache              *runtimecache.Client
-	cacheInitErr       string
-	cacheStop          context.CancelFunc
-	cacheWG            sync.WaitGroup
-	artifactStorage    artifactstorage.Storage
-	artifactStorageMu  sync.RWMutex
-	artifactStorageErr string
-	publicStatusMu     sync.Mutex
-	publicStatusCache  publicServiceStatus
-	publicStatusUntil  time.Time
-	ledgerStop         chan struct{}
-	ledgerWG           sync.WaitGroup
-	binhostStop        chan struct{}
-	settingsMu         sync.Mutex // serializes settings updates + persistence
+	config               *config.ServerConfig
+	binpkgRoot           string
+	binpkgStore          *binpkg.Store
+	binpkgMu             sync.RWMutex
+	binpkgStores         map[string]*binpkg.Store
+	binhostProfiles      map[string]binhostProfile
+	defaultBinhost       string
+	builder              *builder.Manager
+	builderRegistry      *builder.Registry
+	metrics              *metrics.Metrics
+	startTime            time.Time
+	store                *ServerStore
+	persister            *ServerPersister
+	database             *persistence.Database
+	jobLedger            *persistence.JobRepository
+	iamRepository        *persistence.IAMRepository
+	deviceAuthorizations deviceAuthorizationStore
+	oidcVerifier         iam.Verifier
+	identityVerifiers    map[string]iam.IdentityVerifier
+	oidcVerifiers        map[string]iam.Verifier
+	providerIssuers      map[string]string
+	providerConfigs      map[string]config.IdentityProviderConfig
+	identityAdmins       map[string]struct{}
+	databaseInitErr      string
+	cache                *runtimecache.Client
+	cacheInitErr         string
+	cacheStop            context.CancelFunc
+	cacheWG              sync.WaitGroup
+	artifactStorage      artifactstorage.Storage
+	artifactStorageMu    sync.RWMutex
+	artifactStorageErr   string
+	publicStatusMu       sync.Mutex
+	publicStatusCache    publicServiceStatus
+	publicStatusUntil    time.Time
+	ledgerStop           chan struct{}
+	ledgerWG             sync.WaitGroup
+	binhostStop          chan struct{}
+	settingsMu           sync.Mutex // serializes settings updates + persistence
 }
 
 // New creates a new Server instance.
@@ -899,6 +900,9 @@ func (s *Server) Router() http.Handler {
 	mux.HandleFunc("/api/v1/cache/status", s.handleCacheStatus)
 	mux.HandleFunc("/api/v1/events/jobs", s.handleJobEvents)
 	mux.HandleFunc("/api/v1/iam/exchange", s.handleIAMExchange)
+	mux.HandleFunc("/api/v1/iam/device/authorization", s.handleIAMDeviceAuthorization)
+	mux.HandleFunc("/api/v1/iam/device/token", s.handleIAMDeviceToken)
+	mux.HandleFunc("/api/v1/iam/device/decision", s.handleIAMDeviceDecision)
 	mux.HandleFunc("/api/v1/iam/providers/", s.handleIAMProviderLifecycle)
 	mux.HandleFunc("/api/v1/iam/me", s.handleIAMMe)
 	mux.HandleFunc("/api/v1/projects", s.handleProjects)

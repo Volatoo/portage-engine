@@ -149,26 +149,27 @@ type ServerConfig struct {
 	CloudBuilderBinarySHA256 string
 	RemoteBuilders           []string
 	// Security settings
-	APIKey                 string   // API key for authenticating requests (empty = auth disabled)
-	StepUpAPIKey           string   // Independent legacy/hybrid credential for high-risk writes
-	AuthMode               string   // legacy, hybrid, or oidc
-	OIDCIssuerURL          string   // Exact issuer used for discovery and iss validation
-	OIDCAudience           string   // Required aud/client ID for control-plane bearer JWTs
-	OIDCAdminSubjects      []string // Exact OIDC subject IDs granted system-admin bootstrap access
-	OIDCAllowInsecureHTTP  bool     // Trusted-LAN-only opt-in for an HTTP issuer
-	OIDCSessionIdleMinutes int      // Server-side inactivity timeout for observed bearer sessions
-	OIDCSessionMaxMinutes  int      // Maximum accepted token/session lifetime
-	OIDCStepUpMaxAgeMin    int      // Maximum auth_time age for sensitive writes
-	OIDCStepUpAMRValues    []string // Optional accepted authentication-method references
-	OIDCStepUpACRValues    []string // Optional accepted authentication-context classes
-	IdentityProvidersPath  string
-	IdentityProviders      []IdentityProviderConfig
-	IdentityAdminSubjects  []string // provider-id:external-subject
-	BuilderToken           string   // Shared secret the server presents to remote builders (empty = no builder auth)
-	CORSAllowedOrigins     []string // Allowed CORS origins (empty = allow all for backward compatibility)
-	MaxRequestBodyBytes    int64    // Maximum request body size in bytes (0 = default 10MB)
-	CatalogPath            string   // Server-owned profile/repository/image catalog JSON (empty = compatibility catalog)
-	ImageFactoryStatusPath string   // Optional read-only image-factory milestone/evidence status JSON
+	APIKey                             string   // API key for authenticating requests (empty = auth disabled)
+	StepUpAPIKey                       string   // Independent legacy/hybrid credential for high-risk writes
+	AuthMode                           string   // legacy, hybrid, or oidc
+	OIDCIssuerURL                      string   // Exact issuer used for discovery and iss validation
+	OIDCAudience                       string   // Required aud/client ID for control-plane bearer JWTs
+	OIDCAdminSubjects                  []string // Exact OIDC subject IDs granted system-admin bootstrap access
+	OIDCAllowInsecureHTTP              bool     // Trusted-LAN-only opt-in for an HTTP issuer
+	OIDCSessionIdleMinutes             int      // Server-side inactivity timeout for observed bearer sessions
+	OIDCSessionMaxMinutes              int      // Maximum accepted token/session lifetime
+	OIDCStepUpMaxAgeMin                int      // Maximum auth_time age for sensitive writes
+	OIDCStepUpAMRValues                []string // Optional accepted authentication-method references
+	OIDCStepUpACRValues                []string // Optional accepted authentication-context classes
+	DeviceAuthorizationVerificationURI string   // Browser page used to approve CLI device codes
+	IdentityProvidersPath              string
+	IdentityProviders                  []IdentityProviderConfig
+	IdentityAdminSubjects              []string // provider-id:external-subject
+	BuilderToken                       string   // Shared secret the server presents to remote builders (empty = no builder auth)
+	CORSAllowedOrigins                 []string // Allowed CORS origins (empty = allow all for backward compatibility)
+	MaxRequestBodyBytes                int64    // Maximum request body size in bytes (0 = default 10MB)
+	CatalogPath                        string   // Server-owned profile/repository/image catalog JSON (empty = compatibility catalog)
+	ImageFactoryStatusPath             string   // Optional read-only image-factory milestone/evidence status JSON
 	// WorkerGateway is a dedicated mTLS listener for disposable workers. The
 	// ordinary control-plane/UI listener may remain HTTP on a trusted LAN.
 	WorkerGatewayEnabled        bool
@@ -567,6 +568,11 @@ func (c *ServerConfig) validatePublicAPIBoundary() []string {
 	}
 	addViolation(&violations, c.OIDCAllowInsecureHTTP,
 		"OIDC_ALLOW_INSECURE_HTTP must be false")
+	addViolation(&violations,
+		validateDeviceAuthorizationVerificationURI(
+			c.DeviceAuthorizationVerificationURI, true,
+		) != nil,
+		"DEVICE_AUTHORIZATION_VERIFICATION_URI must be an absolute HTTPS /device URL without credentials, query, or fragment")
 	for _, provider := range c.IdentityProviders {
 		addViolation(&violations, provider.AllowInsecureHTTP,
 			"identity provider "+provider.ID+" must not allow HTTP")
@@ -682,6 +688,12 @@ func (c *ServerConfig) validateStepUpPolicy() []string {
 func (c *ServerConfig) validateOIDCSessionPolicy() []string {
 	var warnings []string
 	if c.AuthMode == "hybrid" || c.AuthMode == "oidc" {
+		if err := validateDeviceAuthorizationVerificationURI(
+			c.DeviceAuthorizationVerificationURI, false,
+		); err != nil {
+			warnings = append(warnings,
+				"CONFIG: DEVICE_AUTHORIZATION_VERIFICATION_URI "+err.Error())
+		}
 		if c.OIDCSessionIdleMinutes < 1 || c.OIDCSessionIdleMinutes > 7*24*60 {
 			warnings = append(warnings, "CONFIG: OIDC_SESSION_IDLE_MINUTES must be in 1..10080")
 		}
@@ -1109,6 +1121,19 @@ func validateHTTPSEndpoint(raw string) error {
 	return nil
 }
 
+func validateDeviceAuthorizationVerificationURI(raw string, requireHTTPS bool) error {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || parsed.Host == "" || parsed.User != nil ||
+		parsed.RawQuery != "" || parsed.Fragment != "" || parsed.Path != "/device" ||
+		(parsed.Scheme != "https" && parsed.Scheme != "http") {
+		return fmt.Errorf("must be an absolute HTTP(S) /device URL without credentials, query, or fragment")
+	}
+	if requireHTTPS && parsed.Scheme != "https" {
+		return fmt.Errorf("must use HTTPS")
+	}
+	return nil
+}
+
 // Validate enforces the fail-closed protocol and transport contract for one
 // identity provider.
 func (provider IdentityProviderConfig) Validate() error {
@@ -1527,6 +1552,9 @@ func LoadServerConfig(path string) (*ServerConfig, error) {
 	config.OIDCStepUpMaxAgeMin = getEnvInt(env, "OIDC_STEP_UP_MAX_AGE_MINUTES", 10)
 	config.OIDCStepUpAMRValues = getEnvStringSlice(env, "OIDC_STEP_UP_AMR_VALUES", nil)
 	config.OIDCStepUpACRValues = getEnvStringSlice(env, "OIDC_STEP_UP_ACR_VALUES", nil)
+	config.DeviceAuthorizationVerificationURI = getEnvString(
+		env, "DEVICE_AUTHORIZATION_VERIFICATION_URI", "",
+	)
 	config.IdentityProvidersPath = getEnvString(env, "AUTH_PROVIDERS_PATH", "")
 	config.IdentityAdminSubjects = getEnvStringSlice(env, "AUTH_ADMIN_IDENTITIES", nil)
 	if config.IdentityProvidersPath != "" {

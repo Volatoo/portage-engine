@@ -277,7 +277,10 @@ runtime and estimated cloud cost, terminal settlement charges actual wall
 time, and repeated failed/expired attempts trigger a separately auditable
 time-bounded suspension. High-risk administrator writes require fresh OIDC
 authentication or an independent legacy step-up key; OIDC sessions can be
-listed, individually revoked, or revoked across all replicas. A public
+listed, individually revoked, or revoked across all replicas. The CLI can
+obtain a one-time platform session through the authenticated Dashboard without
+copying a provider credential; PostgreSQL stores only capability digests and
+serializes approval consumption. A public
 community service still needs production identity-provider callback validation,
 a Vault HA/unseal/backup runbook and a site-built, reviewed
 persistent-executor PVE candidate for the live actuator Gate. The repository

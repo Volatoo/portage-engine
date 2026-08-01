@@ -224,10 +224,16 @@ func (s *Server) enhancedLoggingMiddleware(next http.Handler) http.Handler {
 }
 
 func requestURIForLog(r *http.Request) string {
-	if r == nil || !strings.HasPrefix(r.URL.Path, "/verify-binhost/") {
-		if r == nil {
-			return ""
+	if r == nil {
+		return ""
+	}
+	if strings.HasPrefix(r.URL.Path, "/api/v1/iam/device/") {
+		if r.URL.RawQuery != "" {
+			return r.URL.Path + "?<redacted>"
 		}
+		return r.URL.Path
+	}
+	if !strings.HasPrefix(r.URL.Path, "/verify-binhost/") {
 		return r.RequestURI
 	}
 	rest := strings.TrimPrefix(r.URL.Path, "/verify-binhost/")

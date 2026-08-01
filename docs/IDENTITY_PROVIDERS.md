@@ -23,6 +23,14 @@ browser
                          ▼
               random short-lived pe1_ session
               PostgreSQL stores SHA-256 only
+
+CLI ── public device start ──> high-entropy device code + short user code
+ │                                      │
+ │ polls POST body                      ▼
+ └──────────────────────── authenticated Dashboard /device approval
+                                        │ existing pe1_ browser session
+                                        ▼
+                              one atomic pe1_ session issue
 ```
 
 The Dashboard never forwards an upstream token on ordinary API calls. The
@@ -34,8 +42,60 @@ app-owner token check with this deployment's exact client ID and secret.
 Authorization does not trust provider groups, repository membership or token
 role claims. Projects and roles remain PostgreSQL-authoritative.
 
-For a non-browser client that already obtained a provider credential, exchange
-it without putting the credential in shell history:
+For a CLI, prefer the browser-assisted device login. It reuses the existing
+authenticated Dashboard session, so no Google, GitHub or OIDC credential is
+copied into a terminal:
+
+```bash
+export PORTAGE_ENGINE_TOKEN="$(
+  portage-client login -server=https://api.portage.example.org
+)"
+
+# Headless/SSH host: print the URL and code without launching a browser.
+portage-client device-login -server=https://api.portage.example.org \
+  -no-browser -out="$HOME/.config/portage-engine/session"
+```
+
+`login` and `device-login` are aliases. The output file is created or replaced
+with mode `0600`; otherwise the final bearer is printed exactly once on stdout
+and progress stays on stderr.
+
+The server returns a random 256-bit `device_code`, an eight-character
+human-entered `user_code`, the verification URI and complete URI, a ten-minute
+expiry, and the minimum poll interval. The CLI waits before its first poll and
+honors `authorization_pending`, durable `slow_down`, `access_denied` and
+`expired_token` responses. The complete URI contains only the short user code.
+Neither the device capability nor the resulting bearer appears in a URL.
+
+The browser page requires an already authenticated federated Portage Engine
+session. A local Dashboard administrator or legacy API key cannot approve a
+code. Approval binds the request to that exact active subject/session; the
+successful poll verifies it again, creates the new platform session and marks
+the code consumed in one PostgreSQL transaction. A concurrent or repeated
+poll therefore returns `expired_token`. If the success response is lost, the
+server does not mint a replacement from the same code.
+
+PostgreSQL stores only SHA-256 digests of the device capability and resulting
+bearer. The short user code is not a credential by itself, is short-lived, and
+still requires an authenticated browser decision. Approval does not copy a
+role, group, email or project list into the CLI token: every later request
+resolves the exact `(issuer, subject)` against current PostgreSQL
+`project_memberships`.
+
+Configure the control plane with the externally reachable Dashboard page:
+
+```ini
+DEVICE_AUTHORIZATION_VERIFICATION_URI=https://portage.example.org/device
+```
+
+Public mode requires HTTPS and the exact `/device` path without userinfo,
+query or fragment. The authorization and poll endpoints are public-client
+endpoints and must remain behind the normal source-IP rate limit. The decision
+endpoint is authenticated.
+
+The existing credential-exchange path remains available for automation that
+already obtains an upstream credential. Read it without putting it in shell
+history:
 
 ```bash
 read -r -s PORTAGE_PROVIDER_CREDENTIAL
@@ -48,8 +108,8 @@ unset PORTAGE_PROVIDER_CREDENTIAL
 export PORTAGE_ENGINE_TOKEN
 ```
 
-This command is a credential exchange, not a complete OAuth device-login
-implementation. A browser-assisted CLI/device flow remains a follow-up item.
+`token-exchange` remains a compatibility path; it is not needed by the device
+login and its upstream credential is never sent to the Dashboard.
 
 ## Provider registry
 
@@ -164,3 +224,5 @@ Before removing the legacy break-glass path:
 5. Replay one signed logout token and confirm it is a successful no-op.
 6. Confirm logs contain no upstream credential, `pe1_` bearer, raw logout JWT
    or raw `jti`.
+7. Run a local-session device fixture and confirm approval, denial, expiry and
+   concurrent replay all fail closed without contacting an external provider.
