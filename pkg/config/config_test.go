@@ -131,6 +131,29 @@ func validPublicServerConfig() *ServerConfig {
 	}
 }
 
+func configurePersistentExecutor(cfg *ServerConfig) {
+	cfg.RuntimeRole = "executor"
+	cfg.ControlPlaneID = "capacity-executor-test"
+	cfg.ExecutorCapacityInstanceID = "123e4567-e89b-12d3-a456-426614174000"
+	cfg.ExecutorCapabilities = []string{
+		"capacity-pool:pve-zone-a-amd64-db23fcaaaeb71219f0511397",
+		"provider:pve",
+		"zone:zone-a",
+		"arch:amd64",
+		"build-mode:native-gentoo",
+		"profile:pe/amd64/base-v1",
+		"image:pe/amd64/base@g17",
+		"phase:provision",
+		"phase:build",
+		"phase:verify",
+		"phase:publish",
+	}
+	// An executor consumes the gateway trust/issuer configuration but never
+	// owns the API-side TLS listener private key.
+	cfg.WorkerGatewayTLSCert = ""
+	cfg.WorkerGatewayTLSKey = ""
+}
+
 func TestPublicServerDeploymentRejectsUnsafeCompatibilityDefaults(t *testing.T) {
 	cfg := validPublicServerConfig()
 	cfg.StorageType = "local"
@@ -170,7 +193,7 @@ func TestPublicServerDeploymentAcceptsHardenedBoundary(t *testing.T) {
 
 func TestPublicExecutorRequiresQuarantineScopedDeleteClient(t *testing.T) {
 	cfg := validPublicServerConfig()
-	cfg.RuntimeRole = "executor"
+	configurePersistentExecutor(cfg)
 	if err := cfg.ValidateStartup(); err == nil ||
 		!strings.Contains(err.Error(), "STORAGE_S3_ALLOW_DELETE") {
 		t.Fatalf("public executor without revocation client error=%v", err)
@@ -178,6 +201,80 @@ func TestPublicExecutorRequiresQuarantineScopedDeleteClient(t *testing.T) {
 	cfg.StorageS3AllowDelete = true
 	if err := cfg.ValidateStartup(); err != nil {
 		t.Fatalf("public executor with lifecycle client was rejected: %v", err)
+	}
+}
+
+func TestPersistentExecutorAcceptsOutboundGatewayWithoutListenerKey(t *testing.T) {
+	cfg := validPublicServerConfig()
+	cfg.DeploymentMode = DeploymentModeTrusted
+	cfg.StorageType = "local"
+	configurePersistentExecutor(cfg)
+	if err := cfg.ValidateStartup(); err != nil {
+		t.Fatalf("listener-free persistent executor was rejected: %v", err)
+	}
+	for _, warning := range cfg.Validate() {
+		if strings.Contains(warning, "server TLS cert/key") ||
+			strings.Contains(warning, "WORKER_GATEWAY_PORT") {
+			t.Fatalf("executor was incorrectly required to own a listener: %s", warning)
+		}
+	}
+}
+
+func TestPersistentExecutorRejectsAmbiguousOrSpoofedCapabilities(t *testing.T) {
+	tests := []struct {
+		name       string
+		capability string
+		want       string
+	}{
+		{
+			name:       "second provider",
+			capability: "provider:aws",
+			want:       "exactly one provider",
+		},
+		{
+			name:       "static capacity identity",
+			capability: "capacity-instance:123e4567-e89b-12d3-a456-426614174000",
+			want:       "derived only from SMBIOS",
+		},
+		{
+			name:       "malformed extra label",
+			capability: "broken label",
+			want:       "contains invalid label",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := validPublicServerConfig()
+			cfg.DeploymentMode = DeploymentModeTrusted
+			configurePersistentExecutor(cfg)
+			cfg.ExecutorCapabilities = append(cfg.ExecutorCapabilities, test.capability)
+			err := cfg.ValidateStartup()
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("ambiguous executor capability error=%v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestPersistentExecutorRejectsListenerPrivateKey(t *testing.T) {
+	cfg := validPublicServerConfig()
+	cfg.DeploymentMode = DeploymentModeTrusted
+	configurePersistentExecutor(cfg)
+	cfg.WorkerGatewayTLSKey = "/run/pki/api-listener.key"
+	err := cfg.ValidateStartup()
+	if err == nil || !strings.Contains(err.Error(), "must not receive WORKER_GATEWAY_TLS_KEY") {
+		t.Fatalf("executor listener key error=%v", err)
+	}
+}
+
+func TestPersistentExecutorRejectsPoolHashDrift(t *testing.T) {
+	cfg := validPublicServerConfig()
+	cfg.DeploymentMode = DeploymentModeTrusted
+	configurePersistentExecutor(cfg)
+	cfg.ExecutorCapabilities[0] = "capacity-pool:pve-zone-a-amd64-000000000000000000000000"
+	err := cfg.ValidateStartup()
+	if err == nil || !strings.Contains(err.Error(), "does not match its immutable dimensions") {
+		t.Fatalf("executor pool hash drift error=%v", err)
 	}
 }
 

@@ -903,6 +903,129 @@ No additional PVE VM was created for this Gate because the data-plane contract
 was unchanged. The prior signed-GPKG real-PVE Gate remains the worker evidence;
 schema 20 must be included in the next PostgreSQL backup/restore drill.
 
+## SCHED-2B persistent executor Gate
+
+Persistent capacity uses a different PVE template and lifecycle from the
+single-use native builder described above. Build its candidate with
+`image-factory/persistent-executor/run.sh`; do not point the capacity actuator
+at a job-builder template. The build inputs and exact environment are in
+[the persistent-executor image runbook](../image-factory/persistent-executor/README.md).
+
+The candidate contains the listener-free executor binary, the exact immutable
+pool labels, a pinned builder binary used only for subsequent disposable VMs,
+the DMI identity helper, and its systemd unit. It contains no
+`executor.conf`, signing private key, PVE/PBS management credential,
+Terraform state, Worker Gateway listener key, or Packer SSH authorization.
+Provision `/etc/portage-engine/executor.conf` and its referenced credential
+files after clone through the site's protected boot-time secret mechanism.
+That file needs the least-privilege PostgreSQL, artifact, PVE and workload
+issuer settings required by the four executor phases. It must not set
+`WORKER_GATEWAY_TLS_KEY`: the executor has no API or Worker Gateway listener.
+
+The actuator reserves the PostgreSQL capacity instance before Terraform. Its
+provider identity is exactly `portage-capacity-<uuid>` and Terraform writes
+that UUID to `smbios1`. The pre-start helper accepts only the normalized DMI
+UUID and creates `CONTROL_PLANE_ID`, `SERVER_RUNTIME_ROLE=executor`, and
+`EXECUTOR_CAPACITY_INSTANCE_ID` in `/run`. Startup rejects a statically baked
+`capacity-instance` capability, ambiguous provider/zone/architecture/build
+mode/profile/image dimensions, a missing image generation, or any missing
+phase label. The scheduler adds the DMI-derived instance label to every slot.
+
+### Repository and PostgreSQL Gate
+
+Run the repeatable repository entry first:
+
+```bash
+scripts/persistent-executor-gate.sh repo
+```
+
+It syntax-checks the image scripts and Packer HCL, runs the executor startup
+boundary tests, exercises scale-up/scale-down replay and exact deletion
+identity/generation, and runs the PVE absence-readback HTTP tests. When
+`PORTAGE_TEST_DATABASE_URL` is set, the PostgreSQL integration case also
+proves:
+
+- repeated reservation and drain selection return the same durable instance;
+- a stale action fence cannot persist provider state;
+- draining changes only workers carrying that capacity instance label;
+- a live admission/attempt worker lease rejects deletion;
+- a live phase lease rejects deletion;
+- stale instance generations cannot begin or complete deletion; and
+- the exact owner token/generation can complete only once.
+
+Without `PORTAGE_TEST_DATABASE_URL`, the integration test prints its explicit
+skip reason. Without Packer, only Packer syntax validation is skipped. Repo
+mode always prints that it did not run a live PVE Gate; its passing output is
+never live-cluster evidence.
+
+### Live PVE cycle
+
+The live entry deliberately consumes only an already requested scheduler
+action. It refuses to choose among concurrent production actions, so use an
+isolated Gate deployment/database and require exactly one `requested` action.
+The actuator's `-once` mode claims one fenced action and exits only after the
+heartbeat or drain/delete lifecycle completes.
+
+Prepare the candidate and runtime secret injection, then configure the
+actuator allowlist with the exact worker `image_id`, worker
+`image_generation`, persistent template name and `pve-dmi-v1` contract. Enable
+an enforced egress policy. Start the API/admission role with the same immutable
+catalog and:
+
+```ini
+SCHEDULER_AUTOSCALE_MODE=actuate
+SCHEDULER_AUTOSCALE_PROVIDER_MAX_SLOTS=pve:1
+```
+
+For scale-up, submit or retain matched backlog until the scheduler writes one
+scale-up action for the pool. Do not insert an action or instance row by hand.
+Export the protected Gate inputs without copying credentials into the repo:
+
+```bash
+export PORTAGE_CAPACITY_GATE_CONFIRM=destroy-real-pve-capacity
+export PORTAGE_CAPACITY_GATE_DATABASE_URL='<isolated PostgreSQL DSN>'
+export PORTAGE_CAPACITY_GATE_POOL_ID='<exact pool ID from scheduler status>'
+export PORTAGE_CAPACITY_GATE_KIND=scale-up
+export PORTAGE_CAPACITY_ACTUATOR_CONFIG="$PWD/configs/capacity-actuator.json"
+export PORTAGE_CAPACITY_SERVER_CONFIG="$PWD/configs/server.conf"
+export CLOUD_PVE_TOKEN_ID='capacity@pve!actuator'
+export CLOUD_PVE_TOKEN_SECRET='<from-secret-provider>'
+
+scripts/persistent-executor-gate.sh live-once
+```
+
+The command fails if the sole action is for a different pool or direction. A
+successful scale-up requires the exact provider name, positive database
+generation, fresh DMI-bound worker heartbeat, complete immutable selector and
+`active` instance readback.
+
+Next remove the Gate backlog, allow active work to finish, and wait for the
+configured scale-down dwell to produce exactly one scale-down action. Keep a
+real admission or phase lease live for a negative run if desired: the action
+must time out/retry and the VM must remain. After all leases are gone, run:
+
+```bash
+export PORTAGE_CAPACITY_GATE_KIND=scale-down
+scripts/persistent-executor-gate.sh live-once
+```
+
+Scale-down marks only the instance's slots draining. Deletion begins only
+after both lease classes disappear. Terraform destroy is followed by PVE API
+discovery and exact-name configuration readback; a missing local workspace is
+also accepted only after the same PVE absence check. The Gate reports `PASS`
+only when the database action is `completed`, the same instance generation is
+`deleted`, and `deleted_at` is present. A cluster VM count, tag count, manually
+edited JSON file, or a generic `terraform destroy` success is not evidence.
+
+Repeat the complete scale-up/scale-down cycle to prove a new database UUID is
+allocated without reusing the deleted identity. If no complete PVE credential
+pair, PostgreSQL DSN, exact pool, readable configs, `psql`, or explicit
+destructive confirmation is present, `live-once` exits with code 2 and a
+specific `SKIP live PVE SCHED-2B Gate` reason. Preserve the two action IDs,
+instance UUIDs/generations, executor heartbeat timestamps, actuator logs and
+PVE API audit records as the external release packet; never replace them with
+repository test output.
+
 ## Scaling behavior
 
 Package-level parallelism is the current scaling model. Up to `MAX_WORKERS`

@@ -62,10 +62,19 @@ func NewPVEProvider(config PVEProviderConfig) (*PVEProvider, error) {
 	if !filepath.IsAbs(config.WorkspaceDir) {
 		return nil, fmt.Errorf("capacity PVE workspace directory must be absolute")
 	}
-	if config.Credentials == nil ||
-		(config.Credentials.PVETokenID == "" &&
-			config.Credentials.PVEUsername == "") {
+	if config.Credentials == nil {
 		return nil, fmt.Errorf("capacity PVE credentials are required")
+	}
+	tokenConfigured := config.Credentials.PVETokenID != "" ||
+		config.Credentials.PVETokenSecret != ""
+	passwordConfigured := config.Credentials.PVEUsername != "" ||
+		config.Credentials.PVEPassword != ""
+	if (tokenConfigured && (config.Credentials.PVETokenID == "" ||
+		config.Credentials.PVETokenSecret == "")) ||
+		(passwordConfigured && (config.Credentials.PVEUsername == "" ||
+			config.Credentials.PVEPassword == "")) ||
+		(!tokenConfigured && !passwordConfigured) {
+		return nil, fmt.Errorf("capacity PVE credentials require a complete token or username/password pair")
 	}
 	templates := make(map[string]PVEExecutorTemplate, len(config.Templates))
 	for _, template := range config.Templates {
@@ -114,6 +123,7 @@ func validatePVEExecutorTemplate(template PVEExecutorTemplate) error {
 	}
 	for _, forbidden := range []string{
 		"resource_name", "name", "vmid", "template", "endpoint", "insecure",
+		"smbios_uuid", "start_stopped", "tags", "ssh_keys",
 	} {
 		if _, exists := template.Spec[forbidden]; exists {
 			return fmt.Errorf(
@@ -134,26 +144,10 @@ func validatePVEExecutorTemplate(template PVEExecutorTemplate) error {
 	return nil
 }
 
-func (p *PVEProvider) Provision(
-	ctx context.Context,
-	claim *builder.CapacityActionClaim,
+func (p *PVEProvider) provisionSpec(
+	template PVEExecutorTemplate,
 	instance *builder.CapacityInstance,
-) (ProvisionResult, error) {
-	if err := validatePVEInstanceIdentity(claim, instance); err != nil {
-		return ProvisionResult{}, err
-	}
-	template, ok := p.templates[pveTemplateKey(
-		claim.Pool.ImageID, claim.Pool.ImageGeneration,
-	)]
-	if !ok {
-		return ProvisionResult{}, fmt.Errorf(
-			"no approved persistent executor template for %s@%s",
-			claim.Pool.ImageID, claim.Pool.ImageGeneration,
-		)
-	}
-	if err := ctx.Err(); err != nil {
-		return ProvisionResult{}, err
-	}
+) map[string]string {
 	spec := maps.Clone(template.Spec)
 	if spec == nil {
 		spec = make(map[string]string)
@@ -177,6 +171,30 @@ func (p *PVEProvider) Provision(
 	if p.config.Network != "" {
 		spec["network"] = p.config.Network
 	}
+	return spec
+}
+
+func (p *PVEProvider) Provision(
+	ctx context.Context,
+	claim *builder.CapacityActionClaim,
+	instance *builder.CapacityInstance,
+) (ProvisionResult, error) {
+	if err := validatePVEInstanceIdentity(claim, instance); err != nil {
+		return ProvisionResult{}, err
+	}
+	template, ok := p.templates[pveTemplateKey(
+		claim.Pool.ImageID, claim.Pool.ImageGeneration,
+	)]
+	if !ok {
+		return ProvisionResult{}, fmt.Errorf(
+			"no approved persistent executor template for %s@%s",
+			claim.Pool.ImageID, claim.Pool.ImageGeneration,
+		)
+	}
+	if err := ctx.Err(); err != nil {
+		return ProvisionResult{}, err
+	}
+	spec := p.provisionSpec(template, instance)
 	provisioned, err := p.manager.Provision(&iac.ProvisionRequest{
 		InstanceID:   instance.ProviderInstanceID,
 		Provider:     "pve",

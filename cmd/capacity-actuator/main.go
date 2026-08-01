@@ -32,6 +32,10 @@ var (
 		"server-config", "configs/server.conf",
 		"Path to the server configuration containing PostgreSQL settings",
 	)
+	runOnce = flag.Bool(
+		"once", false,
+		"Claim and complete exactly one pending action, then exit (live Gate/operations)",
+	)
 )
 
 type fileConfig struct {
@@ -128,6 +132,17 @@ func run() error {
 		"Capacity actuator %s started (schema %d; providers: pve)",
 		actuatorConfig.Owner, health.SchemaVersion,
 	)
+	if *runOnce {
+		worked, err := actuator.RunOne(ctx)
+		if err != nil {
+			return fmt.Errorf("run one capacity action: %w", err)
+		}
+		if !worked {
+			return fmt.Errorf("run one capacity action: no pending action was claimable")
+		}
+		log.Printf("Capacity actuator completed one fenced action")
+		return nil
+	}
 	err = actuator.Run(ctx)
 	if errors.Is(err, context.Canceled) {
 		return nil

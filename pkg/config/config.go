@@ -3,6 +3,8 @@ package config
 
 import (
 	"bufio"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -328,6 +330,14 @@ func (c *ServerConfig) ValidateStartup() error {
 			DeploymentModeTrusted, DeploymentModePublic,
 		)
 	}
+	if c.RuntimeRole == "executor" {
+		if violations := c.validatePersistentExecutorBoundary(); len(violations) > 0 {
+			return fmt.Errorf(
+				"persistent executor configuration rejected: %s",
+				strings.Join(violations, "; "),
+			)
+		}
+	}
 	if mode != DeploymentModePublic {
 		return nil
 	}
@@ -344,6 +354,148 @@ func (c *ServerConfig) ValidateStartup() error {
 		)
 	}
 	return nil
+}
+
+func (c *ServerConfig) validatePersistentExecutorBoundary() []string {
+	violations := make([]string, 0, 16)
+	addViolation(&violations, strings.TrimSpace(c.ControlPlaneID) == "",
+		"CONTROL_PLANE_ID must be stable and non-empty")
+	addViolation(&violations, c.PhaseExecutorMode != "active",
+		"PHASE_EXECUTOR_MODE must be active")
+	addViolation(&violations, !c.Database.Enabled || !c.Database.Required,
+		"PostgreSQL must be enabled and required")
+	addViolation(&violations, !c.WorkerGatewayEnabled,
+		"WORKER_GATEWAY_ENABLED must be true")
+	addViolation(&violations, len(c.RemoteBuilders) != 0,
+		"REMOTE_BUILDERS legacy push compatibility must be disabled")
+	addViolation(&violations, strings.TrimSpace(c.ExecutorCapacityInstanceID) == "" ||
+		!executorCapacityInstancePattern.MatchString(c.ExecutorCapacityInstanceID),
+		"EXECUTOR_CAPACITY_INSTANCE_ID must be a lowercase UUID")
+	addViolation(&violations, strings.TrimSpace(c.WorkerGatewayTLSKey) != "",
+		"executor role must not receive WORKER_GATEWAY_TLS_KEY listener credentials")
+	addViolation(&violations, c.executorGatewayTrustIncomplete(),
+		"Worker Gateway advertise URL plus server/client CA bundles are required")
+	addViolation(&violations,
+		c.WorkerGatewayAdvertiseURL != "" &&
+			validateHTTPSEndpoint(c.WorkerGatewayAdvertiseURL) != nil,
+		"WORKER_GATEWAY_ADVERTISE_URL must be an absolute HTTPS URL")
+	switch c.WorkerGatewayIssuerProvider {
+	case "file":
+		addViolation(&violations,
+			c.WorkerGatewayIssuerCert == "" || c.WorkerGatewayIssuerKey == "",
+			"file worker issuer requires its certificate and runtime-injected private key")
+	case "vault":
+		addViolation(&violations,
+			c.WorkerGatewayVaultAddress == "" || c.WorkerGatewayVaultMount == "" ||
+				c.WorkerGatewayVaultRole == "" || c.WorkerGatewayVaultTokenPath == "",
+			"Vault worker issuer requires address, mount, role, and runtime token file")
+	default:
+		addViolation(&violations, true,
+			"WORKER_GATEWAY_ISSUER_PROVIDER must be file or vault")
+	}
+
+	violations = append(
+		violations, validatePersistentExecutorCapabilities(c.ExecutorCapabilities)...,
+	)
+	return violations
+}
+
+func validatePersistentExecutorCapabilities(capabilities []string) []string {
+	var violations []string
+	seen := make(map[string]struct{}, len(capabilities))
+	required := map[string]int{
+		"capacity-pool": 0,
+		"provider":      0,
+		"zone":          0,
+		"arch":          0,
+		"build-mode":    0,
+		"profile":       0,
+		"image":         0,
+	}
+	dimensions := make(map[string]string, len(required))
+	phases := map[string]bool{
+		"provision": false,
+		"build":     false,
+		"verify":    false,
+		"publish":   false,
+	}
+	for _, capability := range capabilities {
+		if !executorCapabilityPattern.MatchString(capability) {
+			violations = append(violations,
+				"EXECUTOR_CAPABILITIES contains invalid label "+capability)
+			continue
+		}
+		if _, duplicate := seen[capability]; duplicate {
+			violations = append(violations,
+				"EXECUTOR_CAPABILITIES contains duplicate label "+capability)
+			continue
+		}
+		seen[capability] = struct{}{}
+		prefix, value, found := strings.Cut(capability, ":")
+		if !found {
+			continue
+		}
+		if _, exists := required[prefix]; exists {
+			required[prefix]++
+			dimensions[prefix] = value
+		}
+		if prefix == "phase" {
+			if _, exists := phases[value]; !exists {
+				violations = append(violations,
+					"EXECUTOR_CAPABILITIES contains unsupported phase:"+value)
+			} else {
+				phases[value] = true
+			}
+		}
+		if prefix == "capacity-instance" {
+			violations = append(violations,
+				"capacity-instance capability is derived only from SMBIOS")
+		}
+		if prefix == "image" {
+			separator := strings.LastIndex(value, "@")
+			if separator <= 0 || separator == len(value)-1 ||
+				strings.Count(value, "@") != 1 {
+				violations = append(violations,
+					"image capability must bind image ID and generation as image:<id>@<generation>")
+			}
+		}
+	}
+	for _, prefix := range []string{
+		"capacity-pool", "provider", "zone", "arch", "build-mode", "profile", "image",
+	} {
+		if required[prefix] != 1 {
+			violations = append(violations, fmt.Sprintf(
+				"EXECUTOR_CAPABILITIES must contain exactly one %s label", prefix,
+			))
+		}
+	}
+	for _, phase := range []string{"provision", "build", "verify", "publish"} {
+		if !phases[phase] {
+			violations = append(violations,
+				"EXECUTOR_CAPABILITIES must contain phase:"+phase)
+		}
+	}
+	if len(dimensions) == len(required) {
+		parts := []string{
+			dimensions["provider"], dimensions["zone"], dimensions["arch"],
+			dimensions["build-mode"], dimensions["profile"],
+		}
+		imageID, imageGeneration, found := strings.Cut(
+			dimensions["image"], "@",
+		)
+		if found && imageID != "" && imageGeneration != "" &&
+			!strings.Contains(imageGeneration, "@") {
+			parts = append(parts, imageID, imageGeneration)
+			digest := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
+			expectedPool := strings.Join(parts[:3], "-") + "-" +
+				hex.EncodeToString(digest[:12])
+			if dimensions["capacity-pool"] != expectedPool {
+				violations = append(violations,
+					"capacity-pool capability does not match its immutable dimensions")
+			}
+		}
+	}
+	return violations
 }
 
 func (c *ServerConfig) validatePublicRuntimeBoundary() []string {
@@ -595,11 +747,24 @@ func (c *ServerConfig) validateWorkerGateway() []string {
 	if !c.Database.Enabled || !c.Database.Required {
 		warnings = append(warnings, "CONFIG: WORKER_GATEWAY_ENABLED requires DATABASE_ENABLED=true and DATABASE_REQUIRED=true")
 	}
-	if c.WorkerGatewayPort <= 0 || c.WorkerGatewayPort > 65535 || c.WorkerGatewayPort == c.Port {
-		warnings = append(warnings, "CONFIG: WORKER_GATEWAY_PORT must be a valid port distinct from SERVER_PORT")
-	}
-	if c.workerGatewayTLSIncomplete() {
-		warnings = append(warnings, "CONFIG: worker gateway requires advertise URL, server TLS cert/key, and server/client CA bundles")
+	if c.RuntimeRole == "executor" {
+		if c.executorGatewayTrustIncomplete() {
+			warnings = append(warnings, "CONFIG: executor requires Worker Gateway advertise URL plus server/client CA bundles")
+		}
+		if c.WorkerGatewayAdvertiseURL != "" &&
+			validateHTTPSEndpoint(c.WorkerGatewayAdvertiseURL) != nil {
+			warnings = append(warnings, "CONFIG: executor Worker Gateway advertise URL must be an absolute HTTPS URL")
+		}
+		if c.WorkerGatewayTLSKey != "" {
+			warnings = append(warnings, "CONFIG: executor role must not receive Worker Gateway listener private keys")
+		}
+	} else {
+		if c.WorkerGatewayPort <= 0 || c.WorkerGatewayPort > 65535 || c.WorkerGatewayPort == c.Port {
+			warnings = append(warnings, "CONFIG: WORKER_GATEWAY_PORT must be a valid port distinct from SERVER_PORT")
+		}
+		if c.workerGatewayTLSIncomplete() {
+			warnings = append(warnings, "CONFIG: worker gateway requires advertise URL, server TLS cert/key, and server/client CA bundles")
+		}
 	}
 	switch c.WorkerGatewayIssuerProvider {
 	case "file":
@@ -728,6 +893,12 @@ func (c *ServerConfig) workerGatewayTLSIncomplete() bool {
 	return c.WorkerGatewayAdvertiseURL == "" || c.WorkerGatewayTLSCert == "" ||
 		c.WorkerGatewayTLSKey == "" || c.WorkerGatewayServerCA == "" ||
 		c.WorkerGatewayClientCA == "" ||
+		c.WorkerGatewayIssuerID == "" || c.WorkerGatewayIssuerProvider == ""
+}
+
+func (c *ServerConfig) executorGatewayTrustIncomplete() bool {
+	return c.WorkerGatewayAdvertiseURL == "" ||
+		c.WorkerGatewayServerCA == "" || c.WorkerGatewayClientCA == "" ||
 		c.WorkerGatewayIssuerID == "" || c.WorkerGatewayIssuerProvider == ""
 }
 

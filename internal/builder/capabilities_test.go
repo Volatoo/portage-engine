@@ -45,6 +45,21 @@ func TestPhaseCapabilityRequirementsAreExactAndStable(t *testing.T) {
 	}
 }
 
+func TestCapacityPoolIDPersistentExecutorBuildVector(t *testing.T) {
+	poolID, err := CapacityPoolID(&catalog.ResolvedBuildContext{
+		Provider: "pve", ExecutionZone: "zone-a", Arch: "amd64",
+		BuildMode: "native-gentoo", ProfileID: "pe/amd64/base-v1",
+		ImageID: "pe/amd64/base", ImageGeneration: "g17",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const expected = "pve-zone-a-amd64-db23fcaaaeb71219f0511397"
+	if poolID != expected {
+		t.Fatalf("capacity pool ID=%q, want build-script vector %q", poolID, expected)
+	}
+}
+
 func TestNormalizeExecutorCapabilitiesRejectsMalformedLabels(t *testing.T) {
 	for _, labels := range [][]string{
 		nil,
