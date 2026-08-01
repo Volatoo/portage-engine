@@ -138,6 +138,9 @@ func TestPostgresMigrationTransactionAndCompatibility(t *testing.T) {
 		platformPrincipal.Authentication != "federated-session" {
 		t.Fatalf("authorize platform session = %+v, %v", platformPrincipal, err)
 	}
+	testDeviceAuthorizationAtomicConsumption(
+		t, ctx, db, iamRepo, alice, rawPlatformSession,
+	)
 	expiredIdentity := sessionIdentity
 	expiredIdentity.TokenHash = strings.Repeat("d", 64)
 	expiredIdentity.IssuedAt = sessionNow.Add(-2 * time.Hour)
@@ -584,6 +587,187 @@ func TestPostgresMigrationTransactionAndCompatibility(t *testing.T) {
 	health := db.Check(ctx)
 	if health.OK || !strings.Contains(health.Reason, "newer than server maximum") {
 		t.Fatalf("future schema must fail closed: %+v", health)
+	}
+}
+
+func testDeviceAuthorizationAtomicConsumption(
+	t *testing.T,
+	ctx context.Context,
+	db *persistence.Database,
+	repo *persistence.IAMRepository,
+	approver iam.Principal,
+	approverToken string,
+) {
+	t.Helper()
+	policy := persistence.IAMSessionPolicy{
+		IdleTimeout: time.Hour, MaxLifetime: 12 * time.Hour,
+	}
+	// Re-authorize through the same local fixture used by the server so the
+	// approval principal is exactly an active federated platform session.
+	principal, err := repo.AuthorizePlatformSession(ctx, approverToken, policy)
+	if err != nil {
+		t.Fatalf("authorize device approver fixture: %v", err)
+	}
+	if principal.SubjectID != approver.SubjectID ||
+		principal.Authentication != "federated-session" {
+		t.Fatalf("device approver=%+v", principal)
+	}
+
+	rawDeviceCode := "ped1_postgres-one-time-capability"
+	deviceDigest := sha256.Sum256([]byte(rawDeviceCode))
+	deviceHash := hex.EncodeToString(deviceDigest[:])
+	created, err := repo.CreateDeviceAuthorization(
+		ctx, deviceHash, "ABCD-EFGH", 600, 5,
+	)
+	if err != nil || !created {
+		t.Fatalf("create device authorization created=%t err=%v", created, err)
+	}
+	var storedHash string
+	var remainingTTL float64
+	if err := db.Pool().QueryRow(ctx, `
+		SELECT device_code_hash,
+		       extract(epoch FROM expires_at - clock_timestamp())
+		FROM iam_device_authorizations WHERE user_code = 'ABCD-EFGH'
+	`).Scan(&storedHash, &remainingTTL); err != nil {
+		t.Fatalf("read stored device authorization: %v", err)
+	}
+	if storedHash != deviceHash || storedHash == rawDeviceCode ||
+		strings.Contains(storedHash, rawDeviceCode) ||
+		remainingTTL < 590 || remainingTTL > 600 {
+		t.Fatalf("device code digest=%q remaining_ttl=%f", storedHash, remainingTTL)
+	}
+	if decision, err := repo.DecideDeviceAuthorization(
+		ctx, "ABCD-EFGH", principal, true, policy,
+	); err != nil || decision.Status != persistence.DeviceAuthorizationApproved {
+		t.Fatalf("approve device authorization=%+v err=%v", decision, err)
+	}
+
+	type pollResult struct {
+		raw    string
+		result persistence.DeviceAuthorizationPoll
+		err    error
+	}
+	start := make(chan struct{})
+	results := make(chan pollResult, 2)
+	var pollers sync.WaitGroup
+	for _, raw := range []string{"pe1_device-winner-a", "pe1_device-winner-b"} {
+		pollers.Add(1)
+		go func(candidate string) {
+			defer pollers.Done()
+			<-start
+			digest := sha256.Sum256([]byte(candidate))
+			result, pollErr := repo.PollDeviceAuthorization(
+				ctx, deviceHash, hex.EncodeToString(digest[:]), policy,
+			)
+			results <- pollResult{raw: candidate, result: result, err: pollErr}
+		}(raw)
+	}
+	close(start)
+	pollers.Wait()
+	close(results)
+	approved, expired := 0, 0
+	winner, loser, winnerSessionID := "", "", ""
+	for result := range results {
+		if result.err != nil {
+			t.Fatalf("concurrent device poll: %v", result.err)
+		}
+		switch result.result.Status {
+		case persistence.DeviceAuthorizationApproved:
+			approved++
+			winner = result.raw
+			winnerSessionID = result.result.Principal.SessionID
+		case persistence.DeviceAuthorizationExpired:
+			expired++
+			loser = result.raw
+		default:
+			t.Fatalf("concurrent device poll result=%+v", result.result)
+		}
+	}
+	if approved != 1 || expired != 1 || winner == "" || loser == "" {
+		t.Fatalf("concurrent polls approved=%d expired=%d winner=%q loser=%q",
+			approved, expired, winner, loser)
+	}
+	defer func() {
+		if _, cleanupErr := db.Pool().Exec(
+			ctx, `DELETE FROM iam_sessions WHERE id = $1`, winnerSessionID,
+		); cleanupErr != nil {
+			t.Errorf("clean up winning device session: %v", cleanupErr)
+		}
+	}()
+	if issued, err := repo.AuthorizePlatformSession(ctx, winner, policy); err != nil ||
+		issued.SubjectID != approver.SubjectID {
+		t.Fatalf("winning device session=%+v err=%v", issued, err)
+	}
+	if _, err := repo.AuthorizePlatformSession(ctx, loser, policy); err == nil {
+		t.Fatal("losing concurrent access token became usable")
+	}
+	replayDigest := sha256.Sum256([]byte("pe1_device-replay"))
+	if replay, err := repo.PollDeviceAuthorization(
+		ctx, deviceHash, hex.EncodeToString(replayDigest[:]), policy,
+	); err != nil || replay.Status != persistence.DeviceAuthorizationExpired {
+		t.Fatalf("consumed replay=%+v err=%v", replay, err)
+	}
+
+	deniedRaw := "ped1_postgres-denied"
+	deniedDigest := sha256.Sum256([]byte(deniedRaw))
+	deniedHash := hex.EncodeToString(deniedDigest[:])
+	if created, err := repo.CreateDeviceAuthorization(
+		ctx, deniedHash, "JKLM-NPQR", 60, 5,
+	); err != nil || !created {
+		t.Fatalf("create denied device created=%t err=%v", created, err)
+	}
+	if _, err := repo.DecideDeviceAuthorization(
+		ctx, "JKLM-NPQR", principal, false, policy,
+	); err != nil {
+		t.Fatalf("deny device authorization: %v", err)
+	}
+	unusedDigest := sha256.Sum256([]byte("pe1_never-issued"))
+	if denied, err := repo.PollDeviceAuthorization(
+		ctx, deniedHash, hex.EncodeToString(unusedDigest[:]), policy,
+	); err != nil || denied.Status != persistence.DeviceAuthorizationDenied {
+		t.Fatalf("denied poll=%+v err=%v", denied, err)
+	}
+
+	expiredRaw := "ped1_postgres-expired"
+	expiredDigest := sha256.Sum256([]byte(expiredRaw))
+	expiredHash := hex.EncodeToString(expiredDigest[:])
+	if created, err := repo.CreateDeviceAuthorization(
+		ctx, expiredHash, "STUV-WXYZ", 60, 5,
+	); err != nil || !created {
+		t.Fatalf("create expiring device created=%t err=%v", created, err)
+	}
+	if _, err := db.Pool().Exec(ctx, `
+		UPDATE iam_device_authorizations
+		SET created_at = clock_timestamp() - interval '2 minutes',
+		    expires_at = clock_timestamp() - interval '1 minute'
+		WHERE device_code_hash = $1
+	`, expiredHash); err != nil {
+		t.Fatalf("expire device fixture: %v", err)
+	}
+	if expiredResult, err := repo.PollDeviceAuthorization(
+		ctx, expiredHash, hex.EncodeToString(unusedDigest[:]), policy,
+	); err != nil || expiredResult.Status != persistence.DeviceAuthorizationExpired {
+		t.Fatalf("expired poll=%+v err=%v", expiredResult, err)
+	}
+
+	pendingRaw := "ped1_postgres-slow-down"
+	pendingDigest := sha256.Sum256([]byte(pendingRaw))
+	pendingHash := hex.EncodeToString(pendingDigest[:])
+	if created, err := repo.CreateDeviceAuthorization(
+		ctx, pendingHash, "2345-6789", 60, 5,
+	); err != nil || !created {
+		t.Fatalf("create pending device created=%t err=%v", created, err)
+	}
+	if pending, err := repo.PollDeviceAuthorization(
+		ctx, pendingHash, hex.EncodeToString(unusedDigest[:]), policy,
+	); err != nil || pending.Status != persistence.DeviceAuthorizationPending {
+		t.Fatalf("pending poll=%+v err=%v", pending, err)
+	}
+	if slowDown, err := repo.PollDeviceAuthorization(
+		ctx, pendingHash, hex.EncodeToString(unusedDigest[:]), policy,
+	); err != nil || slowDown.Status != persistence.DeviceAuthorizationSlowDown ||
+		slowDown.IntervalSeconds != 10 {
+		t.Fatalf("slow-down poll=%+v err=%v", slowDown, err)
 	}
 }
 
@@ -1325,6 +1509,20 @@ func TestProjectResourceAndArtifactMigrationsRequireDrainedAttempts(t *testing.T
 	`).Scan(&outcomesView); err != nil ||
 		outcomesView != "monitor_job_outcomes" {
 		t.Fatalf("target-history view=%q err=%v", outcomesView, err)
+	}
+	if _, err := runner.Provider().UpTo(ctx, 27); err != nil {
+		t.Fatalf("schema v27 device-authorization migration failed: %v", err)
+	}
+	if version, err := runner.Provider().GetDBVersion(ctx); err != nil ||
+		version != 27 {
+		t.Fatalf("device-authorization migration version=%d err=%v", version, err)
+	}
+	var deviceTable string
+	if err := fixture.QueryRow(ctx, `
+		SELECT to_regclass('iam_device_authorizations')::text
+	`).Scan(&deviceTable); err != nil ||
+		deviceTable != "iam_device_authorizations" {
+		t.Fatalf("device-authorization table=%q err=%v", deviceTable, err)
 	}
 }
 

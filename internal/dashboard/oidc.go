@@ -45,6 +45,7 @@ type oidcFlow struct {
 	Nonce      string `json:"nonce"`
 	Expires    int64  `json:"expires"`
 	StepUp     bool   `json:"step_up,omitempty"`
+	ReturnTo   string `json:"return_to,omitempty"`
 }
 
 type oidcSession struct {
@@ -172,8 +173,9 @@ func (d *Dashboard) handleProviderStart(
 	flow := oidcFlow{
 		ProviderID: provider.id,
 		State:      state, Verifier: verifier, Nonce: nonce,
-		Expires: time.Now().Add(10 * time.Minute).Unix(),
-		StepUp:  r.URL.Query().Get("step_up") == "1",
+		Expires:  time.Now().Add(10 * time.Minute).Unix(),
+		StepUp:   r.URL.Query().Get("step_up") == "1",
+		ReturnTo: safeReturnTo(r.URL.Query().Get("return_to")),
 	}
 	sealed, err := d.seal("oidc-flow", flow)
 	if err != nil {
@@ -182,7 +184,7 @@ func (d *Dashboard) handleProviderStart(
 	}
 	// #nosec G124 -- HTTP is an explicit trusted-LAN mode; HttpOnly and SameSite remain enforced.
 	http.SetCookie(w, &http.Cookie{
-		Name: oidcFlowCookie, Value: sealed, Path: "/auth/oidc",
+		Name: oidcFlowCookie, Value: sealed, Path: "/auth/",
 		MaxAge: 600, HttpOnly: true, Secure: d.secureCookie(r),
 		SameSite: http.SameSiteLaxMode,
 	})
@@ -279,11 +281,14 @@ func (d *Dashboard) handleProviderCallback(
 	})
 	// #nosec G124 -- HTTP is an explicit trusted-LAN mode; HttpOnly and SameSite remain enforced.
 	http.SetCookie(w, &http.Cookie{
-		Name: oidcFlowCookie, Value: "", Path: "/auth/oidc",
+		Name: oidcFlowCookie, Value: "", Path: "/auth/",
 		MaxAge: -1, HttpOnly: true, Secure: d.secureCookie(r),
 		SameSite: http.SameSiteLaxMode,
 	})
 	target := "/overview"
+	if flow.ReturnTo != "" {
+		target = flow.ReturnTo
+	}
 	if flow.StepUp {
 		target = "/settings?step_up=complete"
 	}

@@ -1,7 +1,10 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -39,6 +42,165 @@ func TestExchangeProviderCredential(t *testing.T) {
 	if err != nil || result.AccessToken != "pe1_cli-session" ||
 		result.ExpiresIn != 600 {
 		t.Fatalf("token exchange = %+v, %v", result, err)
+	}
+}
+
+func TestDeviceAuthorizationPollingHonorsServerInterval(t *testing.T) {
+	const rawDeviceCode = "ped1_high-entropy-device-capability"
+	polls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "" || r.URL.RawQuery != "" {
+			t.Errorf("credential leaked into header/query: %s %q auth=%q",
+				r.URL.Path, r.URL.RawQuery, r.Header.Get("Authorization"))
+		}
+		switch r.URL.Path {
+		case "/api/v1/iam/device/authorization":
+			if r.Method != http.MethodPost {
+				t.Errorf("authorization method=%s", r.Method)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"device_code": rawDeviceCode, "user_code": "ABCD-EFGH",
+				"verification_uri":          "https://dashboard.example.test/device",
+				"verification_uri_complete": "https://dashboard.example.test/device?user_code=ABCD-EFGH",
+				"expires_in":                600, "interval": 5,
+			})
+		case "/api/v1/iam/device/token":
+			if err := r.ParseForm(); err != nil {
+				t.Errorf("parse form: %v", err)
+			}
+			if r.PostForm.Get("device_code") != rawDeviceCode ||
+				r.PostForm.Get("grant_type") != deviceGrantType {
+				t.Errorf("token form=%v", r.PostForm)
+			}
+			polls++
+			switch polls {
+			case 1:
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"error": "authorization_pending", "interval": 5,
+				})
+			case 2:
+				w.Header().Set("Retry-After", "10")
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(map[string]any{"error": "slow_down"})
+			default:
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"access_token": "pe1_device-session", "token_type": "Bearer",
+					"expires_in": 900,
+				})
+			}
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	authorization, err := startDeviceAuthorization(server.Client(), server.URL)
+	if err != nil || authorization.UserCode != "ABCD-EFGH" {
+		t.Fatalf("start = %+v, %v", authorization, err)
+	}
+	var waits []time.Duration
+	result, err := pollDeviceAuthorization(
+		context.Background(), server.Client(), server.URL,
+		authorization.DeviceCode, authorization.Interval,
+		func(_ context.Context, duration time.Duration) error {
+			waits = append(waits, duration)
+			return nil
+		},
+	)
+	if err != nil || result.AccessToken != "pe1_device-session" {
+		t.Fatalf("poll = %+v, %v", result, err)
+	}
+	wantWaits := []time.Duration{5 * time.Second, 5 * time.Second, 10 * time.Second}
+	if len(waits) != len(wantWaits) {
+		t.Fatalf("waits=%v", waits)
+	}
+	for index := range wantWaits {
+		if waits[index] != wantWaits[index] {
+			t.Fatalf("waits=%v", waits)
+		}
+	}
+}
+
+func TestDeviceAuthorizationRejectsMismatchedCompleteURI(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"device_code":               "ped1_high-entropy-device-capability",
+			"user_code":                 "ABCD-EFGH",
+			"verification_uri":          "https://dashboard.example.test/device",
+			"verification_uri_complete": "https://dashboard.example.test/device?user_code=ABCD-EFGH&device_code=unsafe",
+			"expires_in":                600, "interval": 5,
+		})
+	}))
+	defer server.Close()
+	if _, err := startDeviceAuthorization(server.Client(), server.URL); err == nil {
+		t.Fatal("complete URI containing an extra capability parameter was accepted")
+	}
+}
+
+func TestDeviceAuthorizationDeniedAndTokenOutput(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error": "access_denied", "error_description": "reflected pe1_do-not-log",
+		})
+	}))
+	defer server.Close()
+	_, err := requestDeviceToken(server.Client(), server.URL, "ped1_secret")
+	var denied *deviceTokenError
+	if !errors.As(err, &denied) || denied.Code != "access_denied" ||
+		strings.Contains(err.Error(), "pe1_") {
+		t.Fatalf("denied error=%v", err)
+	}
+
+	result := tokenExchangeResult{AccessToken: "pe1_output-once", ExpiresIn: 60}
+	var stdout, stderr strings.Builder
+	if err := emitAccessToken(result, "", &stdout, &stderr); err != nil ||
+		stdout.String() != "pe1_output-once\n" || stderr.Len() != 0 {
+		t.Fatalf("stdout=%q stderr=%q err=%v", stdout.String(), stderr.String(), err)
+	}
+
+	path := filepath.Join(t.TempDir(), "session-token")
+	if err := os.WriteFile(path, []byte("old-token\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stdout.Reset()
+	if err := emitAccessToken(result, path, io.Discard, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != "pe1_output-once\n" || info.Mode().Perm() != 0o600 {
+		t.Fatalf("content=%q mode=%#o", content, info.Mode().Perm())
+	}
+
+	target := filepath.Join(t.TempDir(), "do-not-overwrite")
+	if err := os.WriteFile(target, []byte("preserved\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	symlink := filepath.Join(filepath.Dir(target), "session-link")
+	if err := os.Symlink(target, symlink); err != nil {
+		t.Skipf("symlink fixture unavailable: %v", err)
+	}
+	if err := emitAccessToken(result, symlink, io.Discard, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	preserved, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replaced, err := os.ReadFile(symlink)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(preserved) != "preserved\n" || string(replaced) != "pe1_output-once\n" {
+		t.Fatalf("symlink target=%q replacement=%q", preserved, replaced)
 	}
 }
 

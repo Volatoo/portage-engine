@@ -264,14 +264,24 @@ can submit builds; a maintainer can cancel/retry/delete them; an owner manages
 members. System-administrator endpoints such as cloud settings, workers and
 the image factory remain separate from project roles.
 
-Ask the API which projects the current subject can use:
+Sign in without copying an upstream provider credential, then ask the API
+which projects the current subject can use:
 
 ```bash
-export PORTAGE_ENGINE_TOKEN=$(idp-specific-command)
+export PORTAGE_ENGINE_TOKEN="$(
+  ./bin/portage-client login -server=https://portage.example.org
+)"
 ./bin/portage-client whoami \
   -server=https://portage.example.org \
   -token="${PORTAGE_ENGINE_TOKEN}"
 ```
+
+For SSH/headless use, add `-no-browser` and open the printed verification URL
+elsewhere. Add `-out=<path>` to store the final token with mode `0600` instead
+of printing it. The legacy `token-exchange` command remains available when an
+automation already has a provider credential. See
+[Community identity providers](IDENTITY_PROVIDERS.md) for the one-time and
+replay security boundary.
 
 Select a project explicitly when the identity has more than one:
 

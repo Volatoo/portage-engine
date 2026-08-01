@@ -3,9 +3,10 @@ info:
   title: Portage Engine public API
   version: 0.1.0
   description: >
-    Stable anonymous consumer surface. Build, job, log, project, scheduler,
+    Stable anonymous consumer surface plus the public-client device
+    authorization protocol. Build, job, log, project, scheduler,
     health-detail and administrative APIs are intentionally outside this
-    public contract until their pre-1.0 schemas are finalized.
+    contract until their pre-1.0 schemas are finalized.
 servers:
   - url: https://portage.example.org
 paths:
@@ -69,6 +70,95 @@ paths:
             application/pgp-keys:
               schema: {type: string}
         "503": {description: Signing public key is unavailable}
+  /api/v1/iam/device/authorization:
+    post:
+      summary: Start one CLI device authorization
+      operationId: startDeviceAuthorization
+      description: >
+        Returns a high-entropy device capability and a short browser code.
+        The device capability is sent only in POST bodies and stored by the
+        service only as a SHA-256 digest.
+      responses:
+        "200":
+          description: Short-lived device authorization created
+          headers:
+            Cache-Control: {schema: {type: string, const: no-store}}
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/DeviceAuthorization"}
+        "503":
+          description: Device authorization is not configured
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/DeviceTokenError"}
+  /api/v1/iam/device/token:
+    post:
+      summary: Poll and atomically consume one device authorization
+      operationId: pollDeviceAuthorization
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [grant_type, device_code]
+              properties:
+                grant_type:
+                  type: string
+                  const: urn:ietf:params:oauth:grant-type:device_code
+                device_code: {type: string, maxLength: 256}
+      responses:
+        "200":
+          description: The one-time code was consumed and a platform session issued
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/DeviceToken"}
+        "400":
+          description: Pending, too fast, denied, expired, consumed, or malformed
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/DeviceTokenError"}
+        "503":
+          description: Session authority unavailable
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/DeviceTokenError"}
+  /api/v1/iam/device/decision:
+    post:
+      summary: Approve or deny a CLI code from an authenticated browser session
+      operationId: decideDeviceAuthorization
+      description: >
+        Requires an active federated Portage Engine session. Legacy API keys
+        and local Dashboard administrator sessions cannot approve a code.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [user_code, decision]
+              properties:
+                user_code:
+                  type: string
+                  pattern: "^[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4}$"
+                decision: {type: string, enum: [approve, deny]}
+      responses:
+        "200":
+          description: Decision recorded once
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: {type: string, enum: [approved, denied]}
+        "400": {description: Invalid, expired, or already decided code}
+        "401": {description: Missing or invalid platform session}
+        "403": {description: Session is not a federated browser session}
   /binpkgs/{path}:
     get:
       summary: Download a stable Packages index or GPKG object
@@ -95,7 +185,41 @@ paths:
         "304": {description: ETag matched}
         "404": {description: Path is not selected by the active generation}
 components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
   schemas:
+    DeviceAuthorization:
+      type: object
+      additionalProperties: false
+      required: [device_code, user_code, verification_uri, verification_uri_complete, expires_in, interval]
+      properties:
+        device_code: {type: string, minLength: 40, maxLength: 256}
+        user_code:
+          type: string
+          pattern: "^[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4}$"
+        verification_uri: {type: string, format: uri}
+        verification_uri_complete: {type: string, format: uri}
+        expires_in: {type: integer, minimum: 1, maximum: 3600}
+        interval: {type: integer, minimum: 1, maximum: 60}
+    DeviceToken:
+      type: object
+      additionalProperties: false
+      required: [access_token, token_type, expires_in]
+      properties:
+        access_token: {type: string, writeOnly: true}
+        token_type: {type: string, const: Bearer}
+        expires_in: {type: integer, minimum: 1}
+    DeviceTokenError:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+          enum: [authorization_pending, slow_down, access_denied, expired_token, invalid_request, temporarily_unavailable]
+        error_description: {type: string}
+        interval: {type: integer, minimum: 1, maximum: 60}
     Binhost:
       type: object
       required: [id, arch, profile_path, binhost_path, sync_path]

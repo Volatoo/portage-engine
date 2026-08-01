@@ -7,6 +7,9 @@ begin. Entries describe operator-visible changes, not every internal refactor.
 
 ### Added
 
+- Browser-assisted `portage-client login` / `device-login` with one-time,
+  PostgreSQL-serialized device authorization and a local authenticated
+  Dashboard approval page.
 - S3-compatible object quarantine, revocable verification capabilities,
   independent signer hand-off, immutable binhost generations, ETag-fenced
   stable channel pointers, deep audit, replication, and reference-aware GC.
@@ -30,6 +33,9 @@ begin. Entries describe operator-visible changes, not every internal refactor.
 
 ### Security
 
+- Device and platform bearer capabilities are persisted only as SHA-256
+  digests; approval requires an existing federated platform session, and
+  denial, expiry, concurrent consumption and replay fail closed.
 - Package publication now verifies the exact signed generation in a throwaway
   root before CAS promotion.
 - Public binpkg reads validate channel, manifest, object size, and SHA-256.

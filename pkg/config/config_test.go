@@ -70,14 +70,15 @@ func TestLoadServerRedisConfig(t *testing.T) {
 
 func validPublicServerConfig() *ServerConfig {
 	return &ServerConfig{
-		DeploymentMode:  DeploymentModePublic,
-		RuntimeRole:     "api",
-		ControlPlaneID:  "community-api-1",
-		StorageType:     "s3",
-		StorageS3Bucket: "portage-engine-artifacts",
-		StorageS3Region: "us-east-1",
-		CatalogPath:     "/etc/portage-engine/catalog.json",
-		AuthMode:        "oidc",
+		DeploymentMode:                     DeploymentModePublic,
+		RuntimeRole:                        "api",
+		ControlPlaneID:                     "community-api-1",
+		StorageType:                        "s3",
+		StorageS3Bucket:                    "portage-engine-artifacts",
+		StorageS3Region:                    "us-east-1",
+		CatalogPath:                        "/etc/portage-engine/catalog.json",
+		AuthMode:                           "oidc",
+		DeviceAuthorizationVerificationURI: "https://build.example.test/device",
 		CORSAllowedOrigins: []string{
 			"https://build.example.test",
 		},
@@ -304,6 +305,7 @@ func TestTrustedServerDeploymentPreservesLANCompatibility(t *testing.T) {
 
 func TestLoadServerIAMSessionAndStepUpPolicy(t *testing.T) {
 	t.Setenv("STEP_UP_API_KEY", "independent-key")
+	t.Setenv("DEVICE_AUTHORIZATION_VERIFICATION_URI", "https://build.example.test/device")
 	t.Setenv("OIDC_SESSION_IDLE_MINUTES", "45")
 	t.Setenv("OIDC_SESSION_MAX_MINUTES", "480")
 	t.Setenv("OIDC_STEP_UP_MAX_AGE_MINUTES", "7")
@@ -314,11 +316,28 @@ func TestLoadServerIAMSessionAndStepUpPolicy(t *testing.T) {
 		t.Fatal(err)
 	}
 	if cfg.StepUpAPIKey != "independent-key" ||
+		cfg.DeviceAuthorizationVerificationURI != "https://build.example.test/device" ||
 		cfg.OIDCSessionIdleMinutes != 45 || cfg.OIDCSessionMaxMinutes != 480 ||
 		cfg.OIDCStepUpMaxAgeMin != 7 ||
 		len(cfg.OIDCStepUpAMRValues) != 2 ||
 		len(cfg.OIDCStepUpACRValues) != 1 {
 		t.Fatalf("unexpected IAM lifecycle config: %+v", cfg)
+	}
+}
+
+func TestDeviceAuthorizationVerificationURIValidation(t *testing.T) {
+	cfg := validPublicServerConfig()
+	cfg.DeviceAuthorizationVerificationURI = "http://build.example.test/device"
+	if err := cfg.ValidateStartup(); err == nil ||
+		!strings.Contains(err.Error(), "DEVICE_AUTHORIZATION_VERIFICATION_URI") {
+		t.Fatalf("public HTTP verification URI error=%v", err)
+	}
+
+	cfg = validPublicServerConfig()
+	cfg.DeviceAuthorizationVerificationURI = "https://build.example.test/device?token=unsafe"
+	if err := cfg.ValidateStartup(); err == nil ||
+		!strings.Contains(err.Error(), "DEVICE_AUTHORIZATION_VERIFICATION_URI") {
+		t.Fatalf("verification URI with query error=%v", err)
 	}
 }
 

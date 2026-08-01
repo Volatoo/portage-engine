@@ -63,6 +63,8 @@ const appleCSS = `:root {
   --buttonRadius: 6px;
 
   --bodyGutter: 25px;
+	--authCardWidth: 340px;
+	--deviceCardWidth: 440px;
   --hover-transition: 210ms ease-out;
   --alpha-multiplier: 1;
 }
@@ -96,6 +98,7 @@ const appleCSS = `:root {
 }
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
+[hidden] { display: none !important; }
 body {
   background: var(--pageFloor);
   color: var(--systemPrimary);
@@ -128,6 +131,7 @@ a { color: var(--keyColor); text-decoration: none; }
 .btn.blue:active { background: color-mix(in srgb, var(--keyColor), #000 6%); }
 .btn.danger      { color: var(--systemRed); }
 .btn[disabled] { opacity: .4; cursor: default; }
+.btn[aria-disabled="true"] { opacity: .4; cursor: default; }
 .lang-btn { border: 0; background: none; cursor: pointer; font: var(--callout); color: var(--systemSecondary); padding: 4px 8px; border-radius: 1000px; transition: background-color 175ms ease-in; }
 .lang-btn:hover { background: var(--systemQuinary); }
 
@@ -214,7 +218,7 @@ a { color: var(--keyColor); text-decoration: none; }
 /* ---- auth card (login) ---- */
 .auth-wrap { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: var(--bodyGutter); }
 .auth-card {
-  width: 340px; background: var(--pageRaised); border-radius: var(--radius-large);
+  width: min(100%, var(--authCardWidth)); background: var(--pageRaised); border-radius: var(--radius-large);
   box-shadow: var(--shadow-medium); padding: 28px;
 }
 @media (prefers-color-scheme: dark) { .auth-card { background: var(--systemQuaternary); } }
@@ -226,6 +230,15 @@ a { color: var(--keyColor); text-decoration: none; }
 .auth-note { font: var(--callout); color: var(--systemTertiary); margin-top: 14px; text-align: center; display: flex; justify-content: center; gap: 10px; align-items: center; }
 .auth-divider { display: flex; align-items: center; gap: 10px; margin: 14px 0 10px; color: var(--systemTertiary); font: var(--footnote); }
 .auth-divider::before, .auth-divider::after { content: ""; flex: 1; border-top: var(--keyline); }
+.device-card { width: min(100%, var(--deviceCardWidth)); }
+.device-intro { color: var(--systemSecondary); font: var(--body-tall); margin-bottom: 18px; }
+.device-code { font: var(--title-2-emphasized); font-family: var(--font-mono); letter-spacing: .08em; text-transform: uppercase; }
+.device-identity { color: var(--systemSecondary); font: var(--callout); min-height: 18px; margin: 10px 0; overflow-wrap: anywhere; }
+.device-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.device-actions .btn { flex: 1 1 auto; margin-top: 0; }
+.device-result { font: var(--callout); min-height: 18px; margin-top: 12px; overflow-wrap: anywhere; }
+.device-result[data-state="error"] { color: var(--systemRed); }
+.device-result[data-state="success"] { color: var(--systemGreen); }
 
 /* ---- form fields ---- */
 .field { margin-bottom: 12px; }
@@ -471,6 +484,7 @@ var I18N = {
 
     'title.landing': 'Portage Engine — 自托管 Gentoo 二进制包构建平台',
     'title.login': '登录 — Portage Engine',
+	'title.device': 'CLI 设备授权 — Portage Engine',
     'title.overview': '总览 — Portage Engine',
     'title.builds': '构建任务 — Portage Engine',
     'title.detail': '构建详情 — Portage Engine',
@@ -506,6 +520,18 @@ var I18N = {
     'login.submit': '登录', 'login.back': '返回首页',
     'login.oidc': '使用身份提供商登录', 'login.or': '或',
     'login.badcreds': '用户名或密码错误', 'login.fail': '登录失败', 'login.neterr': '网络错误:',
+	'device.h1': '授权 CLI 登录',
+	'device.intro': '核对终端显示的代码，再决定是否允许该 CLI 创建独立的短期平台会话。',
+	'device.code': '授权代码', 'device.hint': '格式为八位字母或数字；中间连字符可省略。',
+	'device.identity.loading': '正在确认当前平台身份…',
+	'device.console': '控制台',
+	'device.identity': '当前身份：', 'device.projects': '；授权项目数：',
+	'device.federated.required': '请使用身份提供商登录；本地管理员会话不能批准 CLI 设备授权。',
+	'device.identity.fail': '无法确认当前身份。', 'device.retry': '重试',
+	'device.approve': '批准', 'device.deny': '拒绝',
+	'device.invalid': '请输入有效的授权代码。', 'device.request.fail': '授权请求失败。',
+	'device.approved': '已批准。可以安全返回终端。',
+	'device.denied': '已拒绝。可以安全关闭此页面。',
 
     'common.refresh': '刷新', 'common.updated': '更新于 ',
     'common.loadfail': '加载失败:',
@@ -1204,14 +1230,14 @@ const loginHTML = `<!DOCTYPE html>
     <h1 data-i18n="login.h1">Sign In</h1>
     {{if .OIDCEnabled}}
     {{range .IdentityProviders}}
-    <a class="btn blue" href="{{.LoginURL}}{{if $.StepUp}}?step_up=1{{end}}">Sign in with {{.DisplayName}}</a>
+    <a class="btn blue" href="{{.LoginURL}}">Sign in with {{.DisplayName}}</a>
     {{end}}
     {{end}}
     {{if and .OIDCEnabled .LocalLoginEnabled}}
     <div class="auth-divider" data-i18n="login.or">or</div>
     {{end}}
     {{if .LocalLoginEnabled}}
-    <form id="login-form">
+    <form id="login-form" data-return-to="{{.ReturnTo}}">
     <div class="field">
       <label for="u" data-i18n="login.user">Username</label>
       <input type="text" id="u" autocomplete="username" autocapitalize="off" autocorrect="off" spellcheck="false">
@@ -1234,7 +1260,9 @@ document.getElementById('login-form').addEventListener('submit', async function 
   var err = document.getElementById('err');
   err.textContent = '';
   try {
-    var r = await fetch('/login', {
+	var returnTo = document.getElementById('login-form').getAttribute('data-return-to') || '';
+	var loginURL = '/login' + (returnTo ? '?return_to=' + encodeURIComponent(returnTo) : '');
+    var r = await fetch(loginURL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -1247,10 +1275,169 @@ document.getElementById('login-form').addEventListener('submit', async function 
                                          : t('login.fail', 'Sign-in failed') + ' (HTTP ' + r.status + ')';
       return;
     }
-    location.href = '/overview';
+	var result = await r.json();
+    location.href = result.redirect_to || '/overview';
   } catch (ex) { err.textContent = t('login.neterr', 'Network error: ') + ex.message; }
 });
 {{end}}
+</script>
+</body>
+</html>`
+
+// Device authorization is an authenticated operation page. It reuses the
+// established auth-card shell, system theme and en/zh message layer. All
+// human-readable slots wrap; the short opaque code stays fully visible.
+const deviceAuthorizationHTML = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title data-i18n="title.device">Authorize CLI — Portage Engine</title>
+<link rel="stylesheet" href="/static/apple.css?v=4">
+</head>
+<body>
+<div class="auth-wrap">
+  <main class="auth-card device-card">
+    <p class="brand">Portage Engine</p>
+    <h1 data-i18n="device.h1">Authorize CLI sign-in</h1>
+    <p class="device-intro" data-i18n="device.intro">Compare this code with the terminal before allowing the CLI to create its own short-lived platform session.</p>
+    <form id="device-form" novalidate>
+      <div class="field">
+        <label for="device-code" data-i18n="device.code">Authorization code</label>
+        <input class="device-code" type="text" id="device-code" value="{{.UserCode}}"
+          autocomplete="one-time-code" autocapitalize="characters" autocorrect="off"
+          spellcheck="false" maxlength="9" aria-describedby="device-hint device-result">
+        <p class="hint" id="device-hint" data-i18n="device.hint">Eight letters or digits; the middle hyphen is optional.</p>
+      </div>
+      <p class="device-identity" id="device-identity" role="status">Checking the current platform identity…</p>
+      <button class="btn" id="device-retry" type="button" hidden data-i18n="device.retry">Retry</button>
+      <div class="device-actions">
+        <button class="btn blue" id="device-approve" type="button" aria-disabled="true" data-i18n="device.approve">Approve</button>
+        <button class="btn danger" id="device-deny" type="button" aria-disabled="true" data-i18n="device.deny">Deny</button>
+      </div>
+      <p class="device-result" id="device-result" role="alert"></p>
+    </form>
+    <p class="auth-note"><a href="/overview" data-i18n="device.console">Console</a><button class="lang-btn" type="button">中文</button></p>
+  </main>
+</div>
+<script>` + i18nJS + `
+(function () {
+  var code = document.getElementById('device-code');
+  var identity = document.getElementById('device-identity');
+  var result = document.getElementById('device-result');
+  var approve = document.getElementById('device-approve');
+  var deny = document.getElementById('device-deny');
+  var retry = document.getElementById('device-retry');
+  var busy = false;
+  var federated = false;
+  var completed = false;
+  var identityState = 'loading';
+  var identityName = '';
+  var identityProjectCount = 0;
+  var resultCode = '';
+
+  function normalizedCode() {
+    var compact = code.value.toUpperCase().replace(/[^A-Z0-9]/g, '');
+    if (!/^[A-HJ-NP-Z2-9]{8}$/.test(compact)) return '';
+    return compact.slice(0, 4) + '-' + compact.slice(4);
+  }
+  function setActions(enabled) {
+    approve.setAttribute('aria-disabled', enabled ? 'false' : 'true');
+    deny.setAttribute('aria-disabled', enabled ? 'false' : 'true');
+  }
+  function renderIdentity() {
+    if (identityState === 'ready') {
+      identity.textContent = t('device.identity', 'Current identity: ') + identityName +
+        t('device.projects', '; authorized projects: ') + String(identityProjectCount);
+    } else if (identityState === 'required') {
+      identity.textContent = t('device.federated.required', 'Sign in with an identity provider; a local administrator session cannot approve CLI device authorization.');
+    } else if (identityState === 'failed') {
+      identity.textContent = t('device.identity.fail', 'Could not confirm the current identity.');
+    } else {
+      identity.textContent = t('device.identity.loading', 'Checking the current platform identity…');
+    }
+  }
+  function showResult(codeValue, state) {
+    resultCode = codeValue;
+    var message = '';
+    if (resultCode === 'invalid') message = t('device.invalid', 'Enter a valid authorization code.');
+    if (resultCode === 'request-fail') message = t('device.request.fail', 'Authorization request failed.');
+    if (resultCode === 'approved') message = t('device.approved', 'Approved. You can safely return to the terminal.');
+    if (resultCode === 'denied') message = t('device.denied', 'Denied. You can safely close this page.');
+    result.textContent = message;
+    result.setAttribute('data-state', state || '');
+  }
+  async function loadIdentity() {
+    setActions(false);
+    retry.hidden = true;
+    identityState = 'loading';
+    renderIdentity();
+    try {
+      var response = await fetch('/api/iam/me', {headers: {'Accept': 'application/json'}});
+      if (!response.ok) throw new Error('HTTP ' + response.status);
+      var body = await response.json();
+      var principal = body.principal || {};
+      federated = principal.authentication === 'federated-session';
+      if (!federated) {
+        identityState = 'required';
+        renderIdentity();
+        return;
+      }
+      identityName = principal.preferred_username || principal.subject || '-';
+      identityProjectCount = Array.isArray(body.projects) ? body.projects.length : 0;
+      identityState = 'ready';
+      renderIdentity();
+      setActions(true);
+    } catch (error) {
+      federated = false;
+      identityState = 'failed';
+      renderIdentity();
+      retry.hidden = false;
+    }
+  }
+  async function decide(decision) {
+    if (busy || completed || !federated) return;
+    var userCode = normalizedCode();
+    if (!userCode) {
+      code.setAttribute('aria-invalid', 'true');
+      showResult('invalid', 'error');
+      code.focus();
+      return;
+    }
+    code.value = userCode;
+    code.removeAttribute('aria-invalid');
+    busy = true;
+    setActions(false);
+    showResult('', '');
+    try {
+      var response = await fetch('/api/iam/device/decision', {
+        method: 'POST', headers: {'Content-Type': 'application/json', 'Accept': 'application/json'},
+        body: JSON.stringify({user_code: userCode, decision: decision})
+      });
+      if (!response.ok) {
+        var body = null;
+        try { body = await response.json(); } catch (ignore) {}
+        throw new Error(body && body.error ? body.error : 'HTTP ' + response.status);
+      }
+      showResult(decision === 'approve' ? 'approved' : 'denied', 'success');
+      completed = true;
+      code.readOnly = true;
+    } catch (error) {
+      showResult('request-fail', 'error');
+      setActions(true);
+    } finally {
+      busy = false;
+    }
+  }
+  approve.addEventListener('click', function () { decide('approve'); });
+  deny.addEventListener('click', function () { decide('deny'); });
+  retry.addEventListener('click', loadIdentity);
+  window.onLangChange = function () {
+    renderIdentity();
+    showResult(resultCode, result.getAttribute('data-state'));
+  };
+  loadIdentity();
+}());
 </script>
 </body>
 </html>`

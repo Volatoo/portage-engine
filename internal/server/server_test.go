@@ -153,6 +153,8 @@ func TestIAMRouteClassification(t *testing.T) {
 		"/api/v1/public/packages",
 		"/api/v1/public/status",
 		"/api/v1/iam/exchange",
+		"/api/v1/iam/device/authorization",
+		"/api/v1/iam/device/token",
 		"/api/v1/iam/providers/authentik/backchannel-logout",
 		"/binpkgs/releases/amd64/binpackages/23.0/Packages",
 	} {
@@ -162,6 +164,8 @@ func TestIAMRouteClassification(t *testing.T) {
 	}
 	for _, path := range []string{
 		"/api/v1/iam/exchange/extra",
+		"/api/v1/iam/device/decision",
+		"/api/v1/iam/device/token/extra",
 		"/api/v1/iam/providers/authentik/backchannel-logout/extra",
 		"/api/v1/iam/providers/authentik/other",
 		"/api/v1/iam/providers//backchannel-logout",

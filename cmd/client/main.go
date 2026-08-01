@@ -10,7 +10,9 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -20,13 +22,18 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/slchris/portage-engine/internal/builder"
 )
 
-const httpTimeout = 60 * time.Second
+const (
+	httpTimeout     = 60 * time.Second
+	deviceGrantType = "urn:ietf:params:oauth:grant-type:device_code"
+)
 
 func main() {
 	log.SetFlags(0)
@@ -51,6 +58,8 @@ func main() {
 		runWhoAmI(args)
 	case "token-exchange":
 		runTokenExchange(args)
+	case "login", "device-login":
+		runDeviceLogin(args)
 	case "project-policy":
 		runProjectPolicy(args)
 	case "project-policy-set":
@@ -101,6 +110,10 @@ Commands:
   token-exchange  Exchange one upstream provider credential for a short-lived
                   Portage Engine session. The credential is read from an
                   environment variable or stdin, never from a command flag.
+  login, device-login
+                  Sign in through a browser using a short-lived, one-time
+                  device authorization code. No provider credential is copied
+                  into the CLI.
 
   project-policy      Show limits and current usage for one project.
   project-policy-set  Replace a project's admission policy (owner only).
@@ -171,16 +184,11 @@ func runTokenExchange(args []string) {
 	if err != nil {
 		log.Fatalf("identity exchange failed: %v", err)
 	}
-	if *out != "" {
-		// #nosec G306 -- a bearer session is intentionally written owner-only.
-		if err := os.WriteFile(*out, []byte(result.AccessToken+"\n"), 0o600); err != nil {
-			log.Fatalf("write platform token: %v", err)
-		}
-		fmt.Fprintf(os.Stderr, "Wrote Portage Engine session to %s (expires in %ds)\n",
-			*out, result.ExpiresIn)
-		return
+	if err := emitAccessToken(
+		result, *out, os.Stdout, os.Stderr,
+	); err != nil {
+		log.Fatalf("write platform token: %v", err)
 	}
-	fmt.Println(result.AccessToken)
 }
 
 type tokenExchangeResult struct {
@@ -227,6 +235,305 @@ func exchangeProviderCredential(
 		return tokenExchangeResult{}, fmt.Errorf("server returned an invalid platform session")
 	}
 	return result, nil
+}
+
+type deviceAuthorizationResult struct {
+	DeviceCode              string `json:"device_code"`
+	UserCode                string `json:"user_code"`
+	VerificationURI         string `json:"verification_uri"`
+	VerificationURIComplete string `json:"verification_uri_complete"`
+	ExpiresIn               int64  `json:"expires_in"`
+	Interval                int    `json:"interval"`
+}
+
+type deviceTokenError struct {
+	Code        string `json:"error"`
+	Description string `json:"error_description"`
+	Interval    int    `json:"interval"`
+}
+
+func (e *deviceTokenError) Error() string {
+	// Error descriptions are remote input. Keep bearer-shaped values out of
+	// CLI logs even if a broken or hostile endpoint reflects one.
+	switch e.Code {
+	case "authorization_pending":
+		return "authorization_pending: authorization is still pending"
+	case "slow_down":
+		return "slow_down: polling too quickly"
+	case "access_denied":
+		return "access_denied: authorization was denied"
+	case "expired_token":
+		return "expired_token: device authorization expired"
+	default:
+		return e.Code
+	}
+}
+
+func runDeviceLogin(args []string) {
+	fs := flag.NewFlagSet("login", flag.ExitOnError)
+	server := fs.String("server", "http://localhost:8080", "Server URL")
+	open := fs.Bool("open-browser", true, "Open the verification page in the default browser")
+	noBrowser := fs.Bool("no-browser", false, "Print the verification URL/code without opening a browser")
+	out := fs.String("out", "", "Write the platform token to a mode-0600 file instead of stdout")
+	_ = fs.Parse(args)
+	client := &http.Client{Timeout: httpTimeout}
+	base := strings.TrimRight(strings.TrimSpace(*server), "/")
+	authorization, err := startDeviceAuthorization(client, base)
+	if err != nil {
+		log.Fatalf("start device authorization: %v", err)
+	}
+	fmt.Fprintf(os.Stderr, "Authorize this CLI in your browser:\n  %s\nAuthorization code: %s\n",
+		authorization.VerificationURIComplete, authorization.UserCode)
+	if *open && !*noBrowser {
+		if err := openBrowserURL(authorization.VerificationURIComplete); err != nil {
+			fmt.Fprintf(os.Stderr, "Could not open a browser automatically: %v\n", err)
+		}
+	}
+	ctx, cancel := context.WithTimeout(
+		context.Background(), time.Duration(authorization.ExpiresIn+5)*time.Second,
+	)
+	result, err := pollDeviceAuthorization(
+		ctx, client, base, authorization.DeviceCode, authorization.Interval,
+		waitForPollInterval,
+	)
+	cancel()
+	if err != nil {
+		log.Fatalf("device authorization failed: %v", err)
+	}
+	if err := emitAccessToken(result, *out, os.Stdout, os.Stderr); err != nil {
+		log.Fatalf("write platform token: %v", err)
+	}
+}
+
+func startDeviceAuthorization(
+	client *http.Client, server string,
+) (deviceAuthorizationResult, error) {
+	request, err := http.NewRequest(
+		http.MethodPost, server+"/api/v1/iam/device/authorization",
+		strings.NewReader(""),
+	)
+	if err != nil {
+		return deviceAuthorizationResult{}, err
+	}
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.Header.Set("Accept", "application/json")
+	response, err := client.Do(request)
+	if err != nil {
+		return deviceAuthorizationResult{}, err
+	}
+	defer func() { _ = response.Body.Close() }()
+	if response.StatusCode != http.StatusOK {
+		return deviceAuthorizationResult{}, boundedHTTPError(response)
+	}
+	var result deviceAuthorizationResult
+	if err := json.NewDecoder(io.LimitReader(response.Body, 64<<10)).Decode(&result); err != nil {
+		return deviceAuthorizationResult{}, err
+	}
+	verification, verificationErr := url.Parse(result.VerificationURI)
+	complete, completeErr := url.Parse(result.VerificationURIComplete)
+	completeQuery := url.Values{}
+	if completeErr == nil {
+		completeQuery = complete.Query()
+	}
+	if result.DeviceCode == "" || len(result.DeviceCode) > 256 ||
+		!validDeviceUserCode(result.UserCode) ||
+		result.ExpiresIn < 1 || result.ExpiresIn > 3600 ||
+		result.Interval < 1 || result.Interval > 60 || verificationErr != nil ||
+		completeErr != nil || verification.Host == "" || complete.Host == "" ||
+		(verification.Scheme != "https" && verification.Scheme != "http") ||
+		(complete.Scheme != "https" && complete.Scheme != "http") ||
+		verification.User != nil || complete.User != nil ||
+		verification.RawQuery != "" || verification.Fragment != "" ||
+		complete.Fragment != "" || complete.Scheme != verification.Scheme ||
+		complete.Host != verification.Host || complete.Path != verification.Path ||
+		len(completeQuery) != 1 || len(completeQuery["user_code"]) != 1 ||
+		completeQuery.Get("user_code") != result.UserCode {
+		return deviceAuthorizationResult{}, fmt.Errorf("server returned an invalid device authorization")
+	}
+	return result, nil
+}
+
+func validDeviceUserCode(code string) bool {
+	if len(code) != 9 || code[4] != '-' {
+		return false
+	}
+	for index, character := range code {
+		if index == 4 {
+			continue
+		}
+		if !strings.ContainsRune("ABCDEFGHJKLMNPQRSTUVWXYZ23456789", character) {
+			return false
+		}
+	}
+	return true
+}
+
+func pollDeviceAuthorization(
+	ctx context.Context,
+	client *http.Client,
+	server, deviceCode string,
+	interval int,
+	wait func(context.Context, time.Duration) error,
+) (tokenExchangeResult, error) {
+	if interval < 1 || wait == nil {
+		return tokenExchangeResult{}, fmt.Errorf("invalid polling interval")
+	}
+	for {
+		if err := wait(ctx, time.Duration(interval)*time.Second); err != nil {
+			if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+				return tokenExchangeResult{}, fmt.Errorf("expired_token: device authorization expired")
+			}
+			return tokenExchangeResult{}, err
+		}
+		result, pollErr := requestDeviceToken(client, server, deviceCode)
+		if pollErr == nil {
+			return result, nil
+		}
+		var oauthError *deviceTokenError
+		if !errors.As(pollErr, &oauthError) {
+			return tokenExchangeResult{}, pollErr
+		}
+		switch oauthError.Code {
+		case "authorization_pending":
+			if oauthError.Interval > 0 {
+				interval = oauthError.Interval
+			}
+		case "slow_down":
+			if oauthError.Interval > interval {
+				interval = oauthError.Interval
+			} else {
+				interval += 5
+			}
+			if interval > 60 {
+				interval = 60
+			}
+		case "access_denied", "expired_token":
+			return tokenExchangeResult{}, oauthError
+		default:
+			return tokenExchangeResult{}, oauthError
+		}
+	}
+}
+
+func requestDeviceToken(
+	client *http.Client, server, deviceCode string,
+) (tokenExchangeResult, error) {
+	form := url.Values{
+		"grant_type":  {deviceGrantType},
+		"device_code": {deviceCode},
+	}
+	request, err := http.NewRequest(
+		http.MethodPost, server+"/api/v1/iam/device/token",
+		strings.NewReader(form.Encode()),
+	)
+	if err != nil {
+		return tokenExchangeResult{}, err
+	}
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.Header.Set("Accept", "application/json")
+	response, err := client.Do(request)
+	if err != nil {
+		return tokenExchangeResult{}, err
+	}
+	defer func() { _ = response.Body.Close() }()
+	if response.StatusCode != http.StatusOK {
+		var result deviceTokenError
+		if err := json.NewDecoder(io.LimitReader(response.Body, 64<<10)).Decode(&result); err != nil ||
+			result.Code == "" {
+			return tokenExchangeResult{}, fmt.Errorf("server returned %s", response.Status)
+		}
+		if result.Interval <= 0 {
+			if retryAfter, parseErr := strconv.Atoi(response.Header.Get("Retry-After")); parseErr == nil {
+				result.Interval = retryAfter
+			}
+		}
+		return tokenExchangeResult{}, &result
+	}
+	var result tokenExchangeResult
+	if err := json.NewDecoder(io.LimitReader(response.Body, 64<<10)).Decode(&result); err != nil {
+		return tokenExchangeResult{}, err
+	}
+	if !strings.HasPrefix(result.AccessToken, "pe1_") ||
+		!strings.EqualFold(result.TokenType, "Bearer") || result.ExpiresIn < 1 {
+		return tokenExchangeResult{}, fmt.Errorf("server returned an invalid platform session")
+	}
+	return result, nil
+}
+
+func boundedHTTPError(response *http.Response) error {
+	// Do not copy a remote error body into terminal logs: it is outside the
+	// protocol contract and could reflect a bearer-shaped value.
+	return fmt.Errorf("server returned %s", response.Status)
+}
+
+func waitForPollInterval(ctx context.Context, duration time.Duration) error {
+	timer := time.NewTimer(duration)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func openBrowserURL(rawURL string) error {
+	var command *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		command = exec.Command("open", rawURL) // #nosec G204 -- rawURL is a single argv value from the validated server response.
+	case "windows":
+		command = exec.Command("rundll32", "url.dll,FileProtocolHandler", rawURL) // #nosec G204 -- no shell is involved.
+	default:
+		command = exec.Command("xdg-open", rawURL) // #nosec G204 -- no shell is involved.
+	}
+	if err := command.Start(); err != nil {
+		return err
+	}
+	go func() { _ = command.Wait() }()
+	return nil
+}
+
+func emitAccessToken(
+	result tokenExchangeResult,
+	out string,
+	stdout, stderr io.Writer,
+) error {
+	if out == "" {
+		_, err := fmt.Fprintln(stdout, result.AccessToken)
+		return err
+	}
+	// Write a same-directory owner-only temporary file, then atomically replace
+	// the selected path. This avoids partial tokens and does not follow an
+	// existing destination symlink.
+	out = filepath.Clean(out)
+	file, err := os.CreateTemp(filepath.Dir(out), "."+filepath.Base(out)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	temporaryPath := file.Name()
+	defer func() { _ = os.Remove(temporaryPath) }()
+	if err := file.Chmod(0o600); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if _, err := io.WriteString(file, result.AccessToken+"\n"); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(temporaryPath, out); err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(stderr,
+		"Wrote Portage Engine session to %s (expires in %ds)\n", out, result.ExpiresIn)
+	return err
 }
 
 // --- configure: write binrepos.conf for the native consume path ---

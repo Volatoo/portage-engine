@@ -25,6 +25,16 @@ func TestRequestURIForLogRedactsVerificationCapability(t *testing.T) {
 	}
 }
 
+func TestRequestURIForLogRedactsDeviceQuery(t *testing.T) {
+	request := httptest.NewRequest(http.MethodPost,
+		"/api/v1/iam/device/token?access_token=pe1_must-not-be-logged", nil)
+	logged := requestURIForLog(request)
+	if logged != "/api/v1/iam/device/token?<redacted>" ||
+		strings.Contains(logged, "pe1_") {
+		t.Fatalf("device query leaked into access log path: %s", logged)
+	}
+}
+
 func TestWriteAdmissionErrorIsMachineReadable(t *testing.T) {
 	w := httptest.NewRecorder()
 	err := builder.NewAdmissionError(
