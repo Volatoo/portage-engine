@@ -3,6 +3,9 @@
 # shellcheck disable=SC2016
 set -euo pipefail
 
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd "${script_dir}/.." && pwd)"
+
 if [[ $# -lt 1 ]]; then
   echo "usage: $0 BACKUP.dump [portage_restore_name]" >&2
   exit 2
@@ -36,6 +39,8 @@ if [[ ! "${restore_db}" =~ ^portage_restore_[a-zA-Z0-9_]+$ ]]; then
   echo "restore database must start with portage_restore_ and contain only letters, digits, or underscores" >&2
   exit 2
 fi
+
+expected_schema="$("${repo_root}/scripts/recovery/current-schema-version.sh")"
 
 checksum_path="${backup_path}.sha256"
 if [[ -f "${checksum_path}" ]]; then
@@ -96,8 +101,8 @@ job_count="$(
     sh "${restore_db}"
 )"
 
-if [[ "${schema_version}" -ne 26 || "${table_count}" -lt 30 ]]; then
-  echo "restore validation failed: schema_version=${schema_version}, public_tables=${table_count}" >&2
+if [[ "${schema_version}" -ne "${expected_schema}" || "${table_count}" -lt 30 ]]; then
+  echo "restore validation failed: schema_version=${schema_version}, expected_schema=${expected_schema}, public_tables=${table_count}" >&2
   exit 1
 fi
 required_relations="$(
@@ -106,7 +111,7 @@ required_relations="$(
     sh "${restore_db}"
 )"
 if [[ "${required_relations}" -ne 10 ]]; then
-  echo "restore validation failed: schema v26 required relations=${required_relations}, expected=10" >&2
+  echo "restore validation failed: current-schema required relations=${required_relations}, expected=10" >&2
   exit 1
 fi
 

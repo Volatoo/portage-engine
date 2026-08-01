@@ -1,6 +1,7 @@
 \set ON_ERROR_STOP on
 
 -- Inputs are supplied with psql -v. They never contain credentials.
+SELECT set_config('portage.drill.expected_schema', :'expected_schema', false) AS configured \gset
 SELECT set_config('portage.drill.expected_marker', :'expected_marker', false) AS configured \gset
 SELECT set_config('portage.drill.absent_marker', :'absent_marker', false) AS configured \gset
 SELECT set_config('portage.drill.app_role', :'app_role', false) AS configured \gset
@@ -10,6 +11,7 @@ SELECT set_config('portage.drill.actuator_role', :'actuator_role', false) AS con
 DO $validation$
 DECLARE
     schema_version bigint;
+    expected_schema bigint := current_setting('portage.drill.expected_schema')::bigint;
     missing_relations text[];
     membership_constraint text;
     role_name text;
@@ -17,8 +19,8 @@ BEGIN
     SELECT COALESCE(max(version_id) FILTER (WHERE is_applied), 0)
     INTO schema_version
     FROM goose_db_version;
-    IF schema_version <> 26 THEN
-        RAISE EXCEPTION 'restore requires schema v26, found v%', schema_version;
+    IF expected_schema <= 0 OR schema_version <> expected_schema THEN
+        RAISE EXCEPTION 'restore requires authoritative schema v%, found v%', expected_schema, schema_version;
     END IF;
 
     SELECT array_agg(required.name ORDER BY required.name)
@@ -40,7 +42,7 @@ BEGIN
     ]) AS required(name)
     WHERE to_regclass(required.name) IS NULL;
     IF missing_relations IS NOT NULL THEN
-        RAISE EXCEPTION 'restore is missing required v26 relations: %', missing_relations;
+        RAISE EXCEPTION 'restore is missing required current-schema relations: %', missing_relations;
     END IF;
 
     IF EXISTS (
@@ -196,6 +198,7 @@ END
 $validation$;
 
 SELECT json_build_object(
+    'expected_schema_version', current_setting('portage.drill.expected_schema')::bigint,
     'schema_version', (
         SELECT max(version_id) FROM goose_db_version WHERE is_applied
     ),

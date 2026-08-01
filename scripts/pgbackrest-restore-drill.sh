@@ -48,6 +48,8 @@ isolated_target_lower="$(printf '%s' "${isolated_target}" | tr '[:upper:]' '[:lo
 [[ "${max_rpo_seconds}" =~ ^[0-9]+$ ]] || fail_input "PORTAGE_PITR_MAX_RPO_SECONDS must be an integer"
 [[ "${max_rto_seconds}" =~ ^[0-9]+$ ]] || fail_input "PORTAGE_PITR_MAX_RTO_SECONDS must be an integer"
 
+expected_schema="$("${repo_root}/scripts/recovery/current-schema-version.sh")"
+
 started_epoch_ms="$(python3 -c 'import time; print(time.time_ns() // 1000000)')"
 drill_root="$(mktemp -d "${TMPDIR:-/tmp}/portage-pitr.XXXXXX")"
 validation_container=""
@@ -129,12 +131,13 @@ validation="$(docker exec \
   --env "PGDATABASE=${PORTAGE_POSTGRES_DB:-portage_engine}" \
   "${validation_container}" \
   psql --no-psqlrc --quiet --tuples-only --no-align \
+  --set=expected_schema="${expected_schema}" \
   --set=expected_marker="${expected_marker}" \
   --set=absent_marker="${absent_marker}" \
   --set=app_role="${app_role}" \
   --set=signer_role="${signer_role}" \
   --set=actuator_role="${actuator_role}" \
-  --file /recovery/schema-v26-restore-check.sql)"
+  --file /recovery/schema-current-restore-check.sql)"
 
 completed_epoch_ms="$(python3 -c 'import time; print(time.time_ns() // 1000000)')"
 rto_seconds="$(((completed_epoch_ms - started_epoch_ms + 999) / 1000))"

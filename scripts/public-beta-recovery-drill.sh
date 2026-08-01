@@ -263,11 +263,11 @@ run_static() {
     python3 -m py_compile \
     scripts/recovery/evidence.py scripts/recovery/validate.py
   run_shell_check shell-syntax false "recovery shell syntax" \
-    "bash -n scripts/public-beta-recovery-drill.sh scripts/pgbackrest-pitr-prepare.sh scripts/pgbackrest-restore-drill.sh scripts/postgres-restore-check.sh scripts/test-vault-issuer.sh tests/recovery-drill-test.sh" \
+    "bash -n scripts/public-beta-recovery-drill.sh scripts/pgbackrest-pitr-prepare.sh scripts/pgbackrest-restore-drill.sh scripts/postgres-restore-check.sh scripts/recovery/current-schema-version.sh scripts/test-vault-issuer.sh tests/recovery-drill-test.sh" \
     "recovery shell entry points parse"
-  run_shell_check schema-v26-contract false "schema v26 restore contract" \
-    "rg -q 'MinSchemaVersion int64 = 26' internal/persistence/database.go && rg -q 'schema_version <> 26' scripts/recovery/schema-v26-restore-check.sql" \
-    "runtime and restore validator require schema v26"
+  run_argv_check schema-authority-contract false "migration binary schema authority" \
+    "binary support range and latest embedded migration agree" \
+    scripts/recovery/current-schema-version.sh --json
   run_shell_check vault-contract false "Vault recovery contract" \
     "rg -q 'TOKEN_RECOVERY' scripts/test-vault-issuer.sh && rg -q 'old -> dual -> new' scripts/test-vault-issuer.sh && rg -q 'allowed_uri_sans' scripts/recovery/validate.py" \
     "Vault token recovery, staged CA trust, and minimal role validators exist"
@@ -355,11 +355,15 @@ run_postgres() {
     PORTAGE_POSTGRES_DIFF_BACKUP_CMD PORTAGE_POSTGRES_PITR_PREPARE_CMD \
     PORTAGE_POSTGRES_WAL_CHECK_CMD \
     PORTAGE_POSTGRES_PITR_CMD PORTAGE_POSTGRES_BACKUP_REPO \
+    PORTAGE_MIGRATE_BIN \
     PORTAGE_PITR_ASSERT_RESOURCE_ID PORTAGE_PITR_ASSERT_ABSENT_RESOURCE_ID \
     PORTAGE_PITR_STATE_FILE PORTAGE_PITR_MAX_RPO_SECONDS \
     PORTAGE_PITR_MAX_RTO_SECONDS; do
     require_env "${name}"
   done
+  if [[ "${PORTAGE_MIGRATE_BIN}" != /* || ! -x "${PORTAGE_MIGRATE_BIN}" ]]; then
+    preflight_fail "PORTAGE_MIGRATE_BIN must be the absolute executable migration binary deployed for the drill"
+  fi
   run_shell_check postgres-pgdata-fstype false "PGDATA filesystem inspection" \
     "${PORTAGE_POSTGRES_PGDATA_FSTYPE_CMD}" \
     "PGDATA filesystem type was inspected at the database host"
@@ -378,7 +382,7 @@ run_postgres() {
     "${PORTAGE_POSTGRES_WAL_CHECK_CMD}"
   run_argv_check postgres-backup-size false "backup repository size" \
     "backup repository byte size recorded" du -sk "${PORTAGE_POSTGRES_BACKUP_REPO}"
-  run_shell_check postgres-pitr true "schema v26 PITR restore and integrity checks" \
+  run_shell_check postgres-pitr true "authoritative-schema PITR restore and integrity checks" \
     "${PORTAGE_POSTGRES_PITR_CMD}" \
     "PITR restored and checked schema/job/attempt/signing/issuer/capacity/target/roles with RPO/RTO"
 }
