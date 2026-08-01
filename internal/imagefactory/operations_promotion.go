@@ -330,7 +330,18 @@ func validateDesktopPromotionEvidence(path string, manifest *ImageManifest, scen
 		result.ScenarioID != scenarioID || result.StartedAt.IsZero() || result.CompletedAt.Before(result.StartedAt) || result.StartedAt.Before(stampedAt) || len(result.Steps) == 0 {
 		return fmt.Errorf("desktop result identity, state, or timing is invalid")
 	}
+	if result.ImageGeneration != "" && result.ImageGeneration != manifest.Generation {
+		return fmt.Errorf("desktop result image generation does not match the promoted manifest")
+	}
 	required := map[string]bool{"restore": false, "start": false, "screenshot": false, "collect_accessibility": false, "stop": false}
+	artifactRequired := map[string]bool{"screenshot": true, "collect_accessibility": true}
+	if result.ImageGeneration != "" {
+		for _, action := range []string{"install", "launch_fixture", "wait_accessible", "collect_logs", "close"} {
+			required[action] = false
+		}
+		artifactRequired["install"] = true
+		artifactRequired["collect_logs"] = true
+	}
 	for _, step := range result.Steps {
 		if step.State != "passed" || step.StartedAt.IsZero() || step.Duration < 0 {
 			return fmt.Errorf("desktop step %q did not pass", step.ID)
@@ -338,7 +349,7 @@ func validateDesktopPromotionEvidence(path string, manifest *ImageManifest, scen
 		if _, ok := required[step.Action]; ok {
 			required[step.Action] = true
 		}
-		if (step.Action == "screenshot" || step.Action == "collect_accessibility") && len(step.Artifacts) == 0 {
+		if artifactRequired[step.Action] && len(step.Artifacts) == 0 {
 			return fmt.Errorf("desktop evidence step %q has no artifact", step.ID)
 		}
 	}

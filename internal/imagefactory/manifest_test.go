@@ -54,32 +54,38 @@ func objectForFile(t *testing.T, id, kind, path string, requiredFor []string) In
 
 func addTestPackerExecutionSurface(t *testing.T, root, target string, lock *InputLock) {
 	t.Helper()
-	paths := map[string]bool{
-		"factory/run-offline.sh":                      true,
-		"factory/smoke-offline.sh":                    true,
-		"factory/packer/template.pkr.hcl":             false,
-		"factory/packer/scripts/provision.sh":         true,
-		"factory/packer/scripts/sanitize-and-gate.sh": true,
-		"factory/packer/scripts/hydrate-distfiles.py": true,
-		"factory/catalyst/verify-profile.py":          true,
-		"factory/desktop/guest-agent.py":              true,
+	type testSurface struct {
+		kind       string
+		executable bool
+	}
+	paths := map[string]testSurface{
+		"factory/run-offline.sh":                        {kind: "script", executable: true},
+		"factory/smoke-offline.sh":                      {kind: "script", executable: true},
+		"factory/packer/template.pkr.hcl":               {kind: "script", executable: false},
+		"factory/packer/scripts/provision.sh":           {kind: "script", executable: true},
+		"factory/packer/scripts/sanitize-and-gate.sh":   {kind: "script", executable: true},
+		"factory/packer/scripts/hydrate-distfiles.py":   {kind: "script", executable: true},
+		"factory/catalyst/verify-profile.py":            {kind: "script", executable: true},
+		"factory/desktop/guest-agent.py":                {kind: "script", executable: true},
+		"factory/desktop/fixtures/editor-fixture.txt":   {kind: "fixture", executable: false},
+		"factory/desktop/fixtures/webview-fixture.html": {kind: "fixture", executable: false},
 	}
 	index := 0
-	for relative, executable := range paths {
+	for relative, surface := range paths {
 		path := filepath.Join(root, filepath.FromSlash(relative))
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			t.Fatal(err)
 		}
 		mode := os.FileMode(0o644)
-		if executable {
+		if surface.executable {
 			mode = 0o755
 		}
 		if err := os.WriteFile(path, []byte(relative+"\n"), mode); err != nil {
 			t.Fatal(err)
 		}
-		object := objectForFile(t, fmt.Sprintf("script/test-%d", index), "script", path, []string{target})
+		object := objectForFile(t, fmt.Sprintf("surface/test-%d", index), surface.kind, path, []string{target})
 		object.Path = relative
-		object.Executable = executable
+		object.Executable = surface.executable
 		lock.Objects = append(lock.Objects, object)
 		index++
 	}

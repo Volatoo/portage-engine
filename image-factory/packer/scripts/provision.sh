@@ -256,6 +256,9 @@ if [[ $PE_DESKTOP == true ]]; then
   fi
   install -d -m 0755 /usr/libexec /etc/lightdm/lightdm.conf.d
   install -m 0755 /tmp/portage-desktop-agent.py /usr/libexec/portage-desktop-agent
+  install -d -m 0755 /usr/share/portage-engine/desktop-fixtures
+  install -m 0644 /tmp/portage-desktop-fixtures/editor-fixture.txt /usr/share/portage-engine/desktop-fixtures/editor-fixture.txt
+  install -m 0644 /tmp/portage-desktop-fixtures/webview-fixture.html /usr/share/portage-engine/desktop-fixtures/webview-fixture.html
   cat >/etc/lightdm/lightdm.conf.d/50-portage-engine-e2e.conf <<EOF
 [Seat:*]
 autologin-user=$desktop_user

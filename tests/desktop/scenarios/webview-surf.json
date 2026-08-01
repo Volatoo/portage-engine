@@ -1,0 +1,25 @@
+{
+  "schema_version": 2,
+  "id": "desktop/webview-surf-fixture-v1",
+  "profile_id": "pe/amd64/no-multilib/systemd/desktop-verifier-v1",
+  "image_id": "pe/amd64/no-multilib/desktop-verifier-matrix-g1",
+  "image_generation": "desktop-matrix-g1",
+  "display_server": "x11",
+  "application_kind": "webview",
+  "resolution": "1280x720",
+  "locale": "C.UTF-8",
+  "timeout_seconds": 900,
+  "steps": [
+    {"id": "restore-clean", "action": "restore", "input": {"snapshot": "clean"}},
+    {"id": "start-pinned-image", "action": "start", "timeout_seconds": 300},
+    {"id": "install-signed-surf", "action": "install", "timeout_seconds": 300, "input": {"atom": "www-client/surf", "staging_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000", "signer_fingerprint": "0000000000000000000000000000000000000000"}},
+    {"id": "open-webview-fixture", "action": "launch_fixture", "input": {"application_id": "surf.desktop", "fixture": "webview-fixture.html", "fixture_digest": "sha256:40ab1938f53b876bb5c6047f3d8642f060b63dcc0d30870d337bf8abc91e2e34"}},
+    {"id": "assert-webview-dom-heading", "action": "wait_accessible", "timeout_seconds": 120, "input": {"role": "heading", "name": "Portage Engine Offline WebView Fixture", "state": "showing"}},
+    {"id": "capture-webview-accessibility", "action": "collect_accessibility", "input": {"name": "webview-surf-tree"}},
+    {"id": "capture-webview-screen", "action": "screenshot", "input": {"name": "webview-surf-fixture"}},
+    {"id": "collect-surf-log", "action": "collect_logs", "input": {"scope": "application", "application_id": "surf.desktop"}},
+    {"id": "close-surf", "action": "close", "timeout_seconds": 90, "input": {"role": "heading", "name": "Portage Engine Offline WebView Fixture", "state": "showing"}},
+    {"id": "collect-system-log", "action": "collect_logs", "input": {"scope": "system"}},
+    {"id": "stop-desktop", "action": "stop", "timeout_seconds": 180}
+  ]
+}

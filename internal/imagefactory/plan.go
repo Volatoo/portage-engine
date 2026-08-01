@@ -804,17 +804,23 @@ func validateCatalystSourceManifest(path string, plan *BuildPlan) error {
 }
 
 func requirePackerExecutionSurface(lock *InputLock, target string) error {
-	required := map[string]bool{
-		"factory/run-offline.sh":                      true,
-		"factory/smoke-offline.sh":                    true,
-		"factory/packer/template.pkr.hcl":             false,
-		"factory/packer/scripts/provision.sh":         true,
-		"factory/packer/scripts/sanitize-and-gate.sh": true,
-		"factory/packer/scripts/hydrate-distfiles.py": true,
-		"factory/catalyst/verify-profile.py":          true,
-		"factory/desktop/guest-agent.py":              true,
+	type surfaceRequirement struct {
+		kind       string
+		executable bool
 	}
-	for path, executable := range required {
+	required := map[string]surfaceRequirement{
+		"factory/run-offline.sh":                        {kind: "script", executable: true},
+		"factory/smoke-offline.sh":                      {kind: "script", executable: true},
+		"factory/packer/template.pkr.hcl":               {kind: "script", executable: false},
+		"factory/packer/scripts/provision.sh":           {kind: "script", executable: true},
+		"factory/packer/scripts/sanitize-and-gate.sh":   {kind: "script", executable: true},
+		"factory/packer/scripts/hydrate-distfiles.py":   {kind: "script", executable: true},
+		"factory/catalyst/verify-profile.py":            {kind: "script", executable: true},
+		"factory/desktop/guest-agent.py":                {kind: "script", executable: true},
+		"factory/desktop/fixtures/editor-fixture.txt":   {kind: "fixture", executable: false},
+		"factory/desktop/fixtures/webview-fixture.html": {kind: "fixture", executable: false},
+	}
+	for path, requirement := range required {
 		var object *InputObject
 		for index := range lock.Objects {
 			candidate := &lock.Objects[index]
@@ -826,8 +832,8 @@ func requirePackerExecutionSurface(lock *InputLock, target string) error {
 		if object == nil {
 			return fmt.Errorf("packer execution surface %q is absent from the input lock for %q", path, target)
 		}
-		if object.Kind != "script" || object.Executable != executable {
-			return fmt.Errorf("packer execution surface %q must be a locked script with executable=%t", path, executable)
+		if object.Kind != requirement.kind || object.Executable != requirement.executable {
+			return fmt.Errorf("packer execution surface %q must be a locked %s with executable=%t", path, requirement.kind, requirement.executable)
 		}
 	}
 	return nil

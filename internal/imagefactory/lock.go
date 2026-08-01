@@ -317,7 +317,7 @@ func requiredFor(object InputObject, target string) bool {
 
 func validObjectKind(kind string) bool {
 	switch kind {
-	case "packer", "packer-plugin", "plugin-checksum", "terraform", "terraform-provider", "terraform-lock", "service-binary", "seed", "pbs-source-attestation", "repository-snapshot", "distfile", "binpkg", "manifest", "distfile-manifest", "package-set-catalog", "build-plan", "image-manifest", "script",
+	case "packer", "packer-plugin", "plugin-checksum", "terraform", "terraform-provider", "terraform-lock", "service-binary", "seed", "pbs-source-attestation", "repository-snapshot", "distfile", "binpkg", "manifest", "distfile-manifest", "package-set-catalog", "build-plan", "image-manifest", "script", "fixture",
 		"catalyst-plan", "catalyst-runtime", "stage3", "stage3-digests", "release-key", "ca-bundle", "rootfs-manifest", "qcow2-manifest":
 		return true
 	default:

@@ -2,11 +2,15 @@ package desktop
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -49,16 +53,111 @@ func TestLoadScenarioRejectsUnknownField(t *testing.T) {
 }
 
 func TestTrackedDesktopScenarioLoads(t *testing.T) {
-	for _, name := range []string{"application-smoke.json", "image-baseline.json"} {
-		if _, err := LoadScenario(filepath.Join("..", "..", "tests", "desktop", "scenarios", name)); err != nil {
-			t.Errorf("tracked scenario %s is invalid: %v", name, err)
+	directory := filepath.Join("..", "..", "tests", "desktop", "scenarios")
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+			continue
+		}
+		if _, err := LoadScenario(filepath.Join(directory, entry.Name())); err != nil {
+			t.Errorf("tracked scenario %s is invalid: %v", entry.Name(), err)
+		}
+	}
+}
+
+func TestTrackedDesktopMatrixLocksFixtureAndRuntimeInputs(t *testing.T) {
+	type expectedScenario struct {
+		kind, atom, application, fixture, fixturePath string
+	}
+	expected := map[string]expectedScenario{
+		"gtk-mousepad.json":  {"gtk", "app-editors/mousepad", "org.xfce.mousepad.desktop", "editor-fixture.txt", "editor-fixture.txt"},
+		"qt-featherpad.json": {"qt", "app-editors/featherpad", "featherpad.desktop", "editor-fixture.txt", "editor-fixture.txt"},
+		"webview-surf.json":  {"webview", "www-client/surf", "surf.desktop", "webview-fixture.html", "webview-fixture.html"},
+	}
+	directory := filepath.Join("..", "..", "tests", "desktop", "scenarios")
+	fixtureDirectory := filepath.Join("..", "..", "image-factory", "desktop", "fixtures")
+	for name, want := range expected {
+		scenario, err := LoadScenario(filepath.Join(directory, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if scenario.SchemaVersion != 2 || scenario.ApplicationKind != want.kind || scenario.DisplayServer != "x11" || scenario.ImageGeneration == "" {
+			t.Fatalf("%s lacks schema v2 runtime identity: %+v", name, scenario)
+		}
+		actions := make([]string, 0, len(scenario.Steps))
+		var install, launch Step
+		for _, step := range scenario.Steps {
+			actions = append(actions, step.Action)
+			switch step.Action {
+			case "install":
+				install = step
+			case "launch_fixture":
+				launch = step
+			}
+		}
+		for _, required := range []string{"restore", "start", "install", "launch_fixture", "wait_accessible", "collect_accessibility", "screenshot", "collect_logs", "close", "stop"} {
+			if !slices.Contains(actions, required) {
+				t.Fatalf("%s lacks required %s action: %v", name, required, actions)
+			}
+		}
+		if install.Input["atom"] != want.atom || install.Input["signer_fingerprint"] == "" || launch.Input["application_id"] != want.application || launch.Input["fixture"] != want.fixture {
+			t.Fatalf("%s has unexpected locked package/application inputs", name)
+		}
+		fixture, err := os.ReadFile(filepath.Join(fixtureDirectory, want.fixturePath))
+		if err != nil {
+			t.Fatal(err)
+		}
+		digest := sha256.Sum256(fixture)
+		if launch.Input["fixture_digest"] != "sha256:"+hex.EncodeToString(digest[:]) {
+			t.Fatalf("%s fixture digest drifted", name)
+		}
+		if want.kind == "webview" && (strings.Contains(string(fixture), "http://") || strings.Contains(string(fixture), "https://")) {
+			t.Fatal("WebView fixture contains runtime network content")
+		}
+	}
+}
+
+func TestScenarioV2RequiresSignedInstallAndV2Actions(t *testing.T) {
+	scenario := validScenario()
+	scenario.SchemaVersion = 2
+	scenario.ImageGeneration = "desktop-g1"
+	scenario.DisplayServer = "x11"
+	scenario.ApplicationKind = "gtk"
+	scenario.Steps[2] = Step{ID: "install", Action: "install", Input: map[string]string{
+		"atom": "app-editors/mousepad", "staging_digest": "sha256:" + strings.Repeat("a", 64),
+	}}
+	if err := scenario.Validate(); err == nil {
+		t.Fatal("schema v2 accepted an install without a signer fingerprint")
+	}
+
+	scenario = validScenario()
+	scenario.Steps[2] = Step{ID: "fixture", Action: "launch_fixture", Input: map[string]string{
+		"application_id": "test.desktop", "fixture": "test.txt", "fixture_digest": "sha256:" + strings.Repeat("a", 64),
+	}}
+	if err := scenario.Validate(); err == nil {
+		t.Fatal("schema v1 accepted a schema v2 fixture action")
+	}
+}
+
+func TestTrackedMatrixTemplatesFailClosedUntilMaterialized(t *testing.T) {
+	for _, name := range []string{"gtk-mousepad.json", "qt-featherpad.json", "webview-surf.json"} {
+		scenario, err := LoadScenario(filepath.Join("..", "..", "tests", "desktop", "scenarios", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := scenario.ValidateRunnable(); err == nil {
+			t.Fatalf("unmaterialized scenario %s was accepted for live execution", name)
 		}
 	}
 }
 
 type recordingDriver struct {
-	actions []string
-	failAt  string
+	actions  []string
+	requests []ActionRequest
+	failAt   string
 }
 
 type timeoutDriver struct {
@@ -81,10 +180,38 @@ func (d *timeoutDriver) Do(ctx context.Context, request ActionRequest) (Observat
 
 func (d *recordingDriver) Do(_ context.Context, request ActionRequest) (Observation, error) {
 	d.actions = append(d.actions, request.Action)
+	d.requests = append(d.requests, request)
 	if request.Action == d.failAt {
 		return Observation{}, errors.New("injected failure")
 	}
 	return Observation{State: "passed", Artifacts: []string{request.StepID + ".json"}}, nil
+}
+
+func TestRunCarriesV2IdentityAndClosesAfterFailure(t *testing.T) {
+	scenario := validScenario()
+	scenario.SchemaVersion = 2
+	scenario.ImageGeneration = "desktop-g1"
+	scenario.DisplayServer = "x11"
+	scenario.ApplicationKind = "gtk"
+	scenario.Steps = []Step{
+		{ID: "restore", Action: "restore", Input: map[string]string{"snapshot": "clean"}},
+		{ID: "start", Action: "start"},
+		{ID: "launch", Action: "launch_fixture", Input: map[string]string{"application_id": "test.desktop", "fixture": "test.txt", "fixture_digest": "sha256:" + strings.Repeat("a", 64)}},
+		{ID: "assert", Action: "wait_accessible", Input: map[string]string{"role": "frame", "name": "Test", "state": "showing"}},
+		{ID: "screen", Action: "screenshot", Input: map[string]string{"name": "failure"}},
+		{ID: "close", Action: "close", Input: map[string]string{"role": "frame", "name": "Test", "state": "showing"}},
+		{ID: "stop", Action: "stop"},
+	}
+	driver := &recordingDriver{failAt: "wait_accessible"}
+	result := Run(context.Background(), scenario, driver, time.Now)
+	if result.State != "failed" || !slices.Equal(driver.actions, []string{"restore", "start", "launch_fixture", "wait_accessible", "screenshot", "close", "stop"}) {
+		t.Fatalf("cleanup actions = %v, result = %+v", driver.actions, result)
+	}
+	for _, request := range driver.requests {
+		if request.ProfileID != scenario.ProfileID || request.ImageID != scenario.ImageID || request.ImageGeneration != scenario.ImageGeneration || request.DisplayServer != scenario.DisplayServer || request.ApplicationKind != scenario.ApplicationKind {
+			t.Fatalf("action request lost v2 runtime identity: %+v", request)
+		}
+	}
 }
 
 func TestRunCollectsEvidenceAndStopsAfterFailure(t *testing.T) {

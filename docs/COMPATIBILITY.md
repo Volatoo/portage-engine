@@ -32,3 +32,38 @@ period.
 Legacy API keys, static push builders, local/NFS publication authority, HTTP
 identity providers, and automatic release-key creation are compatibility
 features only and are rejected by public mode.
+
+## Desktop E2E scenario and adapter compatibility
+
+- Scenario schema version 1 remains readable for the historical image baseline
+  and digest-only application smoke contract. It does not carry image
+  generation/display identity and is not the signed GUI matrix Gate.
+- Scenario schema version 2 adds `image_generation`, `display_server` and
+  `application_kind`; signature-required installs add `signer_fingerprint`;
+  and the action vocabulary adds `launch_fixture` and `close`. Unknown fields
+  and actions continue to fail closed.
+- Direct PVE policy schema version 2 must repeat the exact profile, image,
+  generation, X11 backend, staging manifest, signing-key path and full primary
+  fingerprint. It verifies the guest's sealed BuildPlan before functional
+  actions. Policy schema version 1 is retained only for existing version-1
+  scenarios.
+- `/v1/actions` is additive at the JSON field level: version-2 requests include
+  the runtime identity on every request. An older adapter can continue to serve
+  version-1 scenarios, but must be upgraded before it is selected for a
+  version-2 scenario. Silently ignoring identity fields or claiming unsupported
+  actions passed is incompatible.
+- Desktop result JSON remains schema version 1 and adds optional runtime
+  identity fields. Existing evidence remains readable. Promotion additionally
+  rejects a present `image_generation` that differs from the image manifest;
+  such a version-2 result must also carry the signed-install and log artifacts,
+  fixture/readiness steps, normal close and final stop.
+- The bundled direct-PVE helper is X11-only. Native Wayland requires an adapter
+  with compositor-native readiness, capture, input and close semantics;
+  XWayland execution must be labeled X11 rather than native Wayland. WebView DOM
+  assertions may flow through WebKit's AT-SPI tree; Electron renderer assertions
+  may be implemented by an adapter, but neither changes native window cleanup
+  or evidence requirements.
+- Tracked matrix files contain all-zero digest/fingerprint sentinels so they can
+  serve as static schema fixtures without pretending a live signed candidate
+  exists. The runner refuses to execute them until reviewed copies are
+  materialized with real locks.

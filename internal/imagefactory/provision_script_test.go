@@ -1,6 +1,8 @@
 package imagefactory
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"strings"
@@ -64,6 +66,41 @@ func TestPackerDesktopProvisionEnablesConcreteDisplayManager(t *testing.T) {
 	} {
 		if !strings.Contains(gate, required) {
 			t.Fatalf("Packer desktop gate is missing %q", required)
+		}
+	}
+}
+
+func TestPackerDesktopFixturesAreProvisionedAndDigestGated(t *testing.T) {
+	t.Parallel()
+	provisionData, err := os.ReadFile(filepath.Join("..", "..", "image-factory", "packer", "scripts", "provision.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	gateData, err := os.ReadFile(filepath.Join("..", "..", "image-factory", "packer", "scripts", "sanitize-and-gate.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	templateData, err := os.ReadFile(filepath.Join("..", "..", "image-factory", "packer", "template.pkr.hcl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"editor-fixture.txt", "webview-fixture.html"} {
+		fixture, err := os.ReadFile(filepath.Join("..", "..", "image-factory", "desktop", "fixtures", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		digest := sha256.Sum256(fixture)
+		for surface, contents := range map[string]string{
+			"Packer template":  string(templateData),
+			"provision script": string(provisionData),
+			"sanitize gate":    string(gateData),
+		} {
+			if !strings.Contains(contents, name) {
+				t.Fatalf("%s does not bind %s", surface, name)
+			}
+		}
+		if !strings.Contains(string(gateData), hex.EncodeToString(digest[:])) {
+			t.Fatalf("sanitize gate does not bind %s digest", name)
 		}
 	}
 }

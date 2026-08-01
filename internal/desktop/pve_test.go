@@ -34,6 +34,18 @@ func validPVEConfig(endpoint, artifacts string) *PVEConfig {
 	}
 }
 
+func validPVEV2Config(endpoint, artifacts string) *PVEConfig {
+	config := validPVEConfig(endpoint, artifacts)
+	config.SchemaVersion = 2
+	config.ProfileID = "pe/amd64/no-multilib/systemd/desktop-verifier-v1"
+	config.ImageID = "pe/amd64/no-multilib/desktop-verifier-matrix-g1"
+	config.ImageGeneration = "desktop-matrix-g1"
+	config.DisplayServer = "x11"
+	config.StagingKeyPath = "signing-key.asc"
+	config.StagingKeyFingerprint = strings.Repeat("A", 40)
+	return config
+}
+
 func TestPVEConfigRejectsHTTPControlPlane(t *testing.T) {
 	config := validPVEConfig("http://pve.internal", t.TempDir())
 	if err := config.Validate(); err == nil {
@@ -55,6 +67,45 @@ func TestPVEConfigAllowsImageOnlyScenarioWithoutStaging(t *testing.T) {
 	config.StagingDigest = "sha256:" + strings.Repeat("a", 64)
 	if err := config.Validate(); err == nil {
 		t.Fatal("partial staging policy was accepted")
+	}
+}
+
+func TestPVEConfigV2RequiresSignedStagingAndRejectsWayland(t *testing.T) {
+	config := validPVEV2Config("https://pve.internal", t.TempDir())
+	if err := config.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	config.StagingKeyFingerprint = ""
+	if err := config.Validate(); err == nil {
+		t.Fatal("schema v2 accepted staging without a signer fingerprint")
+	}
+	config = validPVEV2Config("https://pve.internal", t.TempDir())
+	config.DisplayServer = "wayland"
+	if err := config.Validate(); err == nil {
+		t.Fatal("direct PVE config accepted an unsupported native Wayland session")
+	}
+}
+
+func TestPVEConfigBindsV2ScenarioIdentityAndSigner(t *testing.T) {
+	scenario, err := LoadScenario(filepath.Join("..", "..", "tests", "desktop", "scenarios", "gtk-mousepad.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := validPVEV2Config("https://pve.internal", t.TempDir())
+	config.StagingDigest = scenario.Steps[2].Input["staging_digest"]
+	config.StagingKeyFingerprint = scenario.Steps[2].Input["signer_fingerprint"]
+	if err := config.ValidateScenario(scenario); err != nil {
+		t.Fatal(err)
+	}
+	config.ImageGeneration = "another-generation"
+	if err := config.ValidateScenario(scenario); err == nil {
+		t.Fatal("direct PVE policy accepted scenario image-generation drift")
+	}
+	config = validPVEV2Config("https://pve.internal", t.TempDir())
+	config.StagingDigest = scenario.Steps[2].Input["staging_digest"]
+	config.StagingKeyFingerprint = strings.Repeat("B", 40)
+	if err := config.ValidateScenario(scenario); err == nil {
+		t.Fatal("direct PVE policy accepted scenario signer drift")
 	}
 }
 
@@ -112,6 +163,70 @@ func TestPVEQGADriverPreparesDigestLockedStaging(t *testing.T) {
 	wantPrepare := []string{config.GuestAgentPath, "prepare", config.StagingBinhost, config.StagingDigest}
 	if len(commands) != 3 || !slices.Equal(commands[0], []string{"/usr/bin/true"}) || !slices.Equal(commands[1], wantReady) || !slices.Equal(commands[2], wantPrepare) {
 		t.Fatalf("guest commands = %#v", commands)
+	}
+}
+
+func TestPVEQGADriverV2VerifiesImageAndPreparesSignedStaging(t *testing.T) {
+	var mutex sync.Mutex
+	commands := make([][]string, 0, 4)
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api2/json/nodes/pve01/qemu/900/status/current":
+			_, _ = w.Write([]byte(`{"data":{"status":"running"}}`))
+		case "/api2/json/nodes/pve01/qemu/900/agent/exec":
+			if err := r.ParseForm(); err != nil {
+				t.Fatal(err)
+			}
+			mutex.Lock()
+			commands = append(commands, append([]string(nil), r.Form["command"]...))
+			pid := len(commands)
+			mutex.Unlock()
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]int{"pid": pid}})
+		case "/api2/json/nodes/pve01/qemu/900/agent/exec-status":
+			_, _ = w.Write([]byte(`{"data":{"exited":1,"exitcode":0,"out-data":"","err-data":"","out-truncated":0,"err-truncated":0}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	config := validPVEV2Config(server.URL, t.TempDir())
+	driver, err := NewPVEQGADriver(config, "desktop@pve!e2e", "secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := ActionRequest{
+		ScenarioID: "desktop/test-v2", ProfileID: config.ProfileID, ImageID: config.ImageID,
+		ImageGeneration: config.ImageGeneration, DisplayServer: config.DisplayServer, Action: "start",
+	}
+	if _, err := driver.Do(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	mutex.Lock()
+	defer mutex.Unlock()
+	want := [][]string{
+		{"/usr/bin/true"},
+		{config.GuestAgentPath, "assert-image", config.ProfileID, config.ImageID, config.ImageGeneration, config.DisplayServer},
+		{config.GuestAgentPath, "desktop-ready"},
+		{config.GuestAgentPath, "prepare", config.StagingBinhost, config.StagingDigest, config.StagingKeyPath, config.StagingKeyFingerprint},
+	}
+	if !slices.EqualFunc(commands, want, slices.Equal) {
+		t.Fatalf("guest commands = %#v, want %#v", commands, want)
+	}
+}
+
+func TestPVEQGADriverV2RejectsActionIdentityDriftBeforeExecution(t *testing.T) {
+	config := validPVEV2Config("https://pve.internal", t.TempDir())
+	driver, err := NewPVEQGADriver(config, "desktop@pve!e2e", "secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = driver.Do(context.Background(), ActionRequest{
+		ProfileID: config.ProfileID, ImageID: config.ImageID, ImageGeneration: "wrong", DisplayServer: config.DisplayServer, Action: "launch_fixture",
+	})
+	if err == nil {
+		t.Fatal("direct PVE driver accepted action image-generation drift")
 	}
 }
 

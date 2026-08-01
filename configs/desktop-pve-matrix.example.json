@@ -1,0 +1,20 @@
+{
+  "schema_version": 2,
+  "endpoint": "https://pve.example.internal/api2/json",
+  "insecure_skip_tls_verify": false,
+  "ca_bundle_path": "/etc/portage-engine/pve-ca.pem",
+  "node": "pve01",
+  "vmid": 9300,
+  "allowed_snapshot": "clean",
+  "profile_id": "pe/amd64/no-multilib/systemd/desktop-verifier-v1",
+  "image_id": "pe/amd64/no-multilib/desktop-verifier-matrix-g1",
+  "image_generation": "desktop-matrix-g1",
+  "display_server": "x11",
+  "staging_binhost": "http://mirror.example.internal/portage-engine/signed-candidates/gui-matrix-g1",
+  "staging_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  "staging_key_path": "signing-key.asc",
+  "staging_key_fingerprint": "0000000000000000000000000000000000000000",
+  "guest_agent_path": "/usr/libexec/portage-desktop-agent",
+  "artifact_directory": "/var/lib/portage-engine/desktop-evidence",
+  "lifecycle_timeout_seconds": 300
+}

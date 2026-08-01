@@ -33,15 +33,21 @@ func writeOperationsKeys(t *testing.T, dir, prefix string) (string, string) {
 
 func TestDesktopPromotionEvidenceIsARequiredDeterministicGate(t *testing.T) {
 	stampedAt := time.Date(2026, 7, 24, 1, 0, 0, 0, time.UTC)
-	manifest := &ImageManifest{ImageID: "pe/amd64/desktop-g2", ProfileID: "pe/amd64/desktop-v1"}
+	manifest := &ImageManifest{ImageID: "pe/amd64/desktop-g2", ProfileID: "pe/amd64/desktop-v1", Generation: "g2"}
 	result := desktop.Result{
 		SchemaVersion: 1, ScenarioID: "desktop/image-baseline-v1", ProfileID: manifest.ProfileID, ImageID: manifest.ImageID,
-		State: "passed", StartedAt: stampedAt.Add(time.Minute), CompletedAt: stampedAt.Add(2 * time.Minute),
+		ImageGeneration: manifest.Generation,
+		State:           "passed", StartedAt: stampedAt.Add(time.Minute), CompletedAt: stampedAt.Add(2 * time.Minute),
 		Steps: []desktop.StepResult{
 			{ID: "restore", Action: "restore", State: "passed", StartedAt: stampedAt.Add(time.Minute)},
 			{ID: "start", Action: "start", State: "passed", StartedAt: stampedAt.Add(time.Minute)},
+			{ID: "install", Action: "install", State: "passed", StartedAt: stampedAt.Add(time.Minute), Artifacts: []string{"install.log"}},
+			{ID: "fixture", Action: "launch_fixture", State: "passed", StartedAt: stampedAt.Add(time.Minute)},
+			{ID: "ready", Action: "wait_accessible", State: "passed", StartedAt: stampedAt.Add(time.Minute)},
+			{ID: "logs", Action: "collect_logs", State: "passed", StartedAt: stampedAt.Add(time.Minute), Artifacts: []string{"application.log"}},
 			{ID: "a11y", Action: "collect_accessibility", State: "passed", StartedAt: stampedAt.Add(time.Minute), Artifacts: []string{"tree.json"}},
 			{ID: "screenshot", Action: "screenshot", State: "passed", StartedAt: stampedAt.Add(time.Minute), Artifacts: []string{"screen.png"}},
+			{ID: "close", Action: "close", State: "passed", StartedAt: stampedAt.Add(time.Minute)},
 			{ID: "stop", Action: "stop", State: "passed", StartedAt: stampedAt.Add(time.Minute)},
 		},
 	}
@@ -49,16 +55,28 @@ func TestDesktopPromotionEvidenceIsARequiredDeterministicGate(t *testing.T) {
 	if err := validateDesktopPromotionEvidence(path, manifest, result.ScenarioID, stampedAt); err != nil {
 		t.Fatal(err)
 	}
-	result.Steps[3].State = "failed"
+	result.Steps[7].State = "failed"
 	path = writeTestJSON(t, t.TempDir(), "failed-desktop-result.json", result)
 	if err := validateDesktopPromotionEvidence(path, manifest, result.ScenarioID, stampedAt); err == nil {
 		t.Fatal("promotion accepted a failed screenshot step")
 	}
-	result.Steps[3].State = "passed"
+	result.Steps[7].State = "passed"
 	result.ImageID = "pe/amd64/other"
 	path = writeTestJSON(t, t.TempDir(), "drifted-desktop-result.json", result)
 	if err := validateDesktopPromotionEvidence(path, manifest, result.ScenarioID, stampedAt); err == nil {
 		t.Fatal("promotion accepted desktop evidence for another image")
+	}
+	result.ImageID = manifest.ImageID
+	result.ImageGeneration = "g3"
+	path = writeTestJSON(t, t.TempDir(), "generation-drifted-desktop-result.json", result)
+	if err := validateDesktopPromotionEvidence(path, manifest, result.ScenarioID, stampedAt); err == nil {
+		t.Fatal("promotion accepted desktop evidence for another image generation")
+	}
+	result.ImageGeneration = manifest.Generation
+	result.Steps[8].Action = "key"
+	path = writeTestJSON(t, t.TempDir(), "missing-close-desktop-result.json", result)
+	if err := validateDesktopPromotionEvidence(path, manifest, result.ScenarioID, stampedAt); err == nil {
+		t.Fatal("promotion accepted schema v2 desktop evidence without deterministic close")
 	}
 }
 
