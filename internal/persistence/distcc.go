@@ -101,6 +101,16 @@ func (r *JobRepository) ReserveCompileSlots(
 	poolID, _ := pool.ID()
 	var lease *distcc.Lease
 	err := r.db.WithTx(ctx, pgx.TxOptions{}, func(q Querier) error {
+		// Serialize the short capacity decision per exact pool. SKIP LOCKED on
+		// the only compatible worker can otherwise report no capacity while a
+		// concurrent one-slot reservation is merely committing, leaving usable
+		// slots idle. The transaction-scoped lock also gives the following
+		// statement a fresh READ COMMITTED snapshot of committed leases.
+		if _, err := q.Exec(ctx, `
+			SELECT pg_advisory_xact_lock(hashtextextended($1, 0))
+		`, poolID); err != nil {
+			return fmt.Errorf("lock compile pool: %w", err)
+		}
 		var workerID, endpoint string
 		var fence int64
 		err := q.QueryRow(ctx, `
@@ -133,7 +143,7 @@ func (r *JobRepository) ReserveCompileSlots(
 			      AND l.expires_at > clock_timestamp()
 			  ), 0) DESC,
 			  w.stable_name, w.id
-			FOR UPDATE SKIP LOCKED
+			FOR UPDATE
 			LIMIT 1
 		`, poolID, pool.Architecture, pool.CHOST, pool.CompilerDigest,
 			pool.ToolchainImageGeneration, pool.CPUFeatures, pool.NetworkZone,

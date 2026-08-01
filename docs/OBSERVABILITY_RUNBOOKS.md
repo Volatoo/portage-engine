@@ -208,7 +208,8 @@ curl -fsS http://127.0.0.1:18080/api/v1/scheduler/status | jq '{healthy,error,ta
 curl -fsS 'http://127.0.0.1:29090/api/v1/query?query=portage_monitor_projection_snapshot_valid' | jq .
 ```
 
-Mitigate the database/view/schema error and confirm schema v28 compatibility.
+Mitigate the database/view/schema error and confirm the current schema v29 is
+compatible and includes migration 00028.
 Drill by revoking the staging application role's `SELECT` permission on
 `monitor_job_outcomes`, verify the alert after five minutes, restore the grant,
 and verify `snapshot_valid` returns to 1. Empty the staging job history as a
