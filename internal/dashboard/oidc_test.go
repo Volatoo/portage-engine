@@ -128,7 +128,8 @@ func TestOIDCStepUpStartForcesProviderReauthentication(t *testing.T) {
 	}
 	cookies := w.Result().Cookies()
 	if len(cookies) != 1 || cookies[0].Name != oidcFlowCookie ||
-		!cookies[0].HttpOnly || cookies[0].SameSite != http.SameSiteLaxMode {
+		cookies[0].Path != oidcFlowCookiePath || !cookies[0].HttpOnly ||
+		cookies[0].SameSite != http.SameSiteLaxMode {
 		t.Fatalf("OIDC flow cookie = %#v", cookies)
 	}
 	var flow oidcFlow
@@ -137,5 +138,48 @@ func TestOIDCStepUpStartForcesProviderReauthentication(t *testing.T) {
 	}
 	if !flow.StepUp {
 		t.Fatal("OIDC flow did not retain the step-up intent")
+	}
+}
+
+func TestProviderFlowCookieCoversMultiProviderCallback(t *testing.T) {
+	dashboard := New(&config.DashboardConfig{
+		ServerURL: "http://localhost:8080",
+		JWTSecret: strings.Repeat("s", 32),
+	})
+	dashboard.providers = map[string]*oidcRuntime{
+		"google": {
+			id: "google", providerType: "oidc",
+			oauth2: oauth2.Config{
+				ClientID:    "google-client",
+				RedirectURL: "https://dashboard.example.test/auth/provider/google/callback",
+				Endpoint: oauth2.Endpoint{
+					AuthURL: "https://accounts.google.com/o/oauth2/v2/auth",
+				},
+			},
+		},
+	}
+
+	w := httptest.NewRecorder()
+	dashboard.handleIdentityProviderRoute(
+		w,
+		httptest.NewRequest(
+			http.MethodGet, "/auth/provider/google/start", nil,
+		),
+	)
+	if w.Code != http.StatusFound {
+		t.Fatalf("provider start status=%d, want 302", w.Code)
+	}
+	cookies := w.Result().Cookies()
+	if len(cookies) != 1 || cookies[0].Path != "/auth/" {
+		t.Fatalf("provider flow cookie does not cover callback: %#v", cookies)
+	}
+	callback, err := url.Parse(
+		"https://dashboard.example.test/auth/provider/google/callback",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(callback.Path, cookies[0].Path) {
+		t.Fatalf("cookie path %q does not cover callback %q", cookies[0].Path, callback.Path)
 	}
 }

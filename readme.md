@@ -78,6 +78,9 @@ HTTPS browser origins, Vault-issued worker identities, protected operational
 endpoints and an S3-compatible artifact authority. The Go API/dashboard may
 still use private HTTP behind a TLS-terminating edge. See
 [Production boundary](docs/PRODUCTION_BOUNDARY.md).
+The repository includes a read-only Nginx/Compose edge reference and separate
+static and real-host evidence Gates; missing production credentials are
+reported as `not_run`, never passed.
 The immutable adapter, key layout, role-specific permissions, and local MinIO
 Gate are documented in [Object storage contract](docs/OBJECT_STORAGE.md).
 The anonymous HTTP contract is published as

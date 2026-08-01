@@ -226,3 +226,73 @@ Before removing the legacy break-glass path:
    or raw `jti`.
 7. Run a local-session device fixture and confirm approval, denial, expiry and
    concurrent replay all fail closed without contacting an external provider.
+
+## Real-host evidence Gate
+
+`scripts/public-identity-gate.py` turns the operational list into a
+machine-readable, fail-closed acceptance run. It deliberately does not log in
+to providers with stored passwords, mint test credentials, or treat the
+absence of a real provider session as success. Without
+`PORTAGE_GATE_RUN_LIVE=1`, it writes a redacted `not_run` manifest and exits 3.
+
+Create dedicated, disposable browser sessions through the production hostname
+and inject their complete `pe_session` cookie values from a secret-capable
+runner. Do not pass them on a command line, put them in an env file, or paste
+them into the evidence manifest. The Gate needs:
+
+- `PORTAGE_GATE_AUTHENTIK_COOKIE`, `PORTAGE_GATE_GOOGLE_COOKIE`, and
+  `PORTAGE_GATE_GITHUB_COOKIE` for successful real callbacks;
+- `PORTAGE_GATE_MAX_LIFETIME_COOKIE` plus
+  `PORTAGE_GATE_MAX_LIFETIME_SECONDS` for the absolute lifetime bound;
+- two same-subject sessions in `PORTAGE_GATE_REVOKE_ACTOR_COOKIE` and
+  `PORTAGE_GATE_REVOKE_TARGET_COOKIE` for isolated revoke;
+- a dedicated `PORTAGE_GATE_LOGOUT_COOKIE` for Dashboard logout;
+- an initially valid Authentik session and observation window in
+  `PORTAGE_GATE_BACKCHANNEL_COOKIE` and
+  `PORTAGE_GATE_BACKCHANNEL_WAIT_SECONDS`; operator automation must trigger
+  the Authentik logout while the Gate polls;
+- a dedicated untouched session for a different, non-administrator subject,
+  plus the configured and observation windows in `PORTAGE_GATE_IDLE_COOKIE`,
+  `PORTAGE_GATE_IDLE_TIMEOUT_SECONDS`, and
+  `PORTAGE_GATE_IDLE_WAIT_SECONDS` (the wait must exceed the timeout; the
+  separate subject prevents revoke-all from consuming this probe);
+- an intentionally stale normal session, fresh provider reauthentication, and
+  a third same-subject probe session in `PORTAGE_GATE_STEP_UP_STALE_COOKIE`,
+  `PORTAGE_GATE_STEP_UP_FRESH_COOKIE`, and
+  `PORTAGE_GATE_REVOKE_ALL_PROBE_COOKIE`; this check revokes every session for
+  that subject. Create the fresh cookie through the provider step-up action,
+  not an ordinary cached login; and
+- `PORTAGE_GATE_SHARED_EMAIL` plus optional
+  `PORTAGE_GATE_SHARED_EMAIL_PROVIDERS` (default `authentik,google`) for two real
+  accounts that intentionally expose the same verified email. Only unequal
+  subject IDs and issuers pass.
+
+Edge checks additionally require a real anonymous Packages index path,
+system-admin API session, metrics Basic Auth, and an externally observed direct
+backend URL:
+
+```text
+PORTAGE_GATE_BINPKG_PACKAGES_PATH
+PORTAGE_GATE_ADMIN_API_TOKEN
+PORTAGE_GATE_METRICS_USERNAME
+PORTAGE_GATE_METRICS_PASSWORD
+PORTAGE_GATE_BACKEND_DIRECT_URL
+PORTAGE_GATE_RATE_LIMIT_PROBE=1
+```
+
+Use `metrics` as the metrics username. The direct backend URL must be the
+address an external verifier would use to bypass the edge; any HTTP response is
+a failure, while connection refusal/timeout passes. The rate-limit probe sends
+a small burst and should be scheduled away from user traffic.
+
+The Gate verifies each provider start redirect before consuming supplied
+sessions: random state, PKCE S256, OIDC nonce, `Secure`/`HttpOnly`/`SameSite=Lax`
+flow cookie, callback cookie path, and rejection of a callback without matching
+state. A supplied Dashboard session must then resolve through `/api/iam/me` to
+the expected provider and a `federated-session`, proving the real callback and
+one-time upstream exchange completed.
+
+The output contains check IDs, `pass`/`fail`/`not_run`, fixed summaries, and no
+subject, email, session ID, cookie, bearer, provider credential, or response
+body. Review the manifest and deployment logs separately; never make sensitive
+logs part of release evidence.

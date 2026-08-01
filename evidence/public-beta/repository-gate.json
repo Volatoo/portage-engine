@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "gate": "public_edge_repository",
+  "generated_at": "2026-08-01T05:05:22Z",
+  "baseline_commit": "f79fca4",
+  "repository_head": "f79fca4fd41cc8d451c65553b5f1346dfe57feae",
+  "tree_basis": "repository_head_plus_worktree",
+  "working_tree_dirty": true,
+  "validation_image": "nginx:1.29-alpine",
+  "validation_image_digest": "nginx@sha256:5616878291a2eed594aee8db4dade5878cf7edcb475e59193904b198d9b830de",
+  "status": "pass",
+  "credentials_used": false,
+  "secrets_persisted": false,
+  "checks": [
+    {
+      "id": "repository_inputs",
+      "status": "pass",
+      "summary": "required public deployment inputs are present"
+    },
+    {
+      "id": "provider_registry",
+      "status": "pass",
+      "summary": "provider registry has Authentik, Google, and GitHub HTTPS callbacks without embedded secrets"
+    },
+    {
+      "id": "edge_static_policy",
+      "status": "pass",
+      "summary": "edge template contains independent source-IP/request limits, cookie policy, anonymous routes, metrics auth, and WebShell denial"
+    },
+    {
+      "id": "production_boundary_documented",
+      "status": "pass",
+      "summary": "production boundary documents evidence and not-run semantics"
+    },
+    {
+      "id": "compose_render",
+      "status": "pass",
+      "summary": "Compose overlay renders without interpolating production credentials"
+    },
+    {
+      "id": "backend_isolation",
+      "status": "pass",
+      "summary": "only edge HTTP(S) and private worker mTLS publish host ports"
+    },
+    {
+      "id": "public_runtime_policy",
+      "status": "pass",
+      "summary": "public server and Dashboard use fail-closed identity/session settings"
+    },
+    {
+      "id": "nginx_syntax",
+      "status": "pass",
+      "summary": "rendered nginx reference passes nginx -t"
+    }
+  ]
+}

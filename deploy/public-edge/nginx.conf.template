@@ -1,0 +1,217 @@
+# Public Beta HTTPS edge reference. The official nginx container renders the
+# PORTAGE_* host variables at startup. OAuth query strings are intentionally
+# absent from the access log so authorization codes never become evidence.
+
+server_tokens off;
+
+log_format portage_edge
+    '$remote_addr - $request_method $uri $status $body_bytes_sent '
+    'rt=$request_time request_id=$request_id';
+
+limit_conn_zone $binary_remote_addr zone=source_ip_connections:10m;
+limit_req_zone $binary_remote_addr zone=public_requests:10m rate=20r/s;
+limit_req_zone $binary_remote_addr zone=identity_requests:10m rate=10r/m;
+limit_req_zone $binary_remote_addr zone=metrics_requests:10m rate=2r/s;
+
+upstream portage_dashboard_backend {
+    server portage-dashboard:8081;
+    keepalive 32;
+}
+
+upstream portage_api_backend {
+    server portage-server:8080;
+    keepalive 32;
+}
+
+# Reject unknown Host values rather than reflecting them into a redirect.
+server {
+    listen 8080 default_server;
+    server_name _;
+    access_log /dev/stdout portage_edge;
+    return 444;
+}
+
+server {
+    listen 8080;
+    server_name ${PORTAGE_PUBLIC_HOST} ${PORTAGE_API_HOST} ${PORTAGE_METRICS_HOST};
+    access_log /dev/stdout portage_edge;
+    return 308 https://$host$request_uri;
+}
+
+server {
+    listen 8443 ssl default_server;
+    server_name _;
+    ssl_reject_handshake on;
+}
+
+server {
+    listen 8443 ssl;
+    server_name ${PORTAGE_PUBLIC_HOST};
+
+    ssl_certificate /run/secrets/portage_public_tls_cert;
+    ssl_certificate_key /run/secrets/portage_public_tls_key;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_session_cache shared:public_tls:10m;
+    ssl_session_timeout 10m;
+
+    access_log /dev/stdout portage_edge;
+    error_log /dev/stderr warn;
+    client_max_body_size 16m;
+    limit_conn source_ip_connections 32;
+    limit_req zone=public_requests burst=40 nodelay;
+
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    add_header X-Content-Type-Options nosniff always;
+    add_header Referrer-Policy no-referrer always;
+    add_header Permissions-Policy "camera=(), geolocation=(), microphone=()" always;
+
+    # Public Beta intentionally has no browser or API route to WebShell.
+    location ^~ /shell/ { return 404; }
+    location = /api/shell { return 404; }
+    location = /api/v1/instances/shell { return 404; }
+    location ^~ /verify-binhost/ { return 404; }
+    location = /metrics { return 404; }
+    location = /metrics/prometheus { return 404; }
+
+    # Keep explicit anonymous paths reviewable even though the Dashboard also
+    # enforces their narrow, credential-free proxy contract.
+    location ~ ^/(packages|docs|status)$ {
+        proxy_pass http://portage_dashboard_backend;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Request-ID $request_id;
+        proxy_cookie_flags ~ secure httponly samesite=lax;
+    }
+
+    location ^~ /binpkgs/ {
+        proxy_pass http://portage_dashboard_backend;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Request-ID $request_id;
+        proxy_cookie_flags ~ secure httponly samesite=lax;
+    }
+
+    location ^~ /auth/ {
+        limit_req zone=public_requests burst=10 nodelay;
+        limit_req zone=identity_requests burst=5 nodelay;
+        proxy_pass http://portage_dashboard_backend;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Request-ID $request_id;
+        proxy_cookie_flags ~ secure httponly samesite=lax;
+        add_header Cache-Control "no-store" always;
+        add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+        add_header X-Content-Type-Options nosniff always;
+        add_header Referrer-Policy no-referrer always;
+        add_header Permissions-Policy "camera=(), geolocation=(), microphone=()" always;
+    }
+
+    location / {
+        proxy_pass http://portage_dashboard_backend;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Request-ID $request_id;
+        proxy_cookie_flags ~ secure httponly samesite=lax;
+        proxy_read_timeout 60s;
+    }
+}
+
+server {
+    listen 8443 ssl;
+    server_name ${PORTAGE_API_HOST};
+
+    ssl_certificate /run/secrets/portage_public_tls_cert;
+    ssl_certificate_key /run/secrets/portage_public_tls_key;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_session_cache shared:api_tls:10m;
+    ssl_session_timeout 10m;
+
+    access_log /dev/stdout portage_edge;
+    error_log /dev/stderr warn;
+    client_max_body_size 16m;
+    limit_conn source_ip_connections 32;
+    limit_req zone=public_requests burst=40 nodelay;
+
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    add_header X-Content-Type-Options nosniff always;
+    add_header Referrer-Policy no-referrer always;
+
+    location = /api/v1/instances/shell { return 404; }
+    location ^~ /verify-binhost/ { return 404; }
+    location = /metrics { return 404; }
+    location = /metrics/prometheus { return 404; }
+
+    location ^~ /api/v1/iam/providers/ {
+        limit_req zone=public_requests burst=10 nodelay;
+        limit_req zone=identity_requests burst=5 nodelay;
+        proxy_pass http://portage_api_backend;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Request-ID $request_id;
+        add_header Cache-Control "no-store" always;
+        add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+        add_header X-Content-Type-Options nosniff always;
+        add_header Referrer-Policy no-referrer always;
+    }
+
+    location / {
+        proxy_pass http://portage_api_backend;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Request-ID $request_id;
+        proxy_read_timeout 60s;
+    }
+}
+
+# Metrics use a separate hostname and an edge-owned htpasswd file. The same
+# Basic Authorization header is passed to the control plane, which independently
+# requires the application METRICS_PASSWORD. Network policy should additionally
+# restrict this hostname to the scraper source range.
+server {
+    listen 8443 ssl;
+    server_name ${PORTAGE_METRICS_HOST};
+
+    ssl_certificate /run/secrets/portage_public_tls_cert;
+    ssl_certificate_key /run/secrets/portage_public_tls_key;
+    ssl_protocols TLSv1.2 TLSv1.3;
+
+    access_log /dev/stdout portage_edge;
+    error_log /dev/stderr warn;
+    limit_conn source_ip_connections 4;
+    limit_req zone=metrics_requests burst=4 nodelay;
+
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    add_header X-Content-Type-Options nosniff always;
+
+    location = /metrics/prometheus {
+        auth_basic "Portage metrics";
+        auth_basic_user_file /run/secrets/portage_metrics_htpasswd;
+        proxy_pass http://portage_api_backend;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Request-ID $request_id;
+    }
+
+    location / { return 404; }
+}

@@ -25,6 +25,35 @@ Public dashboard cookies are always `Secure`. Identity-provider issuer and
 callback URLs and CORS origins must be HTTPS. `OIDC_ALLOW_INSECURE_HTTP` is only
 available in trusted mode.
 
+The read-only reference edge consists of
+`deploy/public-edge/nginx.conf.template` and
+`deploy/public-edge/docker-compose.edge.yml`. Apply all three Compose files;
+the final overlay uses Compose `!reset` to remove the API and Dashboard host
+ports and every inherited database/cache/observability port, joins the HTTP
+services to an internal edge network, and publishes only the HTTP redirect,
+HTTPS edge, and Worker Gateway mTLS listener on an explicitly selected private
+worker-network address:
+
+```bash
+docker compose \
+  -f docker-compose.yml \
+  -f docker-compose.public.yml \
+  -f deploy/public-edge/docker-compose.edge.yml \
+  up -d
+```
+
+The edge expects deployment-owned external secrets named
+`portage_public_tls_cert`, `portage_public_tls_key`, and
+`portage_metrics_htpasswd`. Do not replace them with checked-in certificates
+or password files. `deploy/public-edge/public.env.example` contains only
+non-secret host and policy inputs. Set `PORTAGE_WORKER_GATEWAY_BIND` to one
+exact private/VLAN interface address; the edge overlay deliberately has no
+public/default bind for the mTLS Worker Gateway.
+
+The reference access log records `$uri`, never `$request_uri`; OAuth callback
+authorization codes therefore do not enter edge logs. Preserve that property
+when translating the example to a managed load balancer.
+
 ## Server requirements
 
 For a control-plane process, public mode requires:
@@ -110,6 +139,12 @@ Production deployments should disable routing to this endpoint until a
 short-lived SSH certificate and session-recording implementation replaces the
 long-lived operator key.
 
+The Public Beta reference edge does not route WebShell at all. It returns 404
+for Dashboard `/shell/` and `/api/shell` and API
+`/api/v1/instances/shell`, regardless of authentication or `Origin`. This is a
+stricter release boundary than the application-level system-admin/origin
+checks and is intentional.
+
 ## Required production topology
 
 ```mermaid
@@ -134,18 +169,69 @@ failure remains fail-open inside the application because Redis is not a
 correctness authority; it is therefore not the public denial-of-service
 boundary.
 
-## Gate
+The reference uses independent connection, general-request, identity-request,
+and metrics zones keyed from the socket source IP. It replaces, rather than
+appends to, an untrusted client `X-Forwarded-For` header. When another trusted
+load balancer sits in front, configure its real-IP trust list explicitly;
+never trust arbitrary forwarded addresses.
+
+Metrics use a distinct hostname. The edge htpasswd entry must use username
+`metrics` and the same password injected as the server's
+`METRICS_PASSWORD`, so both the edge and application independently verify the
+Basic Authorization header. Restrict the metrics hostname to scraper source
+ranges in the external firewall as well.
+
+## Repository and real-host Gates
+
+The repository Gate parses all Compose overlays without interpolating or
+inventing production credentials, checks the static boundary, and validates a
+rendered Nginx configuration in the operator-selected container image. Set
+`PORTAGE_EDGE_IMAGE` to the same deployment-reviewed digest-pinned image used
+by Compose for reproducible evidence:
+
+```bash
+scripts/validate-public-edge.sh \
+  --output evidence/public-beta/repository-gate.json
+```
+
+The real-host Gate is separate and destructive to the dedicated test sessions
+it receives. It accepts session cookies, bearer tokens, and metrics credentials
+only from process environment, keeps HTTP bodies in memory, and writes only a
+redacted manifest:
+
+```bash
+PORTAGE_GATE_RUN_LIVE=1 \
+PORTAGE_PUBLIC_BASE_URL=https://portage.example.org \
+PORTAGE_API_BASE_URL=https://api.portage.example.org \
+PORTAGE_METRICS_BASE_URL=https://metrics.portage.example.org \
+scripts/public-identity-gate.py \
+  --output evidence/public-beta/identity-gate.json
+```
+
+See [Community identity providers](IDENTITY_PROVIDERS.md) for the required
+deployment-owned inputs. Both tools use exit `0` only when every check in their
+scope passed, `1` for a failed check, `2` for invocation/dependency errors, and
+`3` when required real credentials, endpoints, or observations were not
+provided. Exit `3` and manifest status `not_run` are never release success.
+Sensitive values and response bodies must not be attached to the manifest or
+stored in the repository.
 
 Before switching a deployment to `public`, preserve evidence for:
 
 1. rejected startup with every unsafe compatibility option;
-2. provider-only dashboard login through the real HTTPS hostname;
+2. Authentik, Google OIDC, and GitHub OAuth provider-only Dashboard login and
+   callback through the real HTTPS hostname, including state, nonce, and PKCE;
 3. unauthenticated `/livez` and `/readyz`, authenticated `/health`, and
    password-protected metrics;
-4. rejected foreign-origin shell WebSocket;
-5. Vault issuer recovery and CA rollover;
-6. schema-current PostgreSQL full/differential/PITR restore; and
-7. immutable S3 generation publication, channel rollback, deep reconciliation,
+4. idle and absolute session lifetime, single-session revoke, subject
+   revoke-all, local and Authentik back-channel logout, and high-risk fresh-auth
+   step-up;
+5. distinct `(issuer, subject)` rows for equal email values from different
+   providers;
+6. rejected foreign-origin shell WebSocket and no Public Beta WebShell route;
+7. Vault issuer recovery and CA rollover;
+8. schema-current PostgreSQL full/differential/PITR restore; and
+9. immutable S3 generation publication, channel rollback, deep reconciliation,
    cross-site replication and reference-aware GC; and
-8. public `/packages`, `/docs`, `/status`, `/binpkgs/.../Packages` and package
+10. public `/packages`, `/docs`, `/status`, `/binpkgs/.../Packages` and package
    downloads through the external HTTPS hostname without a login.
