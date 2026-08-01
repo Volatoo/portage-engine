@@ -167,19 +167,19 @@ verifying exactly one expected series increments while the stale fence cannot
 complete work. Recovery is complete when no expired live lease remains and the
 replacement attempt or phase reaches the intended state.
 
-## PortageEngineMonitorProjectionLag
+## Monitor read-model age (no alert)
 
-Owner: `platform-operations`. Severity: `warning`.
-
-Meaning: the durable terminal source watermark is more than 120 event-time
-seconds ahead of the current 30-second cached Monitor projection watermark.
-Both watermarks use `job.completed_at`, then the latest
-`attempt.finished_at`, then `job.updated_at`; source and projection scans stay
-independent so an omitted newest projection row remains detectable.
-Before the first projection, lag is the source-event age measured by the
-database clock. The gauge is zero when caught up or the durable source is empty;
-it is not the age of the last completed build. The two-minute `for` clause
-requires the condition to persist after crossing the 120-second data threshold.
+`portage_monitor_projection_lag_seconds` is charted but deliberately not
+alerted. `monitor_job_outcomes` is a plain view over the same base tables the
+source watermark reads, so a fresh read is always current; the only thing that
+can be stale is the per-replica 30-second read-through cache in
+`targetHistoryStatus`, and a failed refresh returns an error rather than serving
+older data. The gauge is therefore the age of the cached snapshot being served —
+zero when freshly loaded or empty, bounded above by the 30-second cache TTL. Any
+threshold above that could never fire, which is why the former
+`PortageEngineMonitorProjectionLag` rule was removed rather than retuned. A
+genuinely broken read model surfaces as
+`PortageEngineMonitorProjectionUnavailable` below.
 
 ```bash
 curl -fsS http://127.0.0.1:18080/api/v1/scheduler/status \
@@ -187,13 +187,6 @@ curl -fsS http://127.0.0.1:18080/api/v1/scheduler/status \
 curl -fsS http://127.0.0.1:18080/metrics/prometheus \
   | grep '^portage_monitor_projection_'
 ```
-
-Mitigate PostgreSQL query latency, lock pressure, or a failed Monitor refresh;
-do not reset the source watermark. Drill in staging by holding the Monitor
-projection query beyond two minutes while allowing one disposable job to become
-terminal, then allow additional terminal events. Verify lag grows as the durable
-source watermark advances while the projected watermark remains fixed, then
-release the query and verify the watermarks converge and lag returns to zero.
 
 ## PortageEngineMonitorProjectionUnavailable
 
@@ -208,7 +201,7 @@ curl -fsS http://127.0.0.1:18080/api/v1/scheduler/status | jq '{healthy,error,ta
 curl -fsS 'http://127.0.0.1:29090/api/v1/query?query=portage_monitor_projection_snapshot_valid' | jq .
 ```
 
-Mitigate the database/view/schema error and confirm the current schema v29 is
+Mitigate the database/view/schema error and confirm the current schema v30 is
 compatible and includes migration 00028.
 Drill by revoking the staging application role's `SELECT` permission on
 `monitor_job_outcomes`, verify the alert after five minutes, restore the grant,

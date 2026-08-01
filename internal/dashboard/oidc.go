@@ -292,7 +292,11 @@ func (d *Dashboard) handleProviderCallback(
 	if flow.ReturnTo != "" {
 		target = flow.ReturnTo
 	}
-	if flow.StepUp {
+	if flow.StepUp && flow.ReturnTo == "" {
+		// A step-up that was started from a page (the web shell, the device
+		// authorization page) has somewhere to go back to, and dropping the
+		// reader on /settings meant re-navigating to the action they had
+		// already asked for. Only a step-up with no origin lands there.
 		target = "/settings?step_up=complete"
 	}
 	http.Redirect(w, r, target, http.StatusFound)
@@ -425,17 +429,44 @@ func (d *Dashboard) verifyDashboardSession(ctx context.Context, token string) er
 	return verifyToken(d.config.JWTSecret, token, time.Now())
 }
 
+// applyBackendAuth gives the upstream request the caller's own credential.
 func (d *Dashboard) applyBackendAuth(incoming, outgoing *http.Request) {
-	if cookie, err := incoming.Cookie(sessionCookie); err == nil {
-		if token, err := d.oidcTokenFromSession(incoming.Context(), cookie.Value); err == nil {
-			outgoing.Header.Set("Authorization", "Bearer "+token)
+	d.applyBackendAuthHeaders(incoming, outgoing.Header)
+}
+
+// applyBackendAuthHeaders is applyBackendAuth against a bare header set,
+// because the web-shell bridge dials a WebSocket and has headers but no
+// outgoing *http.Request. Every path out of the dashboard maps a session to a
+// credential here and nowhere else: the control plane requires step-up on the
+// shell route, so a bridge that assembled its own headers would omit the
+// step-up credential and 428 for every caller.
+//
+// The session is resolved header-then-cookie exactly as authMiddleware
+// resolves it, so a session presented in the Authorization header cannot skip
+// the federated branch and pick up SERVER_API_KEY (a system administrator
+// upstream) below.
+func (d *Dashboard) applyBackendAuthHeaders(incoming *http.Request, outgoing http.Header) {
+	if session := sessionToken(incoming); session != "" {
+		if token, err := d.oidcTokenFromSession(incoming.Context(), session); err == nil {
+			// A federated principal's step-up state travels inside the
+			// platform token itself (the control plane reads auth_time, AMR
+			// and ACR off it), so there is no second credential to attach:
+			// a token too stale to satisfy step-up is refreshed by sending
+			// the reader back through the provider with prompt=login.
+			outgoing.Set("Authorization", "Bearer "+token)
 			return
 		}
-		if d.validLocalStepUp(incoming, cookie.Value) {
-			outgoing.Header.Set("X-Step-Up-Key", d.config.ServerStepUpAPIKey)
+		if isFederatedSession(session) {
+			// The principal is known but its platform token is expired or
+			// unreadable. Send nothing and let the control plane answer 401;
+			// escalating to the admin key would answer 200 instead.
+			return
+		}
+		if d.validLocalStepUp(incoming, session) {
+			outgoing.Set("X-Step-Up-Key", d.config.ServerStepUpAPIKey)
 		}
 	}
 	if d.config.ServerAPIKey != "" {
-		outgoing.Header.Set("X-API-Key", d.config.ServerAPIKey)
+		outgoing.Set("X-API-Key", d.config.ServerAPIKey)
 	}
 }

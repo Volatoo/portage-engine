@@ -40,6 +40,24 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
+    services:
+      # The scheduler claim, admission, phase-claim and worker-certificate
+      # paths only have concurrent coverage in internal/persistence's
+      # integration suite, and that suite is skip-by-default. Without a real
+      # PostgreSQL here they never execute anywhere in CI.
+      postgres:
+        image: postgres:18.4-alpine
+        env:
+          POSTGRES_DB: portage_engine_test
+          POSTGRES_USER: portage
+          POSTGRES_PASSWORD: portage-ci-local
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U portage -d portage_engine_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
@@ -48,7 +66,38 @@ jobs:
 
       - name: Run tests in container
         # -race is re-enabled now that the code is race-clean.
-        run: docker run --rm -v ${{ github.workspace }}:/app -w /app portage-test:latest go test -v -race -coverprofile=coverage.out ./...
+        # --network host is what makes the service container reachable: the
+        # Gentoo test image otherwise runs on the default bridge, where
+        # 127.0.0.1 is the test container itself and every integration case
+        # would silently skip instead of connecting.
+        env:
+          PORTAGE_TEST_DATABASE_URL: postgres://portage:portage-ci-local@127.0.0.1:5432/portage_engine_test?sslmode=disable
+        run: |
+          set -euo pipefail
+          docker run --rm --network host \
+            -e PORTAGE_TEST_DATABASE_URL \
+            -v "${{ github.workspace }}:/app" -w /app portage-test:latest \
+            go test -v -race -coverprofile=coverage.out ./... 2>&1 | tee go-test.log
+
+      - name: Assert the PostgreSQL integration suite executed
+        # Every case in the suite calls t.Skip when PORTAGE_TEST_DATABASE_URL is
+        # empty, so a green `go test` proves nothing by itself. Naming the cases
+        # is what makes an unset or wrong URL red: PASS becomes SKIP or FAIL.
+        run: |
+          set -euo pipefail
+          for name in \
+            TestPostgresMigrationTransactionAndCompatibility \
+            TestProjectResourceAndArtifactMigrationsRequireDrainedAttempts \
+            TestSigningQueueDigestFenceConcurrencyAndReclaim \
+            TestJobLedgerIdempotencyTransitionsOutboxAndReconcile \
+            TestPostgresSchedulerFairnessAndAutoscaling \
+            TestPostgresDistributedBuildAlpha
+          do
+            grep -q -- "--- PASS: ${name} " go-test.log || {
+              echo "${name} did not execute against PostgreSQL" >&2
+              exit 1
+            }
+          done
 
       - name: Upload coverage
         if: always()
@@ -146,3 +195,41 @@ jobs:
 
       - name: Validate release schemas, permissions, and failure paths
         run: make test-release
+
+  operational-gates:
+    name: Recovery, public edge, and executor gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Recovery drill and evidence validators
+        run: make test-recovery
+
+      - name: Public edge repository contract
+        # Exit 3 means a Docker-dependent check could not run on this runner;
+        # only an actual contract mismatch (exit 1) may fail the job, and any
+        # other status is a real error rather than a skipped probe.
+        run: |
+          set -uo pipefail
+          # The runner's default shell already has -e, which would abort here on
+          # the gate's own not-run status before it can be classified.
+          set +e
+          scripts/validate-public-edge.sh --output "${RUNNER_TEMP}/public-edge.json"
+          status=$?
+          set -e
+          case "${status}" in
+            0|3) exit 0 ;;
+            *) exit "${status}" ;;
+          esac
+
+      - name: Persistent executor template contract
+        run: make test-persistent-executor-gate
+
+      - name: Upload gate evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: operational-gate-evidence
+          path: ${{ runner.temp }}/public-edge.json
+          if-no-files-found: warn
+          retention-days: 30

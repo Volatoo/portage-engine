@@ -98,14 +98,22 @@ the latest canonical time read independently from the durable job/attempt
 tables. The projected watermark is the latest `monitor_job_outcomes.completed_at`
 using that same fallback order. Keeping the scans independent detects a newest
 source row omitted from the projection without assigning it a different event
-time. When the source is ahead,
-`lag_seconds = source_watermark - projected_watermark`: an event-time distance
-between two persisted timestamps. Before the first projected watermark exists,
-the fallback is `database_clock - source_watermark`. A caught-up projection and
-an empty source both report zero. `source_watermark_present` distinguishes the
-valid empty case. The cache refresh interval is 30 seconds; the checked-in
-warning threshold is more than 120 watermark seconds and must remain true for
-another two minutes. This is projection delay, not the age of the last build.
+time. The distance between the two watermarks is not the staleness measure:
+`monitor_job_outcomes` is a plain view over those same base tables, so a gap
+only identifies which terminal event the served snapshot predates, and its
+size is the quiet period before that event — hours on an idle control plane.
+When the source is ahead, `lag_seconds` is instead the age of the cached
+snapshot being served. A caught-up projection, an empty source, and a
+freshly loaded snapshot all report zero. `source_watermark_present`
+distinguishes the valid empty case. `alert_threshold_seconds` publishes the
+30-second read-through cache TTL that produced the reading, so a reader can
+scale one against the other: 3 seconds out of 30 says the snapshot is early in
+its life, and 3 seconds on its own says nothing. It is a bound, not a level to
+cross — the snapshot is reloaded once its age reaches the TTL, so no reading can
+exceed it, which is why neither the Dashboard nor Prometheus badges or alerts on
+the pair. There is deliberately no lag alert rule for the same reason (see
+`deploy/observability/rules/portage-engine.yml`). This is read-model age, not
+the age of the last build.
 
 Schema v28 also persists the fixed `attempt`/`admission` kind on each newly
 claimed scheduler lease and creates seven durable lease-expiry counters.

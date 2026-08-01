@@ -64,12 +64,35 @@ For a control-plane process, public mode requires:
   bootstrap administrator identity;
 - no legacy API key, step-up key, builder shared token or static remote builder;
 - an explicit HTTPS CORS allowlist without `*`;
+- `TRUSTED_PROXY_CIDRS` naming the exact ranges the edge connects from;
 - active durable phase execution;
 - the mTLS Worker Gateway with the Vault issuer;
 - an operator-selected GPG key and disabled key auto-creation;
 - verified PVE and SSH transports;
 - a metrics password whenever metrics are enabled; and
 - `STORAGE_TYPE=s3` with an explicit bucket and region.
+
+`TRUSTED_PROXY_CIDRS` has no default and `docker-compose.public.yml` renders it
+as `${PORTAGE_TRUSTED_PROXY_CIDRS:?...}`, so the public stack refuses to render
+until the deployment supplies one. There is nothing safe to guess: the value is
+the address range the edge actually connects to the API from, which only that
+deployment knows. For the bundled single-nginx edge it is the Compose bridge
+subnet carrying the edge-to-API hop — `deploy/public-edge/public.env.example`
+ships `PORTAGE_TRUSTED_PROXY_CIDRS=172.18.0.0/16` as the shape, but confirm the
+real one with `docker network inspect portage-engine_portage-net`, because
+Compose allocates that subnet and it is not stable across hosts. Behind a
+managed load balancer or an ingress controller, list the balancer's egress
+ranges instead, and list every one of them.
+
+Both ways of getting it wrong are silent. Too narrow — or absent, which is
+what the `:?` guard exists to prevent — means the edge is not a trusted hop:
+`X-Forwarded-For` is ignored, the client address falls back to `RemoteAddr`,
+and every anonymous caller behind the edge shares one pre-auth rate-limit
+bucket, so a single client at the per-minute budget locks CLI login and the
+binhost out for everyone. Too wide is worse: any host inside the declared range
+can forge `X-Forwarded-For`, choose its own rate-limit bucket, and put an
+address of its choosing into the audit record. Declare the edge and nothing
+else.
 
 PUB-1A through PUB-1C are implemented. In S3 mode, quarantine upload,
 verification capability, signer hand-off, immutable generation publication,

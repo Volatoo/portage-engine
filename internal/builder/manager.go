@@ -13,6 +13,7 @@ import (
 	"maps"
 	"math"
 	"mime"
+	"net"
 	"net/http"
 	neturl "net/url"
 	"os"
@@ -27,11 +28,13 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/slchris/portage-engine/internal/binpkg"
 	"github.com/slchris/portage-engine/internal/catalog"
 	"github.com/slchris/portage-engine/internal/distcc"
 	"github.com/slchris/portage-engine/internal/iac"
+	"github.com/slchris/portage-engine/internal/metrics"
 	"github.com/slchris/portage-engine/internal/signing"
 	artifactstorage "github.com/slchris/portage-engine/internal/storage"
 	"github.com/slchris/portage-engine/internal/workergateway"
@@ -201,6 +204,12 @@ type BuildStatus struct {
 	StagedPrimary     string   `json:"-"`
 	// Signed reports whether the builder signed the produced packages.
 	Signed bool `json:"signed,omitempty"`
+	// SigningKeyID is the key the isolated signer actually reported for this
+	// generation. Publication happens minutes to hours later, possibly on
+	// another replica and after a signer key rotation, so the immutable
+	// generation manifest must stamp this value rather than re-read whatever
+	// public key file the control plane currently holds.
+	SigningKeyID string `json:"signing_key_id,omitempty"`
 	// ResolvedContext records the exact server-owned profile, repositories,
 	// mirror bundle, and image generation selected for this job.
 	ResolvedContext *catalog.ResolvedBuildContext `json:"resolved_context,omitempty"`
@@ -267,6 +276,7 @@ type PhaseExecutionContext struct {
 	StagedArtifacts   []string              `json:"staged_artifacts,omitempty"`
 	StagedPrimary     string                `json:"staged_primary,omitempty"`
 	Signed            bool                  `json:"signed,omitempty"`
+	SigningKeyID      string                `json:"signing_key_id,omitempty"`
 	ArtifactPath      string                `json:"artifact_path,omitempty"`
 	ArtifactURL       string                `json:"artifact_url,omitempty"`
 	ArtifactPaths     []string              `json:"artifact_paths,omitempty"`
@@ -342,10 +352,16 @@ type TargetHistoryStatus struct {
 	Targets          []TargetReliabilityStatus `json:"targets,omitempty"`
 }
 
-// MonitorProjectionStatus compares the authoritative terminal-event
-// watermark with the event watermark included in the cached Monitor snapshot.
-// Both watermarks originate in PostgreSQL; LagSeconds is zero when caught up
-// or when the source is empty.
+// MonitorProjectionStatus reports whether the cached Monitor snapshot a
+// replica is serving predates the newest terminal event. Both watermarks
+// originate in PostgreSQL, but their distance is not the measure: the
+// projection is a view over the same base tables, so a gap only says which
+// event the snapshot was built before, and its size is the quiet period ahead
+// of that event. LagSeconds is therefore the age of the snapshot being served
+// — zero on a fresh load, when caught up, and when the source is empty — and
+// AlertThresholdSeconds is the read-through cache TTL that bounds it, so a
+// reading above it means the refresh contract broke rather than that an
+// operator-tunable alerting threshold was crossed.
 type MonitorProjectionStatus struct {
 	Valid                  bool       `json:"valid"`
 	State                  string     `json:"state"`
@@ -664,13 +680,17 @@ type Manager struct {
 	logLedger    DurableLogLedger
 	stopCh       chan struct{}
 	shutdownOnce sync.Once
-	workersOnce  sync.Once
-	cleanupOnce  sync.Once
-	stopped      bool // guarded by submitMu
-	schedulerID  string
-	executorCaps []string
-	wakeHook     func()
-	eventHook    func(BuildStatus)
+	// workersMu guards workersStarted. A sync.Once is deliberately not used:
+	// a start that fails must stay retryable, because the executor pool is the
+	// only thing that ever polls for accepted builds.
+	workersMu      sync.Mutex
+	workersStarted bool
+	cleanupOnce    sync.Once
+	stopped        bool // guarded by submitMu
+	schedulerID    string
+	executorCaps   []string
+	wakeHook       func()
+	eventHook      func(BuildStatus)
 
 	// onArtifactStored, when set, is called after an artifact lands in the
 	// binhost PKGDIR (the server uses it to refresh the Packages index).
@@ -738,9 +758,13 @@ func NewManager(cfg *config.ServerConfig) *Manager {
 	}
 	if cfg.DataDir != "" {
 		iacOpts = append(iacOpts, iac.WithWorkspaceDir(filepath.Join(cfg.DataDir, "terraform-workspaces")))
-		if !cfg.Database.Enabled {
-			// Standalone compatibility mode has no PostgreSQL cleanup queue.
-			// Persist the local instance map for restart recovery.
+		if !cfg.Database.Enabled || !cfg.Database.Required {
+			// Only a required database guarantees the durable cleanup ledger
+			// exists — a failed optional open is merely logged, and the server
+			// keeps provisioning VMs. Deciding the local state file from
+			// Database.Enabled alone left that configuration with no VM record
+			// anywhere: neither instances.json nor the cleanup queue, so a
+			// restart orphaned every live instance.
 			iacOpts = append(iacOpts, iac.WithStateFile(filepath.Join(cfg.DataDir, "instances.json")))
 		}
 	}
@@ -909,7 +933,7 @@ func (m *Manager) cleanupExpiredArtifactQuarantines() {
 			continue
 		}
 		info, statErr := entry.Info()
-		if statErr == nil && now.Sub(info.ModTime()) > 24*time.Hour {
+		if statErr == nil && now.Sub(info.ModTime()) > quarantineOrphanAge {
 			_ = os.RemoveAll(root)
 		}
 	}
@@ -918,6 +942,7 @@ func (m *Manager) cleanupExpiredArtifactQuarantines() {
 func (m *Manager) cleanupExpiredObjectQuarantines() {
 	keys, err := m.artifactStore.List(".quarantine/")
 	if err != nil {
+		fmt.Printf("Warning: object quarantine listing failed: %v\n", err)
 		return
 	}
 	tokens := make(map[string]bool)
@@ -945,8 +970,21 @@ func (m *Manager) cleanupExpiredObjectQuarantines() {
 	now := time.Now()
 	for token, hasCapability := range tokens {
 		if !hasCapability {
-			if _, isActive := active[token]; !isActive {
-				_ = m.deleteObjectQuarantine(token)
+			if _, isActive := active[token]; isActive {
+				continue
+			}
+			// A capability-less prefix is not evidence of an orphan: the signer
+			// writes its artifacts, then Packages, then the capability marker,
+			// and the control plane only learns that output token once the
+			// signing task has completed. This replica's job map cannot see
+			// another replica's in-flight token at all, because
+			// VerificationToken is never persisted. Only the bucket's own
+			// clock proves nobody is still writing.
+			if !m.objectQuarantineIsOrphaned(token, now) {
+				continue
+			}
+			if err := m.deleteObjectQuarantine(token); err != nil {
+				fmt.Printf("Warning: orphaned object quarantine %s was not deleted: %v\n", token, err)
 			}
 			continue
 		}
@@ -959,9 +997,29 @@ func (m *Manager) cleanupExpiredObjectQuarantines() {
 		)
 		manifest, parseErr := artifactstorage.ParseQuarantineManifest(document, time.Time{})
 		if downloadErr != nil || parseErr != nil || !now.Before(manifest.ExpiresAt) {
-			_ = m.deleteObjectQuarantine(token)
+			if err := m.deleteObjectQuarantine(token); err != nil {
+				fmt.Printf("Warning: expired object quarantine %s was not deleted: %v\n", token, err)
+			}
 		}
 	}
+}
+
+// objectQuarantineIsOrphaned reports whether every object under the token's
+// prefix is older than the orphan threshold. The threshold is far larger than
+// the signer lease and the control plane's signer wait, so a generation that
+// is still being written or verified anywhere in the cluster is never a
+// deletion candidate. A backend that cannot report object times keeps them.
+func (m *Manager) objectQuarantineIsOrphaned(token string, now time.Time) bool {
+	prefix, err := artifactstorage.QuarantineGenerationPrefix(token)
+	if err != nil {
+		return false
+	}
+	newest, known, err := artifactstorage.NewestObjectTime(m.artifactStore, prefix)
+	if err != nil {
+		fmt.Printf("Warning: object quarantine %s age is unknown: %v\n", token, err)
+		return false
+	}
+	return known && now.Sub(newest) > quarantineOrphanAge
 }
 
 // SetEphemeralHooks connects optional Redis acceleration. These callbacks must
@@ -972,59 +1030,64 @@ func (m *Manager) SetEphemeralHooks(wake func(), event func(BuildStatus)) {
 }
 
 // StartWorkers starts the configured executor pool after the server has loaded
-// its catalog, signing state, and persisted projection.
-func (m *Manager) StartWorkers() {
-	m.workersOnce.Do(func() {
-		runtimeRole := strings.TrimSpace(m.config.RuntimeRole)
-		if runtimeRole == "" {
-			runtimeRole = "control-plane"
+// its catalog, signing state, and persisted projection. A returned error means
+// nothing polls for accepted builds, so the caller must surface it rather than
+// keep answering 201 to submissions no executor will ever claim.
+func (m *Manager) StartWorkers() error {
+	m.workersMu.Lock()
+	defer m.workersMu.Unlock()
+	if m.workersStarted {
+		return nil
+	}
+	runtimeRole := strings.TrimSpace(m.config.RuntimeRole)
+	if runtimeRole == "" {
+		runtimeRole = "control-plane"
+	}
+	if m.config.PhaseExecutorMode == "active" {
+		if m.phaseQueue == nil || m.scheduler == nil ||
+			!m.config.WorkerGatewayEnabled || len(m.remoteBuilders()) > 0 {
+			return fmt.Errorf("active phase executor prerequisites are unavailable; no executor was started")
 		}
-		if m.config.PhaseExecutorMode == "active" {
-			if m.phaseQueue == nil || m.scheduler == nil ||
-				!m.config.WorkerGatewayEnabled || len(m.remoteBuilders()) > 0 {
-				fmt.Println("Warning: active phase executor prerequisites are unavailable; no executor was started")
-				return
+	}
+	if m.scheduler != nil {
+		capabilities, err := m.resolveExecutorCapabilities()
+		if err != nil {
+			return fmt.Errorf("executor capabilities are invalid: %w; no executor was started", err)
+		}
+		m.executorCaps = capabilities
+		if runtimeRunsAdmission(runtimeRole) {
+			if observer, ok := m.scheduler.(DurableAutoscaleObserver); ok &&
+				m.config.SchedulerAutoscaleMode != "" {
+				go m.autoscaleObservationLoop(observer)
 			}
 		}
-		if m.scheduler != nil {
-			capabilities, err := m.resolveExecutorCapabilities()
-			if err != nil {
-				fmt.Printf("Warning: executor capabilities are invalid: %v; no executor was started\n", err)
-				return
-			}
-			m.executorCaps = capabilities
-			if runtimeRunsAdmission(runtimeRole) {
-				if observer, ok := m.scheduler.(DurableAutoscaleObserver); ok &&
-					m.config.SchedulerAutoscaleMode != "" {
-					go m.autoscaleObservationLoop(observer)
-				}
+	}
+	m.workersStarted = true
+	if m.config.PhaseExecutorMode == "active" {
+		// Admission is deliberately separate from execution. Capacity-
+		// blocked phase work stays in PostgreSQL and consumes no executor
+		// goroutine or VM slot.
+		if runtimeRunsAdmission(runtimeRole) {
+			go m.durablePhaseAdmissionLoop()
+		}
+		if runtimeRunsPhaseExecution(runtimeRole) {
+			for i := 0; i < m.config.MaxWorkers; i++ {
+				go m.durablePhaseWorker(i)
 			}
 		}
-		if m.config.PhaseExecutorMode == "active" {
-			// Admission is deliberately separate from execution. Capacity-
-			// blocked phase work stays in PostgreSQL and consumes no executor
-			// goroutine or VM slot.
-			if runtimeRunsAdmission(runtimeRole) {
-				go m.durablePhaseAdmissionLoop()
-			}
-			if runtimeRunsPhaseExecution(runtimeRole) {
-				for i := 0; i < m.config.MaxWorkers; i++ {
-					go m.durablePhaseWorker(i)
-				}
-			}
-			return
-		}
-		if runtimeRole == "api" || runtimeRole == "executor" {
-			fmt.Printf(
-				"Warning: separated runtime role %q requires active phase execution; no legacy worker was started\n",
-				runtimeRole,
-			)
-			return
-		}
-		for i := 0; i < m.config.MaxWorkers; i++ {
-			go m.worker(i)
-		}
-	})
+		return nil
+	}
+	if runtimeRole == "api" || runtimeRole == "executor" {
+		fmt.Printf(
+			"Warning: separated runtime role %q requires active phase execution; no legacy worker was started\n",
+			runtimeRole,
+		)
+		return nil
+	}
+	for i := 0; i < m.config.MaxWorkers; i++ {
+		go m.worker(i)
+	}
+	return nil
 }
 
 func runtimeRunsAdmission(role string) bool {
@@ -1141,10 +1204,41 @@ func (m *Manager) SyncLedgerJobs(durable map[string]*BuildStatus) {
 			copyStatus.VerificationToken = local.VerificationToken
 			copyStatus.StagedArtifacts = append([]string(nil), local.StagedArtifacts...)
 			copyStatus.StagedPrimary = local.StagedPrimary
+			preserveLocalGenerationFacts(&copyStatus, local)
 		}
 		next[id] = &copyStatus
 	}
 	m.jobs = next
+}
+
+// preserveLocalGenerationFacts keeps the signing and promotion facts this
+// replica established for the attempt the durable row still describes. Signing
+// and promotion mutate memory first and become durable only on the next
+// transition, so a reconciler tick landing inside the window between them
+// would otherwise reinstate a pre-signing snapshot: the following verify would
+// then run the install gate with signature checking off against a signed
+// binhost, and a completed job could commit with an empty artifact URL. These
+// facts only ever move forward, and a requeued attempt gets a new AttemptID,
+// so the durable row wins again as soon as it carries them.
+func preserveLocalGenerationFacts(durable *BuildStatus, local *BuildStatus) {
+	if local.AttemptID == "" || local.AttemptID != durable.AttemptID {
+		return
+	}
+	if local.Signed && !durable.Signed {
+		durable.Signed = true
+	}
+	if durable.Signed && durable.SigningKeyID == "" {
+		durable.SigningKeyID = local.SigningKeyID
+	}
+	if durable.ArtifactPath == "" {
+		durable.ArtifactPath = local.ArtifactPath
+	}
+	if durable.ArtifactURL == "" {
+		durable.ArtifactURL = local.ArtifactURL
+	}
+	if len(durable.Artifacts) == 0 {
+		durable.Artifacts = append([]string(nil), local.Artifacts...)
+	}
 }
 
 // Shutdown gracefully shuts down the manager.
@@ -1165,7 +1259,9 @@ func (m *Manager) Shutdown() {
 
 // SubmitBuild submits a new build request.
 func (m *Manager) SubmitBuild(req *BuildRequest) (string, error) {
-	m.StartWorkers()
+	if err := m.StartWorkers(); err != nil {
+		return "", err
+	}
 	// Reject the complete request before it can allocate a job ID, provision a
 	// VM, or be forwarded. Remote builders validate it again as defense in depth.
 	if err := validateBuildRequest(req); err != nil {
@@ -1311,6 +1407,12 @@ var (
 )
 
 const verificationCapabilityFile = signing.CapabilityMarkerName
+
+// quarantineOrphanAge is how old every byte of a capability-less quarantine
+// generation must be before cleanup may delete it. It is far larger than the
+// signer lease and SIGNER_WAIT_TIMEOUT_SECONDS so an in-flight generation on
+// any replica is never a candidate.
+const quarantineOrphanAge = 24 * time.Hour
 
 // extractVersionFromArtifact tries to extract version from artifact path.
 // Example: "/var/tmp/portage-artifacts/screenfetch-3.9.9-1.gpkg.tar" -> "3.9.9"
@@ -2065,9 +2167,11 @@ func (m *Manager) runBuildOnPullWorkerStableFenced(
 		compileFailure = "remote-compile"
 		return fmt.Errorf("outbound worker build failed: %s", remote.Error)
 	}
-	if err := m.checkCompileOutput(compileLease); err != nil {
-		compileFailure = "lease-fenced"
+	if reason, err := m.checkCompileOutput(jobID, compileLease); err != nil {
+		compileFailure = reason
 		return fmt.Errorf("distcc output fence rejected before collection: %w", err)
+	} else if reason != "" {
+		compileFailure = reason
 	}
 	if resultFence != nil {
 		if err := resultFence(); err != nil {
@@ -2095,8 +2199,11 @@ func (m *Manager) runBuildOnPullWorkerStableFenced(
 		return fmt.Errorf("outbound worker completed without a recorded artifact list")
 	}
 	commitFence := func() error {
-		if err := m.checkCompileOutput(compileLease); err != nil {
-			compileFailure = "lease-fenced"
+		reason, err := m.checkCompileOutput(jobID, compileLease)
+		if reason != "" {
+			compileFailure = reason
+		}
+		if err != nil {
 			return err
 		}
 		if resultFence != nil {
@@ -2373,6 +2480,10 @@ func (m *Manager) adoptSignedArtifacts(
 		"[sign] signed quarantine generation budget=%d/%d peak=%d",
 		budget.ActiveBytes, budget.LimitBytes, budget.PeakBytes,
 	))
+	signingKeyID := strings.TrimSpace(task.SigningKeyID)
+	if signingKeyID == "" {
+		return fmt.Errorf("signer completed task %s without reporting its key ID", task.ID)
+	}
 	m.jobsMu.Lock()
 	job, ok := m.jobs[jobID]
 	if ok {
@@ -2380,10 +2491,14 @@ func (m *Manager) adoptSignedArtifacts(
 		job.VerificationToken = outputToken
 		job.StagedArtifacts = rels
 		job.Signed = true
+		job.SigningKeyID = signingKeyID
 	}
 	m.jobsMu.Unlock()
 	if !ok {
 		return fmt.Errorf("job %s disappeared while adopting signer output", jobID)
+	}
+	if err := m.persistJobSnapshot(jobID); err != nil {
+		return fmt.Errorf("persist adopted signed generation: %w", err)
 	}
 	if sourceRoot != outputRoot && m.config.PhaseExecutorMode != "active" {
 		_ = os.RemoveAll(sourceRoot)
@@ -3426,20 +3541,22 @@ func (m *Manager) runBuildOnInstance(jobID string, instance *iac.Instance, req *
 				compileFailure = "remote-compile"
 				return fmt.Errorf("remote build failed: %s", snap.Error)
 			}
-			if err := m.checkCompileOutput(compileLease); err != nil {
-				compileFailure = "lease-fenced"
+			if reason, err := m.checkCompileOutput(jobID, compileLease); err != nil {
+				compileFailure = reason
 				return fmt.Errorf("distcc output fence rejected before collection: %w", err)
+			} else if reason != "" {
+				compileFailure = reason
 			}
 			// Success: pull every produced package off the instance into the
 			// central binhost BEFORE the VM can go away. The requested
 			// package's own file becomes the job's primary artifact;
 			// dependencies land alongside it (category preserved).
 			commitFence := func() error {
-				if err := m.checkCompileOutput(compileLease); err != nil {
-					compileFailure = "lease-fenced"
-					return err
+				reason, err := m.checkCompileOutput(jobID, compileLease)
+				if reason != "" {
+					compileFailure = reason
 				}
-				return nil
+				return err
 			}
 			if err := m.collectInstanceArtifacts(
 				jobID, baseURL, remoteJobID, req.PackageName, snap, commitFence,
@@ -3983,11 +4100,15 @@ func (m *Manager) updateStatus(jobID, status, instanceID, errorMsg string) bool 
 			*live = current
 		}
 		m.jobsMu.Unlock()
+		recordCompletedBuildMetric(previous.Status, current.Status)
+		recordFailedBuildMetric(previous.Status, current.Status)
 		m.emitStatus(&current)
 		return true
 	}
 	*job = current
 	m.jobsMu.Unlock()
+	recordCompletedBuildMetric(previous.Status, current.Status)
+	recordFailedBuildMetric(previous.Status, current.Status)
 
 	if m.jobLedger != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -3998,15 +4119,59 @@ func (m *Manager) updateStatus(jobID, status, instanceID, errorMsg string) bool 
 	return true
 }
 
+// persistJobSnapshot flushes a projection change that carries no state change
+// — the adopted signing result, the promoted artifact locations — into the
+// durable status snapshot immediately. Both are established in memory and
+// would otherwise stay memory-only until the next phase transition, which is a
+// network upload or a multi-second binhost regeneration away; the 5-second
+// ledger reconciler runs inside that window and reinstates the older snapshot.
+func (m *Manager) persistJobSnapshot(jobID string) error {
+	current, err := m.jobStatusSnapshot(jobID)
+	if err != nil {
+		return err
+	}
+	previous := *current
+	if m.scheduler != nil && current.AttemptID != "" {
+		return m.recordDurableTransition(&previous, current)
+	}
+	if m.jobLedger == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return m.jobLedger.RecordTransition(ctx, &previous, current)
+}
+
 func (m *Manager) recordDurableTransition(previous, current *BuildStatus) error {
 	lastWait := ""
+	attempts := 0
+	backoff := 200 * time.Millisecond
 	for {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		err := m.scheduler.RecordTransition(ctx, previous, current)
 		cancel()
 		capacity, waiting := AsPhaseCapacityError(err)
 		if !waiting {
-			return err
+			if !retryableLedgerError(err) || attempts >= maxLedgerTransitionRetries {
+				return err
+			}
+			// The caller turns a rejected transition into a terminal phase
+			// failure that also drops the worker lease, so lease recovery can
+			// no longer retry the job. A serialization failure, deadlock, lock
+			// timeout, or the five-second budget this loop imposed on itself
+			// must not cost the build.
+			attempts++
+			m.appendJobLog(current.JobID, fmt.Sprintf(
+				"[scheduler] retrying transient ledger transition (%d/%d): %v",
+				attempts, maxLedgerTransitionRetries, err,
+			))
+			select {
+			case <-m.stopCh:
+				return err
+			case <-time.After(backoff):
+			}
+			backoff *= 2
+			continue
 		}
 		message := fmt.Sprintf(
 			"[scheduler] waiting for project %s phase capacity (%d/%d)",
@@ -4022,6 +4187,60 @@ func (m *Manager) recordDurableTransition(previous, current *BuildStatus) error 
 		case <-time.After(500 * time.Millisecond):
 		}
 	}
+}
+
+// recordCompletedBuildMetric counts a build that reached the terminal
+// completed state. The success-rate panel divides this counter by
+// builds_total, which the HTTP admission path already increments, so leaving
+// it unwired rendered a red 0% on a cluster where every build had succeeded.
+func recordCompletedBuildMetric(previous, current string) {
+	if current == "completed" && previous != "completed" {
+		metrics.Default().IncBuildsSucceeded()
+	}
+}
+
+// recordFailedBuildMetric is its terminal-failure sibling. The counter's only
+// other writer is the legacy remote-builder HTTP client, which StartWorkers
+// refuses to run at all in the topology the public boundary requires, so the
+// "Builds Failed" panel and the failed series of the build-rate chart read a
+// flat zero however many builds break. The previous→current guard is the
+// success counter's: whichever of the phase path and updateStatus commits the
+// transition first counts it, and the other sees previous == "failed".
+func recordFailedBuildMetric(previous, current string) {
+	if current == "failed" && previous != "failed" {
+		metrics.Default().IncBuildsFailed()
+	}
+}
+
+// maxLedgerTransitionRetries bounds transient-failure retries so a database
+// that is genuinely down still fails the job instead of holding a phase lease
+// forever.
+const maxLedgerTransitionRetries = 4
+
+// retryableLedgerError separates transient PostgreSQL and transport conditions
+// from the ledger's own verdicts. A stale fence or a state mismatch is a real
+// answer and must reach the caller unchanged; a serialization failure
+// (40001), deadlock (40P01), lock-not-available (55P03), a timed-out attempt,
+// or a dropped connection says nothing about the job and is safe to repeat
+// because RecordTransition is idempotent on an unchanged status digest.
+func retryableLedgerError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		switch pgErr.Code {
+		case "40001", "40P01", "55P03":
+			return true
+		default:
+			return false
+		}
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr)
 }
 
 // appendRemoteBuildLog appends only the newly observed suffix of a builder
@@ -5246,6 +5465,11 @@ func (m *Manager) promoteJobArtifacts(jobID string) error {
 	if m.objectQuarantineEnabled() && m.onArtifactStored != nil {
 		m.onArtifactStored()
 	}
+	// Promotion is the only moment a package becomes publicly consumable, so
+	// it is where the stored-package counter belongs.
+	for range paths {
+		metrics.Default().IncPackagesStored()
+	}
 	pathByRel := make(map[string]string, len(rels))
 	webs := make([]string, 0, len(rels))
 	for i, rel := range rels {
@@ -5264,6 +5488,23 @@ func (m *Manager) promoteJobArtifacts(jobID string) error {
 		job.Artifacts = webs
 	}
 	m.jobsMu.Unlock()
+	// Publication is complete and irreversible above this line: the packages
+	// are in the public binhost and the Packages index names them. Both writes
+	// below are projections of that fact, and neither is the fence that
+	// authorized it — the publish phase's FinalizePhaseWork is, and it
+	// adjudicates on the phase claim and attempt fence rather than on the
+	// worker lease persistJobSnapshot additionally requires. Reporting a
+	// projection failure as a promotion failure sends the caller to
+	// failActivePhase and marks a job failed whose packages the world can
+	// already install, so both are logged and the phase commit decides the
+	// terminal state. A replica that genuinely lost its fence cannot commit
+	// either verdict, and its successor republishes nothing: the object
+	// generation ID is derived from the attempt, so publishObjectGeneration
+	// returns the existing keys untouched.
+	if err := m.persistJobSnapshot(jobID); err != nil {
+		m.appendJobLog(jobID,
+			"[publish] warning: artifacts are public but their locations were not projected: "+err.Error())
+	}
 	if m.metadata != nil {
 		publishedAt := time.Now().UTC()
 		for i := range records {
@@ -5274,7 +5515,8 @@ func (m *Manager) promoteJobArtifacts(jobID string) error {
 		err = m.metadata.RecordArtifacts(ctx, &status, records)
 		cancel()
 		if err != nil {
-			return fmt.Errorf("persist published artifact metadata: %w", err)
+			m.appendJobLog(jobID,
+				"[publish] warning: published artifact metadata was not recorded: "+err.Error())
 		}
 	}
 	m.cleanupArtifactQuarantine(jobID)
@@ -5534,9 +5776,18 @@ func (m *Manager) uploadPublicationMetadata(
 	if status.ResolvedContext != nil && status.ResolvedContext.ProfileID != "" {
 		profileID = status.ResolvedContext.ProfileID
 	}
+	// The manifest is immutable and every GPKG in this generation carries the
+	// key the signer actually used. GPGPublicKeyPath is rewritten on every
+	// signer start, so re-reading it here would stamp a rotated key ID onto an
+	// older generation; only the signer-reported value is authoritative.
 	signingKeyID := "unsigned"
-	if status.Signed && m.gpgKeyProvider != nil {
-		signingKeyID, _, _ = m.gpgKeyProvider()
+	if status.Signed {
+		signingKeyID = strings.TrimSpace(status.SigningKeyID)
+		if signingKeyID == "" {
+			return artifactstorage.GenerationManifest{}, "", nil, fmt.Errorf(
+				"signed generation has no signer-reported key ID to record",
+			)
+		}
 	}
 	manifest := artifactstorage.GenerationManifest{
 		SchemaVersion: artifactstorage.GenerationManifestSchema,

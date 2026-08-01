@@ -82,6 +82,7 @@ func validPublicServerConfig() *ServerConfig {
 		CORSAllowedOrigins: []string{
 			"https://build.example.test",
 		},
+		TrustedProxyCIDRs: []string{"172.18.0.0/16"},
 		IdentityProviders: []IdentityProviderConfig{{
 			ID:          "google",
 			Type:        "oidc",
@@ -93,7 +94,7 @@ func validPublicServerConfig() *ServerConfig {
 		}},
 		IdentityAdminSubjects: []string{"google:admin-subject"},
 		Database: DatabaseConfig{
-			Enabled: true, Required: true,
+			Enabled: true, Required: true, SSLMode: "verify-full",
 		},
 		Cache: CacheConfig{
 			Enabled: true, Required: true, Password: "redis-secret",
@@ -144,6 +145,7 @@ func configurePersistentExecutor(cfg *ServerConfig) {
 		"build-mode:native-gentoo",
 		"profile:pe/amd64/base-v1",
 		"image:pe/amd64/base@g17",
+		"egress:egress/internal@sha256:" + strings.Repeat("a", 64),
 		"phase:provision",
 		"phase:build",
 		"phase:verify",
@@ -1131,5 +1133,147 @@ func TestLoadBuilderDistCCAlphaConfig(t *testing.T) {
 		if strings.Contains(warning, "distcc") || strings.Contains(warning, "DISTCC") {
 			t.Fatalf("valid distcc config warning: %s", warning)
 		}
+	}
+}
+
+func TestStartupRejectsOptionalEnabledDatabase(t *testing.T) {
+	cfg := validPublicServerConfig()
+	cfg.DeploymentMode = DeploymentModeTrusted
+	cfg.StorageType = "local"
+	cfg.Database.Required = false
+	err := cfg.ValidateStartup()
+	if err == nil {
+		t.Fatal("enabled-but-optional database was accepted")
+	}
+	// Both settings are the operator's to choose between, and the rejection is
+	// the only place they learn which: a message that only names the pairing
+	// leaves a memory-only development deployment guessing which variable to
+	// flip and in which direction.
+	for _, remedy := range []string{
+		"DATABASE_REQUIRED=true", "DATABASE_ENABLED=false",
+	} {
+		if !strings.Contains(err.Error(), remedy) {
+			t.Fatalf("rejection does not name %s: %v", remedy, err)
+		}
+	}
+}
+
+func TestPublicDeploymentRequiresVerifiedDatabaseTLS(t *testing.T) {
+	cfg := validPublicServerConfig()
+	cfg.Database.SSLMode = "disable"
+	if err := cfg.ValidateStartup(); err == nil ||
+		!strings.Contains(err.Error(), "PGSSLMODE") {
+		t.Fatalf("public cleartext PostgreSQL error=%v", err)
+	}
+
+	// An explicit DATABASE_URL carries its own sslmode and stays operator-owned.
+	cfg = validPublicServerConfig()
+	cfg.Database.SSLMode = "disable"
+	cfg.Database.URL = "postgres://pe@db.internal:5432/pe?sslmode=verify-full"
+	if err := cfg.ValidateStartup(); err != nil {
+		t.Fatalf("explicit database URL was rejected: %v", err)
+	}
+}
+
+func TestStartupRejectsUnnormalizableDistCCPool(t *testing.T) {
+	cfg := validPublicServerConfig()
+	cfg.DeploymentMode = DeploymentModeTrusted
+	cfg.StorageType = "local"
+	cfg.DistCCAlphaEnabled = true
+	cfg.DistCCCHOST = "x86_64-pc-linux-gnu"
+	cfg.DistCCCompilerDigest = "sha256:not-a-digest"
+	cfg.DistCCToolchainImageGeneration = "gentoo-g1"
+	cfg.DistCCNetworkZone = "build-a"
+	err := cfg.ValidateStartup()
+	if err == nil || !strings.Contains(err.Error(), "compiler digest") {
+		t.Fatalf("invalid distcc compiler digest error=%v", err)
+	}
+	if len(cfg.Validate()) == 0 {
+		t.Fatal("invalid distcc pool produced no warning")
+	}
+
+	cfg.DistCCCompilerDigest = "sha256:" + strings.Repeat("b", 64)
+	if err := cfg.ValidateStartup(); err != nil {
+		t.Fatalf("normalizable distcc pool was rejected: %v", err)
+	}
+}
+
+func TestPersistentExecutorEgressCapabilityFollowsTheCatalog(t *testing.T) {
+	cfg := validPublicServerConfig()
+	cfg.DeploymentMode = DeploymentModeTrusted
+	cfg.StorageType = "local"
+	configurePersistentExecutor(cfg)
+	withoutEgress := make([]string, 0, len(cfg.ExecutorCapabilities))
+	for _, capability := range cfg.ExecutorCapabilities {
+		if !strings.HasPrefix(capability, "egress:") {
+			withoutEgress = append(withoutEgress, capability)
+		}
+	}
+
+	// PhaseCapabilityRequirements only asks for an egress label when the
+	// resolved catalog context enforces a policy, so a catalog without one must
+	// not force an executor to advertise a label nothing will ever match.
+	cfg.ExecutorCapabilities = withoutEgress
+	if err := cfg.ValidateStartup(); err != nil {
+		t.Fatalf("executor without a catalog egress policy was rejected: %v", err)
+	}
+
+	cfg.ExecutorCapabilities = append(
+		append([]string(nil), withoutEgress...),
+		"egress:egress/internal@sha256:short",
+	)
+	if err := cfg.ValidateStartup(); err == nil ||
+		!strings.Contains(err.Error(), "egress:<id>@sha256:<hex>") {
+		t.Fatalf("executor with unbound egress digest error=%v", err)
+	}
+
+	// Two policies would let the claim SQL decide which one the VM actually
+	// enforces, so the executor must still advertise at most one.
+	cfg.ExecutorCapabilities = append(
+		append([]string(nil), withoutEgress...),
+		"egress:egress/internal@sha256:"+strings.Repeat("a", 64),
+		"egress:egress/public@sha256:"+strings.Repeat("b", 64),
+	)
+	if err := cfg.ValidateStartup(); err == nil ||
+		!strings.Contains(err.Error(), "more than one egress label") {
+		t.Fatalf("executor with two egress capabilities error=%v", err)
+	}
+}
+
+// clientAddress() reads X-Forwarded-For only from a declared edge, so an
+// undeclared edge silently collapses every anonymous caller into one pre-auth
+// rate-limit bucket. A public deployment cannot be correct without it.
+func TestPublicDeploymentRequiresDeclaredTrustedProxies(t *testing.T) {
+	cfg := validPublicServerConfig()
+	cfg.TrustedProxyCIDRs = nil
+	if err := cfg.ValidateStartup(); err == nil ||
+		!strings.Contains(err.Error(), "TRUSTED_PROXY_CIDRS must list") {
+		t.Fatalf("public deployment without a declared edge error=%v", err)
+	}
+
+	cfg.TrustedProxyCIDRs = []string{"172.18.0.1"}
+	if err := cfg.ValidateStartup(); err == nil ||
+		!strings.Contains(err.Error(), "must be a CIDR block") {
+		t.Fatalf("public deployment with a bare edge address error=%v", err)
+	}
+}
+
+func TestTrustedProxyCIDRValidation(t *testing.T) {
+	t.Setenv("TRUSTED_PROXY_CIDRS", "10.0.0.0/8,not-a-cidr")
+	cfg, err := LoadServerConfig(filepath.Join(t.TempDir(), "missing.conf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.TrustedProxyCIDRs) != 2 {
+		t.Fatalf("unexpected trusted proxy CIDRs: %+v", cfg.TrustedProxyCIDRs)
+	}
+	found := false
+	for _, warning := range cfg.Validate() {
+		if strings.Contains(warning, "TRUSTED_PROXY_CIDRS contains an invalid CIDR") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("invalid trusted proxy CIDR produced no warning: %v", cfg.Validate())
 	}
 }

@@ -65,7 +65,8 @@ func TestPostgresDistributedBuildAlpha(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	if health := db.Check(ctx); !health.OK || health.SchemaVersion != 29 {
+	if health := db.Check(ctx); !health.OK ||
+		health.SchemaVersion != persistence.MaxSchemaVersion {
 		t.Fatalf("schema health=%+v", health)
 	}
 

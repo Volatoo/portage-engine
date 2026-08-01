@@ -388,6 +388,120 @@ func TestPostgresSchedulerFairnessAndAutoscaling(t *testing.T) {
 	testCapacityActuatorFences(
 		t, ctx, db, repo, poolID, workerID,
 	)
+	testCapacityActionInstanceBindings(
+		t, ctx, db, repo, policy, poolID,
+	)
+}
+
+// testCapacityActionInstanceBindings covers the reconcile pass that arrives
+// while an action is in retry backoff with a provider instance already bound
+// to it. Cancelling there used to leak a billed VM that no fenced write could
+// reach again.
+func testCapacityActionInstanceBindings(
+	t *testing.T,
+	ctx context.Context,
+	db *persistence.Database,
+	repo *persistence.JobRepository,
+	policy builder.SchedulerAutoscalePolicy,
+	poolID string,
+) {
+	t.Helper()
+	requested, err := repo.RequestCapacityAction(
+		ctx, poolID, "scale-up", 1, 0, "bound instance scale-up",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim, err := repo.ClaimCapacityAction(ctx, "actuator-c", time.Minute)
+	if err != nil || claim == nil || claim.ID != requested.ID {
+		t.Fatalf("bound instance claim=%+v err=%v", claim, err)
+	}
+	instance, err := repo.ReserveCapacityInstance(ctx, claim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.RetryCapacityAction(
+		ctx, claim, "provider provisioning timed out",
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.ReconcileAutoscaling(ctx, policy); err != nil {
+		t.Fatal(err)
+	}
+	var state, kind string
+	if err := db.Pool().QueryRow(ctx, `
+		SELECT state, action_kind
+		FROM scheduler_capacity_actions
+		WHERE id = $1
+	`, requested.ID).Scan(&state, &kind); err != nil ||
+		state != "requested" || kind != "scale-up" {
+		t.Fatalf(
+			"bound capacity action state=%q kind=%q err=%v", state, kind, err,
+		)
+	}
+	// Any action closed while its instance is still live must return to the
+	// queue with its binding intact, or the instance is stranded forever. The
+	// attempt count stands in for an action that has already failed six claims
+	// against a provider that keeps timing out, which is the case where the
+	// requeue delay decides whether the actuator backs off or spins.
+	if _, err := db.Pool().Exec(ctx, `
+		UPDATE scheduler_capacity_actions
+		SET state = 'canceled', claim_owner = '',
+		    claim_lease_expires_at = NULL, attempts = 6,
+		    completed_at = clock_timestamp()
+		WHERE id = $1
+	`, requested.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.ReconcileAutoscaling(ctx, policy); err != nil {
+		t.Fatal(err)
+	}
+	// The actuator's own diagnosis is the only record of why a live VM was
+	// abandoned, and the requeue has to serve the same bounded backoff a retry
+	// would have: 2^6 seconds at six attempts.
+	var reopenDetail string
+	var reopenBackoffSeconds float64
+	if err := db.Pool().QueryRow(ctx, `
+		SELECT failure_detail,
+		       extract(
+		         epoch FROM next_attempt_at - updated_at
+		       )::double precision
+		FROM scheduler_capacity_actions
+		WHERE id = $1
+	`, requested.ID).Scan(&reopenDetail, &reopenBackoffSeconds); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(reopenDetail, "provider provisioning timed out") ||
+		!strings.Contains(reopenDetail, "reopened") {
+		t.Fatalf("reopened capacity action failure_detail=%q", reopenDetail)
+	}
+	if reopenBackoffSeconds < 63 || reopenBackoffSeconds > 65 {
+		t.Fatalf(
+			"reopened capacity action requeue delay=%.3fs, want the 64s "+
+				"backoff six attempts earn", reopenBackoffSeconds,
+		)
+	}
+	// Everything below is about the surviving instance binding, so the parked
+	// action is released rather than waited out.
+	if _, err := db.Pool().Exec(ctx, `
+		UPDATE scheduler_capacity_actions
+		SET next_attempt_at = clock_timestamp()
+		WHERE id = $1
+	`, requested.ID); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := repo.ClaimCapacityAction(ctx, "actuator-d", time.Minute)
+	if err != nil || reopened == nil || reopened.ID != requested.ID {
+		t.Fatalf("reopened capacity claim=%+v err=%v", reopened, err)
+	}
+	resumed, err := repo.ReserveCapacityInstance(ctx, reopened)
+	if err != nil || resumed.ID != instance.ID ||
+		resumed.OwnerToken != instance.OwnerToken {
+		t.Fatalf(
+			"resumed capacity instance=%+v original=%+v err=%v",
+			resumed, instance, err,
+		)
+	}
 }
 
 func testCapacityActuatorFences(

@@ -64,17 +64,30 @@ func (r *Runner) RunOnce(ctx context.Context) (bool, error) {
 		task.ID, task.JobID, task.AttemptID, task.AttemptFence, task.ClaimFence, len(task.Artifacts))
 	heartbeatCtx, stopHeartbeat := context.WithCancel(ctx)
 	heartbeatDone := make(chan error, 1)
-	go r.renewLease(heartbeatCtx, task, heartbeatDone)
-	outputs, err := r.process(task)
+	go r.renewLease(heartbeatCtx, stopHeartbeat, task, heartbeatDone)
+	outputs, err := r.process(heartbeatCtx, task)
 	stopHeartbeat()
-	if heartbeatErr := <-heartbeatDone; err == nil && heartbeatErr != nil {
+	// A lost lease is the root cause of whatever process() reports after the
+	// heartbeat aborts it, so the renewal error outranks the cancellation.
+	if heartbeatErr := <-heartbeatDone; heartbeatErr != nil {
 		err = heartbeatErr
 	}
 	resultCtx, resultCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer resultCancel()
 	if err != nil {
-		r.removeOutput(task)
-		_ = r.Queue.FailSigning(resultCtx, task, err.Error())
+		// OutputToken derives from the task ID alone, so a task re-claimed after
+		// a lease expiry shares its output prefix with the previous claimant.
+		// FailSigning is fenced on (owner, claim_fence): only a successful
+		// transition proves this process still owned the claim, and therefore
+		// that the prefix it is about to erase is not a successor's signed
+		// generation. A lost race leaves the bytes for the current claimant.
+		if failErr := r.Queue.FailSigning(resultCtx, task, err.Error()); failErr != nil {
+			log.Printf("signing task failure was not recorded, leaving output to the current claimant (task=%s job=%s error=%v)",
+				task.ID, task.JobID, failErr)
+		} else if removeErr := r.removeOutput(task); removeErr != nil {
+			log.Printf("signing output cleanup failed (task=%s job=%s error=%v)",
+				task.ID, task.JobID, removeErr)
+		}
 		log.Printf("signing task failed (task=%s job=%s duration=%s error=%v)",
 			task.ID, task.JobID, time.Since(started).Round(time.Millisecond), err)
 		return true, nil
@@ -87,22 +100,27 @@ func (r *Runner) RunOnce(ctx context.Context) (bool, error) {
 	return true, nil
 }
 
-func (r *Runner) removeOutput(task *Task) {
+func (r *Runner) removeOutput(task *Task) error {
 	token, err := OutputToken(task.ID)
 	if err != nil {
-		return
+		return err
 	}
 	if r.Storage != nil {
-		_ = deleteQuarantineGeneration(r.Storage, token)
-		return
+		return deleteQuarantineGeneration(r.Storage, token)
 	}
 	root, err := TokenRoot(r.BinpkgPath, token)
-	if err == nil {
-		_ = os.RemoveAll(root)
+	if err != nil {
+		return err
 	}
+	return os.RemoveAll(root)
 }
 
-func (r *Runner) renewLease(ctx context.Context, task *Task, done chan<- error) {
+func (r *Runner) renewLease(
+	ctx context.Context,
+	abort context.CancelFunc,
+	task *Task,
+	done chan<- error,
+) {
 	interval := r.Lease / 3
 	if interval < time.Second {
 		interval = time.Second
@@ -119,6 +137,16 @@ func (r *Runner) renewLease(ctx context.Context, task *Task, done chan<- error) 
 			err := r.Queue.RenewSigning(renewCtx, task, r.Lease)
 			cancel()
 			if err != nil {
+				if ctx.Err() != nil {
+					// process() already returned and stopped the heartbeat; the
+					// renewal failed on our own cancellation, not on a lost lease.
+					done <- nil
+					return
+				}
+				// Without the lease another claimant may already own this task's
+				// output prefix, so stop signing now instead of racing it to the
+				// capability manifest.
+				abort()
 				done <- fmt.Errorf("renew signing task lease: %w", err)
 				return
 			}
@@ -126,9 +154,9 @@ func (r *Runner) renewLease(ctx context.Context, task *Task, done chan<- error) 
 	}
 }
 
-func (r *Runner) process(task *Task) ([]Artifact, error) {
+func (r *Runner) process(ctx context.Context, task *Task) ([]Artifact, error) {
 	if r.Storage != nil {
-		return r.processObject(task)
+		return r.processObject(ctx, task)
 	}
 	sourceRoot, err := TokenRoot(r.BinpkgPath, task.SourceToken)
 	if err != nil {
@@ -145,10 +173,10 @@ func (r *Runner) process(task *Task) ([]Artifact, error) {
 	if sourceRoot == outputRoot {
 		return nil, fmt.Errorf("signing source and output roots must differ")
 	}
-	return r.processRoots(task, sourceRoot, outputRoot, true)
+	return r.processRoots(ctx, task, sourceRoot, outputRoot, true)
 }
 
-func (r *Runner) processObject(task *Task) ([]Artifact, error) {
+func (r *Runner) processObject(ctx context.Context, task *Task) ([]Artifact, error) {
 	outputToken, err := OutputToken(task.ID)
 	if err != nil {
 		return nil, err
@@ -182,7 +210,7 @@ func (r *Runner) processObject(task *Task) ([]Artifact, error) {
 			return nil, fmt.Errorf("materialize signing input %q: %w", artifact.RelativePath, err)
 		}
 	}
-	outputs, err := r.processRoots(task, sourceRoot, outputRoot, false)
+	outputs, err := r.processRoots(ctx, task, sourceRoot, outputRoot, false)
 	if err != nil {
 		return nil, err
 	}
@@ -236,6 +264,11 @@ func (r *Runner) processObject(task *Task) ([]Artifact, error) {
 	if err != nil {
 		return nil, err
 	}
+	// The capability manifest is what makes this generation consumable, so it is
+	// the one write that must never happen after the lease is gone.
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("signing aborted before capability activation: %w", err)
+	}
 	if err := artifactstorage.UploadBytes(
 		r.Storage, capabilityKey, document, scratch,
 	); err != nil {
@@ -245,6 +278,7 @@ func (r *Runner) processObject(task *Task) ([]Artifact, error) {
 }
 
 func (r *Runner) processRoots(
+	ctx context.Context,
 	task *Task,
 	sourceRoot, outputRoot string,
 	activateLocalCapability bool,
@@ -272,6 +306,9 @@ func (r *Runner) processRoots(
 	outputs := make([]Artifact, 0, len(task.Artifacts))
 	var outputBytes int64
 	for _, input := range task.Artifacts {
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("signing aborted: %w", err)
+		}
 		output, err := r.signArtifact(
 			sourceRoot, outputRoot, input, maxOutputBytes-outputBytes,
 		)

@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"runtime"
 	"strings"
 	"time"
@@ -24,7 +25,7 @@ func (s *Server) rateLimitMiddleware(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		identity := stripPort(r.RemoteAddr)
+		identity := s.clientAddress(r)
 		principal, authenticated := iam.PrincipalFromContext(r.Context())
 		projectSelector := strings.TrimSpace(r.Header.Get("X-Project-ID"))
 		if authenticated {
@@ -68,16 +69,18 @@ func (s *Server) rateLimitMiddleware(next http.Handler) http.Handler {
 }
 
 // authenticationRateLimitMiddleware bounds work performed before an identity
-// has been authenticated. It uses a separate source-IP bucket from the
+// has been authenticated. It uses a separate client-address bucket from the
 // authenticated subject bucket above, so invalid credentials cannot bypass
 // protection while valid identities still receive their own write budget.
+// Buckets are only independent per source when TRUSTED_PROXY_CIDRS declares the
+// edge; behind an undeclared proxy every caller shares the proxy's address.
 func (s *Server) authenticationRateLimitMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if s.cache == nil || !authenticationRateLimitedRequest(r) {
 			next.ServeHTTP(w, r)
 			return
 		}
-		identity := "preauth|" + stripPort(r.RemoteAddr) + "|" + r.URL.Path
+		identity := "preauth|" + s.clientAddress(r) + "|" + r.URL.Path
 		ctx, cancel := context.WithTimeout(r.Context(), 750*time.Millisecond)
 		allowed, err := s.cache.Allow(ctx, identity,
 			s.config.Cache.RateLimitPerMinute, s.config.Cache.RateLimitBurst)
@@ -101,11 +104,94 @@ func (s *Server) authenticationRateLimitMiddleware(next http.Handler) http.Handl
 	})
 }
 
+// authenticationRateLimitedRequest selects what the pre-auth budget covers.
+// Anonymous credential issuance belongs inside it: device authorization, the
+// device-code poll and the session exchange mint or exchange a session without
+// a principal, so the authenticated bucket never sees them and nothing else
+// bounds them. The remaining anonymous paths must stay outside it — the binhost
+// inventory, the release public key and the public read views are what
+// `emerge --getbinpkg` calls from every consumer of this service, and behind an
+// edge TRUSTED_PROXY_CIDRS does not declare they would all share one address
+// bucket: the product's primary public function taken down from one client.
 func authenticationRateLimitedRequest(r *http.Request) bool {
-	return r != nil &&
-		r.Method != http.MethodOptions &&
-		strings.HasPrefix(r.URL.Path, "/api/v1/") &&
+	if r == nil || r.Method == http.MethodOptions ||
+		!strings.HasPrefix(r.URL.Path, "/api/v1/") {
+		return false
+	}
+	return anonymousCredentialPath(r.URL.Path) ||
 		!publicControlPlanePath(r.URL.Path)
+}
+
+// anonymousCredentialPath names the unauthenticated routes that hand out or
+// trade a Portage Engine session. Backchannel logout is deliberately absent:
+// it is IdP-driven, revokes rather than issues, and throttling it would leave
+// a revoked session live.
+func anonymousCredentialPath(path string) bool {
+	return path == "/api/v1/iam/exchange" ||
+		path == "/api/v1/iam/device/authorization" ||
+		path == "/api/v1/iam/device/token"
+}
+
+// clientAddress returns the address anonymous buckets key on. Behind the
+// documented edge every request arrives from the proxy's own address, so
+// RemoteAddr alone collapses every caller into one bucket: one client at the
+// per-minute budget would lock out CLI login for everyone. The rightmost
+// X-Forwarded-For hop outside TRUSTED_PROXY_CIDRS is the last address a trusted
+// proxy actually observed; hops to its left are client-controlled and ignored.
+// With no trusted proxy declared the header is never believed.
+func (s *Server) clientAddress(r *http.Request) string {
+	address := normalizeAddress(r.RemoteAddr)
+	if len(s.trustedProxies) == 0 || !s.trustedProxy(address) {
+		return address
+	}
+	hops := forwardedHops(r)
+	for index := len(hops) - 1; index >= 0; index-- {
+		address = hops[index]
+		if !s.trustedProxy(address) {
+			break
+		}
+	}
+	return address
+}
+
+func (s *Server) trustedProxy(address string) bool {
+	parsed, err := netip.ParseAddr(address)
+	if err != nil {
+		return false
+	}
+	parsed = parsed.Unmap()
+	for _, prefix := range s.trustedProxies {
+		if prefix.Contains(parsed) {
+			return true
+		}
+	}
+	return false
+}
+
+func forwardedHops(r *http.Request) []string {
+	var hops []string
+	for _, value := range r.Header.Values("X-Forwarded-For") {
+		for _, hop := range strings.Split(value, ",") {
+			if hop = normalizeAddress(hop); hop != "" {
+				hops = append(hops, hop)
+			}
+		}
+	}
+	return hops
+}
+
+// normalizeAddress strips any port and IPv6 brackets so a bucket key and a
+// TRUSTED_PROXY_CIDRS membership test agree on one spelling per address.
+func normalizeAddress(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if host, _, err := net.SplitHostPort(raw); err == nil {
+		raw = host
+	}
+	raw = strings.Trim(raw, "[]")
+	if parsed, err := netip.ParseAddr(raw); err == nil {
+		return parsed.Unmap().String()
+	}
+	return raw
 }
 
 // responseWriter wraps http.ResponseWriter to capture the status code and bytes written.

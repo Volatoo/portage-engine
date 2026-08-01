@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly script_dir
+
 usage() {
   echo "usage: $0 <owner/repository> <candidate|stable> <ghcr-release-manifest@sha256:...>" >&2
   exit 2
@@ -53,7 +56,15 @@ cosign verify-blob --bundle "$verify_tmp/SHA256SUMS.sigstore.json" \
   --certificate-identity-regexp "$candidate_identity" \
   --certificate-oidc-issuer "$issuer" \
   "$verify_tmp/SHA256SUMS"
-manifest_digest="$(python3 scripts/release_manifest.py validate \
+# Validate the signed bundle against the release config it shipped with. The
+# verifier's own working tree is not authoritative over a release it did not
+# build: one added cmd/ target there would fail every published version.
+[ -f "$verify_tmp/release-config.json" ] || {
+  echo "signed bundle does not carry the release config it was built against" >&2
+  exit 1
+}
+manifest_digest="$(python3 "$script_dir/release_manifest.py" \
+  --config "$verify_tmp/release-config.json" validate \
   --manifest "$verify_tmp/release-manifest.json" --root "$verify_tmp")"
 if [ "$(jq -r '.release.channel' "$verify_tmp/release-manifest.json")" != "$channel" ]; then
   echo "signed manifest channel does not match the requested verification policy" >&2

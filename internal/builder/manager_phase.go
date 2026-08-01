@@ -143,6 +143,13 @@ func (m *Manager) executePhaseClaim(claim *PhaseWorkClaim) {
 		m.jobsMu.Lock()
 		m.jobs[claim.JobID] = &completed
 		m.jobsMu.Unlock()
+		// Active phase mode never reaches completion through updateStatus, so
+		// this is the only place the success counter can be written in the
+		// topology the public boundary requires. It runs after the atomic
+		// finalize so a rejected commit never counts a success, and the
+		// previous→current guard keeps a legacy updateStatus that later sees
+		// the same job from counting it twice.
+		recordCompletedBuildMetric(previous.Status, completed.Status)
 		m.emitStatus(&completed)
 		m.appendJobLog(claim.JobID,
 			"[phase] publish and job completion committed atomically")
@@ -239,6 +246,10 @@ func (m *Manager) failActivePhase(claim *PhaseWorkClaim, cause error) {
 	m.jobsMu.Lock()
 	m.jobs[claim.JobID] = &failed
 	m.jobsMu.Unlock()
+	// The mirror of the publish path's success count: active mode terminates a
+	// job here and never through updateStatus, and it runs after the atomic
+	// commit so a rejected failure commit counts nothing.
+	recordFailedBuildMetric(previous.Status, failed.Status)
 	m.emitStatus(&failed)
 	m.removeArtifactQuarantineFiles(claim.JobID)
 }
@@ -624,7 +635,7 @@ func (m *Manager) applyPhaseContext(
 	job.VerificationToken = value.VerificationToken
 	job.StagedArtifacts = append([]string(nil), value.StagedArtifacts...)
 	job.StagedPrimary = value.StagedPrimary
-	job.Signed = value.Signed
+	job.Signed, job.SigningKeyID = value.Signed, value.SigningKeyID
 	job.ArtifactPath, job.ArtifactURL = value.ArtifactPath, value.ArtifactURL
 	job.ArtifactPaths = append([]string(nil), value.ArtifactPaths...)
 	job.Artifacts = append([]string(nil), value.Artifacts...)
@@ -645,7 +656,7 @@ func (m *Manager) capturePhaseContext(
 		value.VerificationToken = job.VerificationToken
 		value.StagedArtifacts = append([]string(nil), job.StagedArtifacts...)
 		value.StagedPrimary = job.StagedPrimary
-		value.Signed = job.Signed
+		value.Signed, value.SigningKeyID = job.Signed, job.SigningKeyID
 		value.ArtifactPath, value.ArtifactURL = job.ArtifactPath, job.ArtifactURL
 		value.ArtifactPaths = append([]string(nil), job.ArtifactPaths...)
 		value.Artifacts = append([]string(nil), job.Artifacts...)

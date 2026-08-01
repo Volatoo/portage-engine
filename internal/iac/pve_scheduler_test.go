@@ -287,3 +287,23 @@ func TestNodeLessLoaded(t *testing.T) {
 		t.Error("on equal free memory, lower CPU load should win")
 	}
 }
+
+// TestPVEHTTPClientIsReused pins the polling loops to one transport: a fresh
+// Transport per request keeps every idle connection and its reader goroutine
+// alive for the life of the process.
+func TestPVEHTTPClientIsReused(t *testing.T) {
+	verifying, insecure := pveHTTPClient(false), pveHTTPClient(true)
+	if pveHTTPClient(false) != verifying || pveHTTPClient(true) != insecure {
+		t.Fatal("pveHTTPClient built a new client per call")
+	}
+	if verifying == insecure {
+		t.Fatal("the insecure opt-in leaked into the verifying client")
+	}
+	if transport, ok := insecure.Transport.(*http.Transport); !ok ||
+		transport.TLSClientConfig == nil || !transport.TLSClientConfig.InsecureSkipVerify {
+		t.Fatal("insecure client lost its CLOUD_PVE_INSECURE transport")
+	}
+	if verifying.Transport != nil {
+		t.Fatal("verifying client must keep the shared default transport")
+	}
+}

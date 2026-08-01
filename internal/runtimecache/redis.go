@@ -20,12 +20,18 @@ import (
 )
 
 // Health reports Redis availability and live control-plane presence.
+// WakeSupervised/WakeSubscribed describe the cross-replica wake subscription:
+// pooled commands reconnect on their own, a dead subscription does not, and a
+// replica that lost it silently degrades to PostgreSQL polling.
 type Health struct {
-	Enabled       bool      `json:"enabled"`
-	OK            bool      `json:"ok"`
-	LastError     string    `json:"last_error,omitempty"`
-	LastSuccessAt time.Time `json:"last_success_at,omitempty"`
-	Presence      int64     `json:"control_plane_presence"`
+	Enabled        bool      `json:"enabled"`
+	OK             bool      `json:"ok"`
+	LastError      string    `json:"last_error,omitempty"`
+	LastSuccessAt  time.Time `json:"last_success_at,omitempty"`
+	Presence       int64     `json:"control_plane_presence"`
+	WakeSupervised bool      `json:"wake_supervised"`
+	WakeSubscribed bool      `json:"wake_subscribed"`
+	WakeError      string    `json:"wake_error,omitempty"`
 }
 
 // Client provides optional Redis-backed acceleration without owning correctness state.
@@ -33,8 +39,14 @@ type Client struct {
 	redis  *redis.Client
 	prefix string
 	mu     sync.RWMutex
+	poolOK bool
 	health Health
 }
+
+const (
+	wakeResubscribeMin = 100 * time.Millisecond
+	wakeResubscribeMax = 30 * time.Second
+)
 
 // Open connects to Redis and verifies the configured endpoint.
 func Open(ctx context.Context, cfg config.CacheConfig) (*Client, error) {
@@ -75,14 +87,39 @@ func (c *Client) record(err error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.health.Enabled = true
+	c.poolOK = err == nil
 	if err != nil {
-		c.health.OK = false
 		c.health.LastError = err.Error()
+		c.refreshOK()
 		return
 	}
-	c.health.OK = true
 	c.health.LastError = ""
 	c.health.LastSuccessAt = time.Now().UTC()
+	c.refreshOK()
+}
+
+// recordWake tracks the supervised wake subscription separately from pool
+// liveness. Presence and rate limiting keep succeeding on pooled commands while
+// the subscription is gone, so record(nil) alone would report a replica that no
+// longer hears cross-replica wakes as fully healthy.
+func (c *Client) recordWake(subscribed bool, err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.health.WakeSupervised = true
+	c.health.WakeSubscribed = subscribed
+	switch {
+	case err != nil:
+		c.health.WakeError = err.Error()
+	case subscribed:
+		c.health.WakeError = ""
+	}
+	c.refreshOK()
+}
+
+// refreshOK recomputes the single health verdict; the caller holds c.mu.
+func (c *Client) refreshOK() {
+	c.health.OK = c.poolOK &&
+		(!c.health.WakeSupervised || c.health.WakeSubscribed)
 }
 
 // Health probes Redis and returns the latest cache health snapshot.
@@ -134,9 +171,41 @@ func (c *Client) PublishWake(ctx context.Context) error {
 	return err
 }
 
-// SubscribeWake invokes wake for ephemeral scheduler notifications.
+// SubscribeWake invokes wake for ephemeral scheduler notifications and keeps
+// the subscription alive for the life of ctx. A pub/sub receive loop returns on
+// its first connection error; without this supervisor the replica would never
+// hear another cross-replica wake and would fall back to 1s polling until it
+// was restarted, with nothing in /health saying so.
 func (c *Client) SubscribeWake(ctx context.Context, wake func()) error {
-	return c.subscribe(ctx, c.key("scheduler", "wake"), func(string) { wake() })
+	if c == nil {
+		return fmt.Errorf("redis is disabled")
+	}
+	backoff := wakeResubscribeMin
+	for {
+		err := c.subscribeReady(ctx, c.key("scheduler", "wake"),
+			func() {
+				c.recordWake(true, nil)
+				backoff = wakeResubscribeMin
+			},
+			func(string) error {
+				wake()
+				return nil
+			})
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		c.recordWake(false, err)
+		timer := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+		if backoff *= 2; backoff > wakeResubscribeMax {
+			backoff = wakeResubscribeMax
+		}
+	}
 }
 
 // JobEvent is the low-cardinality payload broadcast after a durable job update.
@@ -165,14 +234,16 @@ func (c *Client) StreamJobEvents(ctx context.Context, receive func(string) error
 	return c.subscribeErr(ctx, c.key("events", "jobs"), receive)
 }
 
-func (c *Client) subscribe(ctx context.Context, channel string, receive func(string)) error {
-	return c.subscribeErr(ctx, channel, func(payload string) error {
-		receive(payload)
-		return nil
-	})
+func (c *Client) subscribeErr(ctx context.Context, channel string, receive func(string) error) error {
+	return c.subscribeReady(ctx, channel, nil, receive)
 }
 
-func (c *Client) subscribeErr(ctx context.Context, channel string, receive func(string) error) error {
+// subscribeReady calls ready once the channel subscription is confirmed, which
+// is the only moment a supervisor can distinguish "connected" from "retrying".
+func (c *Client) subscribeReady(
+	ctx context.Context, channel string, ready func(),
+	receive func(string) error,
+) error {
 	if c == nil {
 		return fmt.Errorf("redis is disabled")
 	}
@@ -181,6 +252,9 @@ func (c *Client) subscribeErr(ctx context.Context, channel string, receive func(
 	if _, err := pubsub.Receive(ctx); err != nil {
 		c.record(err)
 		return err
+	}
+	if ready != nil {
+		ready()
 	}
 	for {
 		message, err := pubsub.ReceiveMessage(ctx)

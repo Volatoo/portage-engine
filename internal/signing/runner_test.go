@@ -2,9 +2,11 @@ package signing
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -37,6 +39,123 @@ func (q *testQueue) RenewSigning(context.Context, *Task, time.Duration) error {
 func (q *testQueue) FailSigning(_ context.Context, _ *Task, detail string) error {
 	q.failed = detail
 	return nil
+}
+
+// lostLeaseQueue models the queue a claimant sees after its lease expired and
+// the row was re-claimed: renewals stop applying and the fenced FailSigning
+// update matches no row.
+type lostLeaseQueue struct {
+	task   *Task
+	lost   chan struct{}
+	once   sync.Once
+	failed string
+}
+
+func (q *lostLeaseQueue) ClaimSigning(context.Context, string, time.Duration) (*Task, error) {
+	task := q.task
+	q.task = nil
+	return task, nil
+}
+
+func (q *lostLeaseQueue) CompleteSigning(context.Context, *Task, string, []Artifact) error {
+	return fmt.Errorf("signing task lease or originating attempt fence is stale")
+}
+
+func (q *lostLeaseQueue) RenewSigning(context.Context, *Task, time.Duration) error {
+	q.once.Do(func() { close(q.lost) })
+	return fmt.Errorf("signing task lease or originating attempt fence is stale")
+}
+
+func (q *lostLeaseQueue) FailSigning(_ context.Context, _ *Task, detail string) error {
+	q.failed = detail
+	return fmt.Errorf("signing task lease is stale")
+}
+
+// gatedStorage holds the signer inside its input download until the lease has
+// been lost, so the heartbeat is guaranteed to race an in-flight signing run.
+type gatedStorage struct {
+	artifactstorage.Storage
+	gate    <-chan struct{}
+	mu      sync.Mutex
+	deleted []string
+}
+
+func (s *gatedStorage) Download(remotePath, localPath string) error {
+	select {
+	case <-s.gate:
+	case <-time.After(30 * time.Second):
+		return fmt.Errorf("lease renewal never ran")
+	}
+	return s.Storage.Download(remotePath, localPath)
+}
+
+func (s *gatedStorage) Delete(remotePath string) error {
+	s.mu.Lock()
+	s.deleted = append(s.deleted, remotePath)
+	s.mu.Unlock()
+	return s.Storage.Delete(remotePath)
+}
+
+func TestRunnerKeepsOutputGenerationAfterLosingItsLease(t *testing.T) {
+	root := t.TempDir()
+	local, err := artifactstorage.NewLocalStorage(filepath.Join(root, "objects"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceToken := strings.Repeat("e", 32)
+	relative := "app-misc/hello-2.12.2.gpkg.tar"
+	source := filepath.Join(root, "unsigned.gpkg.tar")
+	writeUnsignedGPKG(t, source)
+	digest, size, err := fileDigest(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceKey, _ := artifactstorage.QuarantineGenerationKey(sourceToken, relative)
+	if err := local.Upload(source, sourceKey); err != nil {
+		t.Fatal(err)
+	}
+	task := &Task{
+		ID: uuid.NewString(), JobID: uuid.NewString(), AttemptID: uuid.NewString(),
+		AttemptFence: 1, State: "claimed", SourceToken: sourceToken,
+		Architecture: "amd64", Owner: "signer-1", ClaimFence: 1,
+		Artifacts: []Artifact{{RelativePath: relative, InputDigest: digest, InputSize: size}},
+	}
+	// The successor claimant already published its signed generation under the
+	// shared output prefix; the loser below must not touch either object.
+	outputToken, _ := OutputToken(task.ID)
+	winnerKey, _ := artifactstorage.QuarantineGenerationKey(outputToken, relative)
+	winnerCapability, _ := artifactstorage.QuarantineCapabilityKey(outputToken)
+	if err := local.Upload(source, winnerKey); err != nil {
+		t.Fatal(err)
+	}
+	if err := artifactstorage.UploadBytes(
+		local, winnerCapability, []byte("{}"), filepath.Join(root, "scratch"),
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	queue := &lostLeaseQueue{task: task, lost: make(chan struct{})}
+	store := &gatedStorage{Storage: local, gate: queue.lost}
+	runner := &Runner{
+		Queue: queue, Storage: store, ScratchDir: filepath.Join(root, "scratch"),
+		Owner: "signer-1", Lease: 3 * time.Second, GPG: testGPG(t),
+	}
+	worked, err := runner.RunOnce(context.Background())
+	if err != nil || !worked {
+		t.Fatalf("RunOnce worked=%v err=%v", worked, err)
+	}
+	if !strings.Contains(queue.failed, "renew signing task lease") {
+		t.Fatalf("lost lease was not reported as the failure cause: %q", queue.failed)
+	}
+	if len(store.deleted) != 0 {
+		t.Fatalf("claimant without a lease deleted the output generation: %v", store.deleted)
+	}
+	for _, key := range []string{winnerKey, winnerCapability} {
+		exists, err := local.Exists(key)
+		if err != nil || !exists {
+			t.Fatalf("successor object %q was removed: exists=%v err=%v", key, exists, err)
+		}
+	}
 }
 
 func TestRunnerSignsDigestBoundGeneration(t *testing.T) {

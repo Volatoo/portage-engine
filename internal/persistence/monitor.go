@@ -14,12 +14,20 @@ import (
 )
 
 const (
-	monitorRetentionDays   = 30
-	monitorMinimumSamples  = 5
-	monitorSLOTarget       = 95.0
-	monitorCacheTTL        = 30 * time.Second
-	monitorLagAlertSeconds = 120
+	monitorRetentionDays  = 30
+	monitorMinimumSamples = 5
+	monitorSLOTarget      = 95.0
+	monitorCacheTTL       = 30 * time.Second
 )
+
+// monitorLagBoundSeconds is the upper bound of the LagSeconds reading, not a
+// threshold anything alerts or badges on. LagSeconds reports the age of the
+// snapshot being served, and targetHistoryStatus reloads the moment a snapshot
+// reaches monitorCacheTTL, so every reading a reader can ever see is strictly
+// below this number by construction and comparing the two is always false.
+// It is published so a reader can scale a lag reading against the refresh
+// contract that produced it — 3s of 30s means something, 3s alone does not.
+const monitorLagBoundSeconds = int64(monitorCacheTTL / time.Second)
 
 func monitorTargetID(targetKey string) string {
 	digest := sha256.Sum256([]byte(targetKey))
@@ -37,7 +45,7 @@ func (r *JobRepository) targetHistoryStatus(
 	age := time.Since(r.monitorAt)
 	if !r.monitorAt.IsZero() && age >= 0 && age < monitorCacheTTL {
 		projection, err := loadCachedMonitorProjection(
-			ctx, r.db.Pool(), r.monitor.Projection.ProjectedWatermarkAt,
+			ctx, r.db.Pool(), r.monitor.Projection.ProjectedWatermarkAt, age,
 		)
 		if err != nil {
 			return builder.TargetHistoryStatus{}, err
@@ -103,13 +111,16 @@ func loadMonitorProjection(
 		return builder.MonitorProjectionStatus{},
 			fmt.Errorf("read monitor projection watermarks: %w", err)
 	}
-	return monitorProjectionStatus(now, source, projected), nil
+	// Both watermarks come from one statement over the same base tables, so a
+	// full load is current by construction and is zero seconds stale.
+	return monitorProjectionStatus(now, source, projected, 0), nil
 }
 
 func loadCachedMonitorProjection(
 	ctx context.Context,
 	q Querier,
 	projected *time.Time,
+	snapshotAge time.Duration,
 ) (builder.MonitorProjectionStatus, error) {
 	var now time.Time
 	var source *time.Time
@@ -132,12 +143,20 @@ func loadCachedMonitorProjection(
 		return builder.MonitorProjectionStatus{},
 			fmt.Errorf("read monitor source watermark: %w", err)
 	}
-	return monitorProjectionStatus(now, source, projected), nil
+	return monitorProjectionStatus(now, source, projected, snapshotAge), nil
 }
 
+// monitorProjectionStatus reports how long the snapshot behind the projected
+// watermark has been serving terminal events it does not contain. The distance
+// between the two watermarks cannot be that measure: monitor_job_outcomes is a
+// plain view over the same base tables, so a watermark gap only appears while
+// a cached snapshot is being served, and its size is the age of the previous
+// terminal event — hours on a quiet control plane — not the staleness of what
+// the caller is reading.
 func monitorProjectionStatus(
 	now time.Time,
 	source, projected *time.Time,
+	snapshotAge time.Duration,
 ) builder.MonitorProjectionStatus {
 	status := builder.MonitorProjectionStatus{
 		Valid:                  true,
@@ -146,7 +165,7 @@ func monitorProjectionStatus(
 		SourceWatermarkPresent: source != nil,
 		SourceWatermarkAt:      source,
 		ProjectedWatermarkAt:   projected,
-		AlertThresholdSeconds:  monitorLagAlertSeconds,
+		AlertThresholdSeconds:  monitorLagBoundSeconds,
 	}
 	if source == nil {
 		if projected != nil {
@@ -160,11 +179,7 @@ func monitorProjectionStatus(
 		return status
 	}
 	status.State = "lagging"
-	if projected != nil {
-		status.LagSeconds = int64(source.Sub(*projected).Seconds())
-	} else if now.After(*source) {
-		status.LagSeconds = int64(now.Sub(*source).Seconds())
-	}
+	status.LagSeconds = int64(snapshotAge.Seconds())
 	if status.LagSeconds < 0 {
 		status.LagSeconds = 0
 	}

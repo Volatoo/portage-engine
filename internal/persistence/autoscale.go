@@ -566,6 +566,10 @@ func requestCapacityActionTx(
 	if len(reason) > capacityActionMaxDetail {
 		reason = reason[:capacityActionMaxDetail]
 	}
+	// The refresh must not repurpose an action a provider instance is already
+	// bound to: rewriting a bound scale-down into a scale-up would make the
+	// same row the create and the delete owner of two different instances and
+	// abandon the drain. A bound action keeps its kind until it closes.
 	if _, err := q.Exec(ctx, `
 		INSERT INTO scheduler_capacity_actions (
 		  id, pool_id, action_kind, state, requested_slots,
@@ -583,6 +587,17 @@ func requestCapacityActionTx(
 		  failure_detail = '',
 		  updated_at = clock_timestamp()
 		WHERE scheduler_capacity_actions.state = 'requested'
+		  AND NOT EXISTS (
+		    SELECT 1
+		    FROM scheduler_capacity_instances instance
+		    WHERE (
+		            instance.create_action_id =
+		              scheduler_capacity_actions.id
+		            OR instance.delete_action_id =
+		              scheduler_capacity_actions.id
+		          )
+		      AND instance.state NOT IN ('deleted', 'failed')
+		  )
 	`, uuid.New(), poolID, kind, requestedSlots, observedSlots, reason); err != nil {
 		return fmt.Errorf("enqueue capacity pool %s action: %w", poolID, err)
 	}
@@ -597,13 +612,101 @@ func cancelRequestedCapacityActionTx(
 	if len(reason) > capacityActionMaxDetail {
 		reason = reason[:capacityActionMaxDetail]
 	}
+	// A requested action is either brand new or an actuator retry waiting on
+	// its backoff, and a retry can already own a provider instance. Closing it
+	// there strands a billed VM: only a claimed action may write
+	// scheduler_capacity_instances, and no claim path accepts a canceled
+	// action. Demand is re-derived on every reconcile, so leaving a bound
+	// action open until the actuator reaches a terminal instance state is the
+	// only recoverable choice.
 	if _, err := q.Exec(ctx, `
-		UPDATE scheduler_capacity_actions
+		UPDATE scheduler_capacity_actions action
 		SET state = 'canceled', failure_detail = $2,
 		    completed_at = clock_timestamp(), updated_at = clock_timestamp()
-		WHERE pool_id = $1 AND state = 'requested'
+		WHERE action.pool_id = $1 AND action.state = 'requested'
+		  AND NOT EXISTS (
+		    SELECT 1
+		    FROM scheduler_capacity_instances instance
+		    WHERE (
+		            instance.create_action_id = action.id
+		            OR instance.delete_action_id = action.id
+		          )
+		      AND instance.state NOT IN ('deleted', 'failed')
+		  )
 	`, poolID, reason); err != nil {
 		return fmt.Errorf("cancel stale capacity pool %s action: %w", poolID, err)
+	}
+	return nil
+}
+
+// reopenBoundCapacityActionsTx returns closed actions that still own a live
+// provider instance to the claim queue. Every scheduler_capacity_instances
+// write is fenced on a claimed action, so a canceled or failed owner leaves
+// the instance permanently unreachable: ClaimCapacityAction ignores closed
+// actions and SelectCapacityInstanceForDrain matches neither a new claim nor
+// an active candidate. Reopening the original row keeps the existing
+// create/delete binding, so the actuator resumes the same provider identity
+// instead of allocating a second VM.
+func reopenBoundCapacityActionsTx(ctx context.Context, q Querier) error {
+	if _, err := q.Exec(ctx, `
+		WITH reopen AS (
+		  SELECT DISTINCT ON (action.pool_id) action.id
+		  FROM scheduler_capacity_actions action
+		  JOIN scheduler_capacity_instances instance
+		    ON (
+		         (
+		           instance.create_action_id = action.id
+		           AND action.action_kind = 'scale-up'
+		         )
+		         OR (
+		           instance.delete_action_id = action.id
+		           AND action.action_kind = 'scale-down'
+		         )
+		       )
+		   AND instance.state IN ('provisioning', 'draining', 'deleting')
+		  WHERE action.state IN ('canceled', 'failed')
+		    AND NOT EXISTS (
+		      SELECT 1
+		      FROM scheduler_capacity_actions open_action
+		      WHERE open_action.pool_id = action.pool_id
+		        AND open_action.state IN (
+		          'requested', 'claimed', 'waiting-for-heartbeat',
+		          'waiting-for-drain'
+		        )
+		    )
+		  ORDER BY action.pool_id, action.requested_at, action.id
+		)
+		UPDATE scheduler_capacity_actions action
+		SET state = 'requested', claim_owner = '',
+		    claim_lease_expires_at = NULL, completed_at = NULL,
+		    -- A reopened action is a retry, not a fresh request: the claim that
+		    -- closed it can hard-fail again on every pass for as long as the
+		    -- instance sits in provisioning, draining, or deleting. Requeuing
+		    -- at clock_timestamp() made every reconcile tick a new provider
+		    -- call, so this reuses the backoff RetryCapacityAction computes
+		    -- from the same attempts counter and walks up to the same ceiling.
+		    next_attempt_at = clock_timestamp() + make_interval(
+		      secs => LEAST(300, power(2, LEAST(action.attempts, 8))::integer)
+		    ),
+		    -- failure_detail is the only place the actuator's reason for
+		    -- abandoning a live VM survives: this table keeps one narrative
+		    -- column per row and has no history table, so the note is appended
+		    -- behind that reason rather than written over it. left() applies
+		    -- the same cap every Go writer truncates a detail to, and trims the
+		    -- note before the diagnosis it is annotating.
+		    failure_detail = left(
+		      CASE
+		        WHEN action.failure_detail = '' THEN ''
+		        ELSE action.failure_detail || ' | '
+		      END ||
+		      'reopened: a live provider instance is bound to this action',
+		      $1::integer
+		    ),
+		    updated_at = clock_timestamp()
+		FROM reopen
+		WHERE action.id = reopen.id
+	`, capacityActionMaxDetail); err != nil {
+		return fmt.Errorf("reopen bound capacity actions: %w", err)
 	}
 	return nil
 }
@@ -618,6 +721,9 @@ func reconcileCapacityActionsTx(
 	pools []builder.SchedulerCapacityPoolStatus,
 	activeSlots int,
 ) error {
+	if err := reopenBoundCapacityActionsTx(ctx, q); err != nil {
+		return err
+	}
 	if policy.Mode != "actuate" {
 		for _, pool := range pools {
 			if err := cancelRequestedCapacityActionTx(

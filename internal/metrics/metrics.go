@@ -13,7 +13,24 @@ import (
 var (
 	once     sync.Once
 	registry *Metrics
+	// published exposes the process registry to recorders that live outside
+	// the server package. Unlike New it cannot create, enable, disable, or
+	// re-register anything, so a library that only counts can never decide the
+	// process's metrics configuration by being initialized first.
+	published atomic.Pointer[Metrics]
+	// silent answers recorders that run before New. Its enabled flag is false,
+	// so every recorder returns before touching an unallocated expvar.
+	silent = &Metrics{}
 )
+
+// Default returns the process-wide registry for packages that only record
+// metrics. It never changes the registry's configuration.
+func Default() *Metrics {
+	if current := published.Load(); current != nil {
+		return current
+	}
+	return silent
+}
 
 // Config holds metrics configuration.
 type Config struct {
@@ -68,6 +85,24 @@ type SchedulerSnapshot struct {
 	DistCCNetworkBytes      int64
 	DistCCQueueMillis       int64
 	DistCCFailures          map[string]int64
+
+	// Lifetime job census read from the durable ledger. Terminal counts only
+	// ever grow — a completed job never un-completes and retention hides rows
+	// rather than deleting them — so exposing them as counters is sound, and it
+	// is the only way the scraped role can publish a completion total at all:
+	// the process that increments the in-memory success counter is the phase
+	// executor, which no scrape job reaches.
+	JobsSubmitted int64
+	JobsSucceeded int64
+	JobsFailed    int64
+
+	// Worker Gateway executor census. The heartbeat Registry behind
+	// portage_builders_* is only written by the legacy HTTP registration
+	// routes, so under the mTLS gateway topology these are the counts that
+	// describe the executors actually taking work.
+	GatewayWorkersActive     int64
+	GatewayWorkersCapability int64
+	GatewayWorkersStale      int64
 }
 
 // Metrics collects various system metrics.
@@ -182,6 +217,7 @@ func New(cfg *Config) *Metrics {
 				return time.Since(registry.startTime).Seconds()
 			}))
 		}
+		published.Store(registry)
 	})
 
 	// Update enabled flag if different. Note: this only toggles the runtime
@@ -229,6 +265,47 @@ func (m *Metrics) IncBuildsFailed() {
 		return
 	}
 	m.buildsFailed.Add(1)
+}
+
+// RaiseBuildsTotal, RaiseBuildsSucceeded and RaiseBuildsFailed lift the build
+// counters to a durable-ledger census taken at scrape time. They raise instead
+// of adding on purpose: the census already contains every build this process
+// executed, so a process that runs both the admission role and the phase
+// executor would otherwise count its own builds twice. Raising is also what
+// keeps the exported series a counter when the two sources disagree — a replica
+// reading a lagging projection publishes the value it already published rather
+// than a decrease Prometheus would read as a process restart.
+func (m *Metrics) RaiseBuildsTotal(count int64) {
+	if !m.enabled.Load() {
+		return
+	}
+	raiseCounter(m.buildsTotal, count)
+}
+
+// RaiseBuildsSucceeded lifts the successful-build counter to the ledger census.
+func (m *Metrics) RaiseBuildsSucceeded(count int64) {
+	if !m.enabled.Load() {
+		return
+	}
+	raiseCounter(m.buildsSucceeded, count)
+}
+
+// RaiseBuildsFailed lifts the failed-build counter to the ledger census.
+func (m *Metrics) RaiseBuildsFailed(count int64) {
+	if !m.enabled.Load() {
+		return
+	}
+	raiseCounter(m.buildsFailed, count)
+}
+
+// raiseCounter moves counter up to value, never down and never by summation.
+// The read and the write are not one atomic step, but the two writers converge:
+// an Add that lands in between is already reflected in the next census, so the
+// following scrape restores it.
+func raiseCounter(counter *expvar.Int, value int64) {
+	if value > counter.Value() {
+		counter.Set(value)
+	}
 }
 
 // SetBuildsQueued sets the number of queued builds.
@@ -416,6 +493,26 @@ func (m *Metrics) PrometheusHandler() http.Handler {
 			}
 		}
 
+		// The durable scheduler is the only authority on how deep the queue
+		// actually is, and it is read here anyway. Refresh the queue gauge from
+		// it before the exposition writes the gauge, or the queue panel and its
+		// alert stay pinned at zero behind any backlog.
+		//
+		// The completion counters need the same treatment for a different
+		// reason: they are incremented in the phase executor, and the only
+		// process a scrape job reaches is the one serving the API. Deriving
+		// them from the ledger census puts the success rate's numerator and
+		// denominator in the same scraped process instead of leaving the panel
+		// dividing this replica's submissions by another process's successes.
+		var scheduler SchedulerSnapshot
+		if schedulerProvider != nil {
+			scheduler = schedulerProvider()
+			m.SetBuildsQueued(scheduler.QueuedTasks)
+			m.RaiseBuildsTotal(scheduler.JobsSubmitted)
+			m.RaiseBuildsSucceeded(scheduler.JobsSucceeded)
+			m.RaiseBuildsFailed(scheduler.JobsFailed)
+		}
+
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 
 		// Build metrics
@@ -435,16 +532,21 @@ func (m *Metrics) PrometheusHandler() http.Handler {
 		_, _ = fmt.Fprintf(w, "# TYPE portage_builds_queued gauge\n")
 		_, _ = fmt.Fprintf(w, "portage_builds_queued %d\n", m.buildsQueued.Value())
 
-		// Builder metrics
-		_, _ = fmt.Fprintf(w, "# HELP portage_builders_active Number of active builders.\n")
+		// Builder metrics. These three describe the legacy HTTP heartbeat
+		// registry only — the one fed by /api/v1/builders/register and
+		// /heartbeat. A deployment running the mTLS Worker Gateway registers no
+		// builder there and must read portage_gateway_workers_* instead, so the
+		// topology is named in every HELP string rather than left to whoever
+		// wires the panel.
+		_, _ = fmt.Fprintf(w, "# HELP portage_builders_active Enabled, non-offline builders in the legacy HTTP heartbeat registry; zero under the mTLS Worker Gateway topology, which reports portage_gateway_workers_active.\n")
 		_, _ = fmt.Fprintf(w, "# TYPE portage_builders_active gauge\n")
 		_, _ = fmt.Fprintf(w, "portage_builders_active %d\n", m.buildersActive.Value())
 
-		_, _ = fmt.Fprintf(w, "# HELP portage_builders_healthy Number of healthy builders.\n")
+		_, _ = fmt.Fprintf(w, "# HELP portage_builders_healthy Legacy HTTP heartbeat registry builders last reporting online or busy.\n")
 		_, _ = fmt.Fprintf(w, "# TYPE portage_builders_healthy gauge\n")
 		_, _ = fmt.Fprintf(w, "portage_builders_healthy %d\n", m.buildersHealthy.Value())
 
-		_, _ = fmt.Fprintf(w, "# HELP portage_builder_capacity Total builder capacity.\n")
+		_, _ = fmt.Fprintf(w, "# HELP portage_builder_capacity Concurrent builds advertised by enabled, non-offline builders in the legacy HTTP heartbeat registry.\n")
 		_, _ = fmt.Fprintf(w, "# TYPE portage_builder_capacity gauge\n")
 		_, _ = fmt.Fprintf(w, "portage_builder_capacity %d\n", m.builderCapacity.Value())
 
@@ -492,7 +594,6 @@ func (m *Metrics) PrometheusHandler() http.Handler {
 		_, _ = fmt.Fprintf(w, "portage_uptime_seconds %.2f\n", time.Since(m.startTime).Seconds())
 
 		if schedulerProvider != nil {
-			scheduler := schedulerProvider()
 			writeSchedulerPrometheus(w, scheduler)
 		}
 	})
@@ -509,6 +610,13 @@ func writeSchedulerPrometheus(
 		{"portage_scheduler_queued_tasks", "Queued durable scheduler tasks.", snapshot.QueuedTasks},
 		{"portage_scheduler_unschedulable_tasks", "Queued tasks without a matching active executor.", snapshot.UnschedulableTasks},
 		{"portage_scheduler_running_tasks", "Running durable scheduler tasks.", snapshot.RunningTasks},
+		// The executor inventory of the mTLS Worker Gateway topology, taken
+		// from the same durable rows the scheduler dispatches against. Named
+		// apart from portage_builders_* because the two count different
+		// populations and only one of them is non-zero in a given deployment.
+		{"portage_gateway_workers_active", "Worker Gateway executors whose durable heartbeat is inside the freshness window; the mTLS gateway counterpart of portage_builders_active.", snapshot.GatewayWorkersActive},
+		{"portage_gateway_workers_capability_labeled", "Fresh Worker Gateway executors advertising at least one capability label, so capability-constrained jobs are dispatchable.", snapshot.GatewayWorkersCapability},
+		{"portage_gateway_workers_stale", "Registered Worker Gateway executors with no heartbeat inside the freshness window.", snapshot.GatewayWorkersStale},
 		{"portage_scheduler_fair_eligible_projects", "Projects currently eligible for fair scheduling.", snapshot.EligibleProjects},
 		{"portage_scheduler_fair_starved_projects", "Projects promoted by the anti-starvation threshold.", snapshot.StarvedProjects},
 		{"portage_scheduler_fair_max_wait_seconds", "Largest queue wait observed at a fair dispatch.", snapshot.MaxQueueWaitSeconds},
@@ -596,7 +704,7 @@ func writeMonitorProjectionPrometheus(
 		w, "portage_monitor_projection_source_watermark_present %d\n",
 		boolMetric(snapshot.ProjectionSourcePresent),
 	)
-	_, _ = fmt.Fprintln(w, "# HELP portage_monitor_projection_lag_seconds Durable terminal-event time distance from the cached Monitor projection watermark to its source watermark; before the first projection, source-event age by database clock; zero when current or empty.")
+	_, _ = fmt.Fprintln(w, "# HELP portage_monitor_projection_lag_seconds How long the cached Monitor snapshot has been serving terminal events it does not contain; zero while current or empty, bounded above by the read-through cache TTL.")
 	_, _ = fmt.Fprintln(w, "# TYPE portage_monitor_projection_lag_seconds gauge")
 	_, _ = fmt.Fprintf(
 		w, "portage_monitor_projection_lag_seconds %d\n",

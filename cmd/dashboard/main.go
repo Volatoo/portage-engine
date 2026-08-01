@@ -58,13 +58,24 @@ func main() {
 	}
 	initCancel()
 
-	// HTTP server configuration
+	// HTTP server configuration.
+	//
+	// No WriteTimeout: it is a deadline on the whole response, and the two
+	// bodies with no bounded length — proxied binary-package downloads and the
+	// job event stream — would be cut off mid-flight by any value that is
+	// survivable for the rest of the routes.
+	//
+	// ReadTimeout stays: nothing this dashboard accepts is an open-ended
+	// upload, so bounding how long a client may take to deliver its request is
+	// free, and without it a body dribbled a byte at a time holds a connection
+	// (and its handler goroutine) open forever — ReadHeaderTimeout has already
+	// been satisfied by then and never looks at the body.
 	httpServer := &http.Server{
-		Addr:         fmt.Sprintf(":%d", cfg.Port),
-		Handler:      dash.Router(),
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 15 * time.Second,
-		IdleTimeout:  60 * time.Second,
+		Addr:              fmt.Sprintf(":%d", cfg.Port),
+		Handler:           dash.Router(),
+		ReadHeaderTimeout: 15 * time.Second,
+		ReadTimeout:       60 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
 
 	// Start server in goroutine

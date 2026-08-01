@@ -227,8 +227,17 @@ func systemAdminPath(path string) bool {
 }
 
 func stepUpRequired(r *http.Request) bool {
-	if r == nil || r.Method == http.MethodGet || r.Method == http.MethodHead ||
-		r.Method == http.MethodOptions {
+	if r == nil || r.Method == http.MethodOptions {
+		return false
+	}
+	// The web shell is a GET, but it opens an interactive SSH session on a
+	// build instance whose default account is root. It is the one read-method
+	// route that outranks every write below, so it is decided before the
+	// read-method exemption.
+	if r.URL.Path == "/api/v1/instances/shell" {
+		return true
+	}
+	if r.Method == http.MethodGet || r.Method == http.MethodHead {
 		return false
 	}
 	switch r.URL.Path {
@@ -239,6 +248,10 @@ func stepUpRequired(r *http.Request) bool {
 	case "/api/v1/projects/policy":
 		return r.Method == http.MethodPut
 	case "/api/v1/builds/delete", "/api/v1/iam/sessions/revoke-all":
+		return true
+	case "/api/v1/iam/device/decision":
+		// Approving a CLI device code mints a second, independently expiring
+		// session credential. It must not cost less than revoking one.
 		return true
 	case "/api/v1/heartbeat":
 		return false

@@ -35,6 +35,12 @@ if [[ ! -r "${backup_path}" ]]; then
   echo "backup is not readable: ${backup_path}" >&2
   exit 2
 fi
+# The PGDATA storage prohibition below is an `if ... | rg -q ...` condition,
+# where set -e cannot see rc 127; without ripgrep it would silently pass.
+if ! command -v rg >/dev/null 2>&1; then
+  echo "ripgrep is required for the PGDATA storage assertion" >&2
+  exit 2
+fi
 if [[ ! "${restore_db}" =~ ^portage_restore_[a-zA-Z0-9_]+$ ]]; then
   echo "restore database must start with portage_restore_ and contain only letters, digits, or underscores" >&2
   exit 2

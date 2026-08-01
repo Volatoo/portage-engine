@@ -108,6 +108,57 @@ func TestBuilderPolicyRequiresAllowlistExactPoolAndIsolatedNetwork(t *testing.T)
 	}
 }
 
+func TestNormalizeAtomReducesEveryClientAtomForm(t *testing.T) {
+	for _, test := range []struct {
+		atom string
+		want string
+	}{
+		{"dev-qt/qtwebengine", "dev-qt/qtwebengine"},
+		{"=dev-qt/qtwebengine-6.7.2", "dev-qt/qtwebengine"},
+		{">=sys-devel/llvm-18.1.8-r1", "sys-devel/llvm"},
+		{"dev-lang/python:3.11", "dev-lang/python"},
+		{"~dev-libs/boost-1.83.0", "dev-libs/boost"},
+		{"!media-libs/mesa[vulkan]", "media-libs/mesa"},
+		{"=app-text/docbook-xml-dtd-4.5*", "app-text/docbook-xml-dtd"},
+		{"sys-libs/glibc::gentoo", "sys-libs/glibc"},
+	} {
+		got, ok := NormalizeAtom(test.atom)
+		if !ok || got != test.want {
+			t.Fatalf("NormalizeAtom(%q) = %q,%t, want %q", test.atom, got, ok, test.want)
+		}
+	}
+	for _, atom := range []string{"", "llvm", "/", "dev-qt/", "a/b/c"} {
+		if got, ok := NormalizeAtom(atom); ok {
+			t.Fatalf("NormalizeAtom(%q) accepted %q", atom, got)
+		}
+	}
+}
+
+func TestLeaseRejectsUnboundedOrMalformedEligibleAtoms(t *testing.T) {
+	poolID, _ := testPool().ID()
+	lease := Lease{
+		ID: "lease-a", WorkerID: "worker-a", WorkerEndpoint: "10.44.0.8:3632",
+		BuilderID: "builder-a", BuilderNetworkIdentity: "spiffe://build/builder-a",
+		AttemptID: "attempt-a", AttemptFence: 4,
+		Fence: 1, Slots: 2, PoolID: poolID, Pool: testPool(),
+		FallbackPolicy: FallbackLocal, ExpiresAt: time.Now().Add(time.Minute),
+		EligibleAtoms: []string{"sys-devel/llvm"},
+	}
+	if err := lease.Validate(time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	versioned := lease
+	versioned.EligibleAtoms = []string{"=sys-devel/llvm-18.1.8"}
+	if err := versioned.Validate(time.Now()); err == nil {
+		t.Fatal("lease carried an unreduced atom form")
+	}
+	unbounded := lease
+	unbounded.EligibleAtoms = make([]string, maxEligibleAtoms+1)
+	if err := unbounded.Validate(time.Now()); err == nil {
+		t.Fatal("lease carried an unbounded eligible atom set")
+	}
+}
+
 func TestObservationRejectsUnboundedLabels(t *testing.T) {
 	if err := (Observation{Outcome: OutcomeRemote, Count: 3, NetworkBytes: 42}).Validate(); err != nil {
 		t.Fatal(err)

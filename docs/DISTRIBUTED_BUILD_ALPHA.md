@@ -1,10 +1,11 @@
 # Distributed Build Alpha
 
 Distributed Build Alpha is an optional compile-only acceleration milestone. It
-does not block Public Beta and is disabled by default. PostgreSQL schema v29
-owns the repository-side inventory and leases; migrations 00027 and 00028 are
-reserved by the CLI device-flow and monitoring milestones, so final integration
-must be `00027 -> 00028 -> 00029`.
+does not block Public Beta and is disabled by default. Migration 00029 owns the
+repository-side inventory and leases; 00027 and 00028 are reserved by the CLI
+device-flow and monitoring milestones and 00030 by CLI session derivation, so
+final integration must be `00027 -> 00028 -> 00029 -> 00030`, landing on the
+pinned PostgreSQL schema v30.
 
 ## Scheduling boundary
 

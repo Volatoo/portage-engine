@@ -452,6 +452,11 @@ func (r *JobRepository) RenewPhaseWork(
 		return fmt.Errorf("phase claim and positive lease are required")
 	}
 	err := r.db.WithTx(ctx, pgx.TxOptions{}, func(q Querier) error {
+		// The renewal ticker and the phase-executing goroutine share this
+		// claim pointer, so the renewed expiry is read into a local instead of
+		// written back through it. PostgreSQL remains the only authority for
+		// the lease; a caller that needs the new deadline must read it there.
+		var leaseExpiresAt time.Time
 		if err := q.QueryRow(ctx, `
 			UPDATE phase_work_items
 			SET lease_expires_at = clock_timestamp() + $4::interval,
@@ -461,7 +466,7 @@ func (r *JobRepository) RenewPhaseWork(
 			  AND lease_expires_at > clock_timestamp()
 			RETURNING lease_expires_at
 		`, claim.ID, claim.ClaimOwner, claim.ClaimFence, lease.String()).Scan(
-			&claim.LeaseExpiresAt,
+			&leaseExpiresAt,
 		); err != nil {
 			return err
 		}

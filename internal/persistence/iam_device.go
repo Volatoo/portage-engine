@@ -305,7 +305,8 @@ func (r *IAMRepository) PollDeviceAuthorization(
 				INSERT INTO iam_sessions (
 					id, subject_id, token_hash, provider_session_id,
 					provider_token_id, issued_at, authenticated_at,
-					expires_at, last_seen_at, acr, amr
+					expires_at, last_seen_at, acr, amr,
+					session_kind, derived_from_session_id
 				)
 				SELECT $2, source.subject_id, $3, source.provider_session_id,
 				       source.provider_token_id, clock_timestamp(),
@@ -314,7 +315,10 @@ func (r *IAMRepository) PollDeviceAuthorization(
 				         source.expires_at,
 				         clock_timestamp() + make_interval(secs => $6)
 				       ),
-				       clock_timestamp(), source.acr, source.amr
+				       clock_timestamp(), source.acr, source.amr,
+				       -- The CLI token is this browser session in another
+				       -- shape: revoking the approver must reach it too.
+				       'cli', source.id
 				FROM iam_device_authorizations AS device
 				JOIN iam_sessions AS source
 				  ON source.id = device.approver_session_id

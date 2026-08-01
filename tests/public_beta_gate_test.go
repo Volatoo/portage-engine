@@ -3,9 +3,12 @@ package tests
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -63,6 +66,8 @@ func TestPublicEdgeReferenceDeniesBackendAndWebShell(t *testing.T) {
 		"limit_conn_zone $binary_remote_addr zone=source_ip_connections:",
 		"limit_req_zone $binary_remote_addr zone=public_requests:",
 		"limit_req_zone $binary_remote_addr zone=identity_requests:",
+		"limit_req_status 429;",
+		"limit_conn_status 429;",
 		"proxy_cookie_flags ~ secure httponly samesite=lax;",
 		"location ^~ /shell/ { return 404; }",
 		"location = /api/shell { return 404; }",
@@ -93,6 +98,59 @@ func TestPublicEdgeDeviceIAMUsesIdentityLimitAndNoStore(t *testing.T) {
 	} {
 		if !strings.Contains(block, required) {
 			t.Errorf("device IAM edge location is missing %q", required)
+		}
+	}
+}
+
+// The device token endpoint is polled at the interval the server advertises, so
+// its edge budget has to be derived from that interval rather than shared with
+// the browser login that runs on the same source IP.
+func TestPublicEdgeDeviceTokenPollingBudgetMatchesAdvertisedInterval(t *testing.T) {
+	nginx := readRepositoryFile(t, "deploy/public-edge/nginx.conf.template")
+	iam := readRepositoryFile(t, "internal/server/iam.go")
+	interval := 0
+	for _, line := range strings.Split(iam, "\n") {
+		if !strings.Contains(line, "deviceAuthorizationInterval = ") {
+			continue
+		}
+		if _, err := fmt.Sscanf(
+			strings.TrimSpace(line), "deviceAuthorizationInterval = %d", &interval,
+		); err != nil {
+			t.Fatalf("cannot read the advertised device interval: %v", err)
+		}
+	}
+	if interval <= 0 {
+		t.Fatal("deviceAuthorizationInterval is not declared in internal/server/iam.go")
+	}
+	minimumRate := 60 / interval
+
+	zone := regexp.MustCompile(
+		`limit_req_zone \$binary_remote_addr zone=device_token_requests:\S+ rate=(\d+)r/m;`,
+	).FindStringSubmatch(nginx)
+	if zone == nil {
+		t.Fatal("the device token endpoint has no dedicated per-minute rate zone")
+	}
+	rate, err := strconv.Atoi(zone[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rate < minimumRate {
+		t.Errorf("device token zone rate=%dr/m, want at least %dr/m for a %ds poll interval",
+			rate, minimumRate, interval)
+	}
+
+	block := nginxLocationBlock(t, nginx, "location = /api/v1/iam/device/token {")
+	if !strings.Contains(block, "limit_req zone=device_token_requests burst=10 nodelay;") {
+		t.Error("device token location does not use its dedicated budget")
+	}
+	if strings.Contains(block, "zone=identity_requests") {
+		t.Error("device token location still shares the browser login identity budget")
+	}
+	// A default 503 is indistinguishable from an outage and carries no retry
+	// semantics, so the identity gate's 429 assertion could never discriminate.
+	for _, required := range []string{"limit_req_status 429;", "limit_conn_status 429;"} {
+		if !strings.Contains(nginx, required) {
+			t.Errorf("edge template is missing %q", required)
 		}
 	}
 }

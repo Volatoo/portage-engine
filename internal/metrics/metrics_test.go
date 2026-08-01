@@ -110,6 +110,30 @@ func TestPrometheusSchedulerSnapshot(t *testing.T) {
 	}
 }
 
+func TestPrometheusQueueGaugeFollowsTheSchedulerSnapshot(t *testing.T) {
+	m := New(&Config{Enabled: true})
+	m.SetSchedulerProvider(func() SchedulerSnapshot {
+		return SchedulerSnapshot{QueuedTasks: 23}
+	})
+	t.Cleanup(func() { m.SetSchedulerProvider(nil) })
+	request := httptest.NewRequest(http.MethodGet, "/metrics/prometheus", nil)
+	response := httptest.NewRecorder()
+	m.PrometheusHandler().ServeHTTP(response, request)
+	if !strings.Contains(response.Body.String(), "portage_builds_queued 23") {
+		t.Fatalf("queue gauge did not follow the scheduler snapshot:\n%s", response.Body.String())
+	}
+}
+
+func TestDefaultRegistryCannotChangeConfiguration(t *testing.T) {
+	m := New(&Config{Enabled: true})
+	if Default() != m {
+		t.Fatal("Default did not return the process registry")
+	}
+	if !Default().IsEnabled() {
+		t.Fatal("Default disabled the process registry")
+	}
+}
+
 func TestPrometheusOmitsProjectionMetricsWithoutPostgreSQLSnapshot(t *testing.T) {
 	m := New(&Config{Enabled: true})
 	m.SetSchedulerProvider(func() SchedulerSnapshot {
@@ -536,6 +560,101 @@ func TestPasswordEdgeCases(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestPrometheusCompletionCountersFollowTheLedgerCensus covers the split the
+// deployed topology creates: the phase executor increments builds_succeeded in
+// its own process, and the only process Prometheus scrapes is the one serving
+// the API. Fed solely from the phase path the scraped success counter stays at
+// whatever this process happened to build itself while builds_total counts
+// every submission, so the success-rate panel renders red on a healthy cluster.
+func TestPrometheusCompletionCountersFollowTheLedgerCensus(t *testing.T) {
+	m := New(&Config{Enabled: true})
+	// Well above anything the counters reach earlier in this package's tests,
+	// which share the process-wide registry.
+	const submitted, succeeded, failed = 10000011, 10000007, 10000003
+	census := SchedulerSnapshot{
+		JobsSubmitted: submitted, JobsSucceeded: succeeded, JobsFailed: failed,
+	}
+	m.SetSchedulerProvider(func() SchedulerSnapshot { return census })
+	t.Cleanup(func() { m.SetSchedulerProvider(nil) })
+
+	// Local increments the census already accounts for: a process running both
+	// roles must not have its own builds counted twice.
+	m.IncBuildsTotal()
+	m.IncBuildsSucceeded()
+	m.IncBuildsFailed()
+
+	expected := []string{
+		"portage_builds_total 10000011",
+		"portage_builds_succeeded_total 10000007",
+		"portage_builds_failed_total 10000003",
+	}
+	body := scrapePrometheus(t, m)
+	for _, line := range expected {
+		if !strings.Contains(body, line) {
+			t.Fatalf("prometheus body missing %q:\n%s", line, body)
+		}
+	}
+
+	// A replica reading a projection that has fallen behind must republish what
+	// it already published; a counter that drops reads as a process restart.
+	census = SchedulerSnapshot{
+		JobsSubmitted: submitted - 5, JobsSucceeded: succeeded - 5,
+		JobsFailed: failed - 5,
+	}
+	body = scrapePrometheus(t, m)
+	for _, line := range expected {
+		if !strings.Contains(body, line) {
+			t.Fatalf("counter decreased with the census, missing %q:\n%s", line, body)
+		}
+	}
+}
+
+// TestPrometheusExposesGatewayWorkerInventory pins the executor census of the
+// mTLS gateway topology, where the legacy heartbeat registry behind
+// portage_builders_* is never written and reads zero on a full cluster.
+func TestPrometheusExposesGatewayWorkerInventory(t *testing.T) {
+	m := New(&Config{Enabled: true})
+	m.SetSchedulerProvider(func() SchedulerSnapshot {
+		return SchedulerSnapshot{
+			GatewayWorkersActive: 6, GatewayWorkersCapability: 4,
+			GatewayWorkersStale: 2,
+		}
+	})
+	t.Cleanup(func() { m.SetSchedulerProvider(nil) })
+
+	body := scrapePrometheus(t, m)
+	for _, expected := range []string{
+		"portage_gateway_workers_active 6",
+		"portage_gateway_workers_capability_labeled 4",
+		"portage_gateway_workers_stale 2",
+	} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("prometheus body missing %q:\n%s", expected, body)
+		}
+	}
+	// Whoever wires a panel must be able to tell the two inventories apart from
+	// the exposition alone, without reading the server source.
+	for _, help := range []string{
+		"# HELP portage_builders_active Enabled, non-offline builders in the legacy HTTP heartbeat registry",
+		"# HELP portage_gateway_workers_active Worker Gateway executors",
+	} {
+		if !strings.Contains(body, help) {
+			t.Fatalf("exposition does not name the topology, missing %q:\n%s", help, body)
+		}
+	}
+}
+
+func scrapePrometheus(t *testing.T, m *Metrics) string {
+	t.Helper()
+	request := httptest.NewRequest(http.MethodGet, "/metrics/prometheus", nil)
+	response := httptest.NewRecorder()
+	m.PrometheusHandler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("prometheus status=%d", response.Code)
+	}
+	return response.Body.String()
 }
 
 // TestConcurrentNewAndEnabledAccess exercises concurrent New calls (which toggle

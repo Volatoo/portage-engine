@@ -15,6 +15,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/slchris/portage-engine/internal/distcc"
 )
 
 // insecureJWTSecrets is a list of well-known insecure JWT secrets that must
@@ -33,6 +35,7 @@ var executorCapabilityPattern = regexp.MustCompile(
 	`^[a-z][a-z0-9-]{0,31}:[a-zA-Z0-9][a-zA-Z0-9+._/@:-]{0,479}$`,
 )
 var executorZonePattern = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
+var egressPolicyDigestPattern = regexp.MustCompile(`^sha256:[a-f0-9]{64}$`)
 var executorCapacityInstancePattern = regexp.MustCompile(
 	`^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`,
 )
@@ -168,6 +171,7 @@ type ServerConfig struct {
 	IdentityAdminSubjects              []string // provider-id:external-subject
 	BuilderToken                       string   // Shared secret the server presents to remote builders (empty = no builder auth)
 	CORSAllowedOrigins                 []string // Allowed CORS origins (empty = allow all for backward compatibility)
+	TrustedProxyCIDRs                  []string // Reverse proxies whose X-Forwarded-For may be believed (empty = trust none)
 	MaxRequestBodyBytes                int64    // Maximum request body size in bytes (0 = default 10MB)
 	CatalogPath                        string   // Server-owned profile/repository/image catalog JSON (empty = compatibility catalog)
 	ImageFactoryStatusPath             string   // Optional read-only image-factory milestone/evidence status JSON
@@ -346,6 +350,18 @@ func (c *ServerConfig) ValidateStartup() error {
 			DeploymentModeTrusted, DeploymentModePublic,
 		)
 	}
+	// An enabled-but-optional database is the one combination that boots with
+	// two job authorities: PostgreSQL when it answers, process memory when it
+	// does not. Nothing ships that pairing, and a replica that silently drifts
+	// into the in-memory half leaks provisioned VMs no other replica can see.
+	if c.Database.Enabled && !c.Database.Required {
+		return fmt.Errorf(
+			"DATABASE_ENABLED=true with DATABASE_REQUIRED=false splits job authority between PostgreSQL and process memory: set DATABASE_REQUIRED=true to make PostgreSQL the only authority, or DATABASE_ENABLED=false to run entirely in process memory",
+		)
+	}
+	if err := c.distCCPoolContract(); err != nil {
+		return fmt.Errorf("distcc alpha configuration rejected: %w", err)
+	}
 	if c.RuntimeRole == "executor" {
 		if violations := c.validatePersistentExecutorBoundary(); len(violations) > 0 {
 			return fmt.Errorf(
@@ -429,6 +445,15 @@ func validatePersistentExecutorCapabilities(capabilities []string) []string {
 		"image":         0,
 	}
 	dimensions := make(map[string]string, len(required))
+	// Egress is not a pool dimension, and phase routing requires it only when
+	// the resolved catalog context carries an enforced policy —
+	// PhaseCapabilityRequirements emits the label under exactly that condition.
+	// This validator cannot read the catalog, so it cannot demand one: a
+	// deployment whose profiles declare no egress policy would have to invent a
+	// label nobody ever matches on, or refuse to start. A second label is still
+	// rejected — an executor advertising two policies claims phases under
+	// whichever one the claim SQL happens to match.
+	egressLabels := 0
 	phases := map[string]bool{
 		"provision": false,
 		"build":     false,
@@ -475,6 +500,19 @@ func validatePersistentExecutorCapabilities(capabilities []string) []string {
 					"image capability must bind image ID and generation as image:<id>@<generation>")
 			}
 		}
+		if prefix == "egress" {
+			egressLabels++
+			policyID, digest, bound := strings.Cut(value, "@")
+			if !bound || policyID == "" ||
+				!egressPolicyDigestPattern.MatchString(digest) {
+				violations = append(violations,
+					"egress capability must bind policy ID and digest as egress:<id>@sha256:<hex>")
+			}
+		}
+	}
+	if egressLabels > 1 {
+		violations = append(violations,
+			"EXECUTOR_CAPABILITIES must not contain more than one egress label")
 	}
 	for _, prefix := range []string{
 		"capacity-pool", "provider", "zone", "arch", "build-mode", "profile", "image",
@@ -520,6 +558,13 @@ func (c *ServerConfig) validatePublicRuntimeBoundary() []string {
 		"PostgreSQL must be enabled and required")
 	addViolation(&violations, strings.TrimSpace(c.CatalogPath) == "",
 		"CATALOG_PATH must select an operator-owned immutable build catalog")
+	// PGSSLMODE is only consulted when the connection is assembled from the
+	// discrete host/user settings; an explicit DATABASE_URL carries its own
+	// sslmode and is the operator's to own.
+	addViolation(&violations,
+		strings.TrimSpace(c.Database.URL) == "" &&
+			c.Database.SSLMode != "verify-full" && c.Database.SSLMode != "verify-ca",
+		"PGSSLMODE must be verify-full or verify-ca; a public deployment must not reach PostgreSQL in cleartext")
 	addViolation(&violations, c.CloudPVEInsecure,
 		"CLOUD_PVE_INSECURE must be false")
 	addViolation(&violations, c.CloudSSHInsecureHostKey,
@@ -575,6 +620,18 @@ func (c *ServerConfig) validatePublicAPIBoundary() []string {
 		"legacy API_KEY and STEP_UP_API_KEY credentials must be unset")
 	addViolation(&violations, !c.Cache.Enabled || !c.Cache.Required,
 		"Redis must be enabled and required; edge rate limiting is still required independently")
+	// The public listener never receives a client's own address: the edge does.
+	// Anonymous pre-auth rate limiting keys on the client address, so until the
+	// edge networks are declared every caller in the world shares the proxy's
+	// one bucket and a single busy client locks out CLI sign-in for everyone.
+	// The public Compose file already treats this as a required variable.
+	addViolation(&violations, len(c.TrustedProxyCIDRs) == 0,
+		"TRUSTED_PROXY_CIDRS must list the edge/ingress CIDRs whose X-Forwarded-For the api may believe; without it every anonymous caller shares the proxy's rate-limit bucket")
+	for _, cidr := range c.TrustedProxyCIDRs {
+		_, _, err := net.ParseCIDR(strings.TrimSpace(cidr))
+		addViolation(&violations, err != nil,
+			"TRUSTED_PROXY_CIDRS entry "+cidr+" must be a CIDR block such as 172.18.0.0/16")
+	}
 	addViolation(&violations, len(c.CORSAllowedOrigins) == 0,
 		"CORS_ALLOWED_ORIGINS must contain explicit HTTPS origins")
 	for _, origin := range c.CORSAllowedOrigins {
@@ -726,6 +783,18 @@ func (c *ServerConfig) validateCore() []string {
 	var warnings []string
 	if len(c.CORSAllowedOrigins) == 0 {
 		warnings = append(warnings, "SECURITY: CORS_ALLOWED_ORIGINS is not set — defaulting to allow all origins (*)")
+	}
+	for _, cidr := range c.TrustedProxyCIDRs {
+		if _, _, err := net.ParseCIDR(strings.TrimSpace(cidr)); err != nil {
+			warnings = append(warnings, "CONFIG: TRUSTED_PROXY_CIDRS contains an invalid CIDR "+cidr)
+		}
+	}
+	// Behind a reverse proxy every request carries the proxy's own source
+	// address, so the anonymous pre-auth rate-limit buckets collapse into a
+	// single shared key until the edge network is declared here.
+	if len(c.TrustedProxyCIDRs) == 0 &&
+		strings.EqualFold(strings.TrimSpace(c.DeploymentMode), DeploymentModePublic) {
+		warnings = append(warnings, "SECURITY: TRUSTED_PROXY_CIDRS is not set — anonymous rate limiting buckets every request from the edge into one key")
 	}
 	if c.Port <= 0 || c.Port > 65535 {
 		warnings = append(warnings, fmt.Sprintf("CONFIG: SERVER_PORT %d is invalid, must be 1-65535", c.Port))
@@ -944,7 +1013,32 @@ func (c *ServerConfig) validateDistCC() []string {
 			break
 		}
 	}
+	if err := c.distCCPoolContract(); err != nil {
+		warnings = append(warnings, "CONFIG: "+err.Error())
+	}
 	return warnings
+}
+
+// distCCPoolContract runs the operator-owned half of the compile pool through
+// the same Normalize() the scheduler applies per request. Architecture and
+// project trust domain arrive with the build, so they are probed with
+// well-formed placeholders: a toolchain dimension that cannot normalize here
+// can never produce a pool ID at runtime, and every distcc claim would silently
+// fall back to local compilation.
+func (c *ServerConfig) distCCPoolContract() error {
+	if !c.DistCCAlphaEnabled {
+		return nil
+	}
+	_, err := distcc.Pool{
+		Architecture:             "amd64",
+		CHOST:                    c.DistCCCHOST,
+		CompilerDigest:           c.DistCCCompilerDigest,
+		ToolchainImageGeneration: c.DistCCToolchainImageGeneration,
+		CPUFeatures:              c.DistCCCPUFeatures,
+		NetworkZone:              c.DistCCNetworkZone,
+		ProjectTrustDomain:       "startup-probe",
+	}.Normalize()
+	return err
 }
 
 func (c *ServerConfig) workerGatewayTLSIncomplete() bool {
@@ -1638,6 +1732,7 @@ func LoadServerConfig(path string) (*ServerConfig, error) {
 	}
 	config.BuilderToken = getEnvString(env, "BUILDER_TOKEN", "")
 	config.CORSAllowedOrigins = getEnvStringSlice(env, "CORS_ALLOWED_ORIGINS", nil)
+	config.TrustedProxyCIDRs = getEnvStringSlice(env, "TRUSTED_PROXY_CIDRS", nil)
 	config.MaxRequestBodyBytes = int64(getEnvInt(env, "MAX_REQUEST_BODY_BYTES", 10*1024*1024)) // Default 10MB
 	config.DataDir = getEnvString(env, "DATA_DIR", "/var/lib/portage-engine/server")
 	config.CatalogPath = getEnvString(env, "CATALOG_PATH", "")

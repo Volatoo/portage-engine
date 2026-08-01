@@ -269,6 +269,18 @@ func (e *deviceTokenError) Error() string {
 	}
 }
 
+// deviceRetryError marks a poll failure the device code can outlive: a
+// transport hiccup, or a response whose body is not an OAuth error object at
+// all. The public edge answers a tripped rate limit with a 429 whose body is
+// nginx HTML, and treating that as terminal threw away a device code with
+// minutes of validity left. Interval carries Retry-After when the peer sent one.
+type deviceRetryError struct {
+	reason   string
+	Interval int
+}
+
+func (e *deviceRetryError) Error() string { return e.reason }
+
 func runDeviceLogin(args []string) {
 	fs := flag.NewFlagSet("login", flag.ExitOnError)
 	server := fs.String("server", "http://localhost:8080", "Server URL")
@@ -389,15 +401,31 @@ func pollDeviceAuthorization(
 		if pollErr == nil {
 			return result, nil
 		}
+		var retryError *deviceRetryError
+		if errors.As(pollErr, &retryError) {
+			// This Retry-After came from whatever answered — an edge, a CDN, a
+			// proxy — not from the authorization server, so it may only slow the
+			// cadence. Honouring a smaller value lets an unauthenticated
+			// middlebox drive the CLI faster than the published interval and
+			// re-trip the rate limiter that produced the response.
+			if retryError.Interval > interval {
+				interval = retryError.Interval
+				if interval > 60 {
+					interval = 60
+				}
+			}
+			continue
+		}
 		var oauthError *deviceTokenError
 		if !errors.As(pollErr, &oauthError) {
 			return tokenExchangeResult{}, pollErr
 		}
 		switch oauthError.Code {
-		case "authorization_pending":
-			if oauthError.Interval > 0 {
-				interval = oauthError.Interval
-			}
+		case "access_denied", "expired_token", "invalid_grant",
+			"invalid_request", "unauthorized_client":
+			// RFC 8628's terminal set. These say the device code itself is
+			// dead, so polling again cannot revive it.
+			return tokenExchangeResult{}, oauthError
 		case "slow_down":
 			if oauthError.Interval > interval {
 				interval = oauthError.Interval
@@ -407,10 +435,14 @@ func pollDeviceAuthorization(
 			if interval > 60 {
 				interval = 60
 			}
-		case "access_denied", "expired_token":
-			return tokenExchangeResult{}, oauthError
 		default:
-			return tokenExchangeResult{}, oauthError
+			// authorization_pending, plus any code RFC 8628 does not make
+			// terminal. Keep polling until the context deadline derived from
+			// expires_in ends the flow; an unrecognised code is not a reason
+			// to discard a code the authorization server still considers live.
+			if oauthError.Interval > 0 {
+				interval = oauthError.Interval
+			}
 		}
 	}
 }
@@ -433,19 +465,27 @@ func requestDeviceToken(
 	request.Header.Set("Accept", "application/json")
 	response, err := client.Do(request)
 	if err != nil {
-		return tokenExchangeResult{}, err
+		// A dropped connection says nothing about the device code's validity.
+		return tokenExchangeResult{}, &deviceRetryError{reason: err.Error()}
 	}
 	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode != http.StatusOK {
+		retryAfter := 0
+		if parsed, parseErr := strconv.Atoi(response.Header.Get("Retry-After")); parseErr == nil && parsed > 0 {
+			retryAfter = parsed
+		}
 		var result deviceTokenError
 		if err := json.NewDecoder(io.LimitReader(response.Body, 64<<10)).Decode(&result); err != nil ||
 			result.Code == "" {
-			return tokenExchangeResult{}, fmt.Errorf("server returned %s", response.Status)
+			// Only an OAuth error object can end the flow. A status with any
+			// other body — an edge's HTML 429, a 5xx, a proxy error page — is
+			// the infrastructure talking, not the authorization server.
+			return tokenExchangeResult{}, &deviceRetryError{
+				reason: "server returned " + response.Status, Interval: retryAfter,
+			}
 		}
 		if result.Interval <= 0 {
-			if retryAfter, parseErr := strconv.Atoi(response.Header.Get("Retry-After")); parseErr == nil {
-				result.Interval = retryAfter
-			}
+			result.Interval = retryAfter
 		}
 		return tokenExchangeResult{}, &result
 	}

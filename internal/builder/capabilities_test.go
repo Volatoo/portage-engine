@@ -157,7 +157,9 @@ func TestShadowExecutorAdvertisesResolvedCapabilities(t *testing.T) {
 		Provider: "pve", BuildMode: "native-gentoo", Template: "9000",
 	}))
 	manager.SetJobLedger(scheduler)
-	manager.StartWorkers()
+	if err := manager.StartWorkers(); err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(manager.Shutdown)
 
 	select {
@@ -174,6 +176,47 @@ func TestShadowExecutorAdvertisesResolvedCapabilities(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("shadow executor did not attempt a capability-bound claim")
+	}
+}
+
+func TestStartWorkersReportsCapabilityFailureAndStaysRetryable(t *testing.T) {
+	scheduler := &phaseGateScheduler{claimCaps: make(chan []string, 1)}
+	manager := NewManager(&config.ServerConfig{
+		MaxWorkers:        1,
+		CloudProvider:     "pve",
+		PhaseExecutorMode: "shadow",
+		// No catalog profile resolves in this zone, so capability resolution
+		// fails exactly the way a mistyped EXECUTOR_ZONES does in production.
+		ExecutorZones: []string{"nowhere"},
+	})
+	manager.SetBuildCatalog(catalog.NewCompatibility(catalog.CompatibilityOptions{
+		Provider: "pve", BuildMode: "native-gentoo", Template: "9000",
+	}))
+	manager.SetJobLedger(scheduler)
+	t.Cleanup(manager.Shutdown)
+
+	if err := manager.StartWorkers(); err == nil {
+		t.Fatal("an executor that never started reported success")
+	}
+	if _, err := manager.SubmitBuild(&BuildRequest{
+		PackageName: "app-misc/hello", Arch: "amd64",
+	}); err == nil {
+		t.Fatal("a build was accepted with no executor polling for it")
+	}
+	if len(manager.GetJobsSnapshot()) != 0 {
+		t.Fatal("a build that nobody can claim reached the projection")
+	}
+
+	// A later start must still be able to succeed once the operator fixes the
+	// configuration; the failed attempt must not have consumed the start.
+	manager.config.ExecutorZones = []string{"default"}
+	if err := manager.StartWorkers(); err != nil {
+		t.Fatalf("the failed start was not retryable: %v", err)
+	}
+	select {
+	case <-scheduler.claimCaps:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the retried start did not run the executor")
 	}
 }
 

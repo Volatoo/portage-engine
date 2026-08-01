@@ -444,3 +444,60 @@ func TestObjectVerificationQuarantineNeedsNoSharedFilesystem(t *testing.T) {
 		t.Fatalf("revoked object capability status=%d", response.Code)
 	}
 }
+
+// TestPromotionSurvivesAProjectionFailureAfterPublication covers the window
+// after the packages are already public: persistJobSnapshot revalidates the
+// worker lease, which FinalizePhaseWork does not, so a lease that lapsed
+// during a long publish makes the projection write lose while the publication
+// itself was perfectly fenced. Turning that into a promotion error sends the
+// caller to failActivePhase and marks a job failed whose packages the world
+// can install.
+func TestPromotionSurvivesAProjectionFailureAfterPublication(t *testing.T) {
+	publicRoot := filepath.Join(t.TempDir(), "binpkgs")
+	const (
+		binhostPath = "releases/amd64/binpackages/23.0/x86-64"
+		rel         = "app-misc/jq/jq-1.8.2.gpkg.tar"
+	)
+	store := binpkg.NewStore(filepath.Join(publicRoot, filepath.FromSlash(binhostPath)))
+	mgr := NewManager(&config.ServerConfig{MaxWorkers: 0, BinpkgPath: publicRoot})
+	defer mgr.Shutdown()
+	mgr.SetArtifactPromotionHook(func(root string, rels []string, arch, _ string) ([]string, error) {
+		return store.PromoteStaged(root, rels, arch)
+	})
+	mgr.scheduler = &serializationFailureScheduler{
+		verdict: errors.New("job publish-projection ledger state is failed, expected publishing"),
+	}
+
+	staging := t.TempDir()
+	local := filepath.Join(staging, filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(local), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(local, []byte("verified package bytes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mgr.jobsMu.Lock()
+	mgr.jobs["publish-projection"] = &BuildStatus{
+		JobID: "publish-projection", Status: "publishing", Arch: "amd64",
+		AttemptID: "22222222-2222-4222-8222-222222222222", FenceToken: 5,
+		StagingRoot: staging, StagedArtifacts: []string{rel}, StagedPrimary: rel,
+	}
+	mgr.jobsMu.Unlock()
+
+	if err := mgr.promoteJobArtifacts("publish-projection"); err != nil {
+		t.Fatalf("a rejected projection write failed an already published job: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(store.BasePath(), filepath.FromSlash(rel))); err != nil {
+		t.Fatalf("promotion did not publish the artifact: %v", err)
+	}
+	status, err := mgr.GetStatus("publish-projection")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.ArtifactURL != "/binpkgs/"+binhostPath+"/"+rel {
+		t.Fatalf("published job lost its artifact locations: %#v", status)
+	}
+	if !strings.Contains(status.Log, "artifacts are public but their locations were not projected") {
+		t.Fatalf("the unprojected publication was not reported:\n%s", status.Log)
+	}
+}

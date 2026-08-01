@@ -166,15 +166,29 @@ func nodeLessLoaded(a, b *pveClusterResource) bool {
 	return a.CPU < b.CPU
 }
 
-// pveHTTPClient builds the client used for direct PVE API calls.
-func pveHTTPClient(insecure bool) *http.Client {
-	client := &http.Client{Timeout: pveNodeQueryTimeout}
-	if insecure {
-		client.Transport = &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, // #nosec G402 -- mirrors CLOUD_PVE_INSECURE, the operator's explicit opt-in for self-signed PVE certs.
-		}
+// pveHTTPClient returns the shared client used for direct PVE API calls. Both
+// clients are built once: WaitForPVEGuestIP polls every 5s for up to 5 minutes
+// and PVEGuestExec every 500ms, and a per-request Transport leaks its idle
+// connections and their reader goroutines for the life of the process.
+var (
+	pveSecureClient   = &http.Client{Timeout: pveNodeQueryTimeout}
+	pveInsecureClient = &http.Client{
+		Timeout:   pveNodeQueryTimeout,
+		Transport: pveInsecureTransport(),
 	}
-	return client
+)
+
+func pveInsecureTransport() *http.Transport {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} // #nosec G402 -- mirrors CLOUD_PVE_INSECURE, the operator's explicit opt-in for self-signed PVE certs.
+	return transport
+}
+
+func pveHTTPClient(insecure bool) *http.Client {
+	if insecure {
+		return pveInsecureClient
+	}
+	return pveSecureClient
 }
 
 // pveTicket exchanges username+password for an auth ticket (the PVE cookie

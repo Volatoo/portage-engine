@@ -144,23 +144,44 @@ def allowed_statement(statement: dict[str, Any]) -> bool:
     return str(statement.get("Effect", "")).lower() == "allow"
 
 
-def inspect_policy(path: str) -> tuple[set[str], list[tuple[set[str], list[str]]]]:
-    all_actions: set[str] = set()
+def denied_statement(statement: dict[str, Any]) -> bool:
+    return str(statement.get("Effect", "")).lower() == "deny"
+
+
+def inspect_policy(path: str) -> tuple[set[str], set[str], list[tuple[set[str], list[str]]]]:
+    allow_actions: set[str] = set()
+    deny_actions: set[str] = set()
     allowed: list[tuple[set[str], list[str]]] = []
     for statement in statements(load_json(path)):
         current_actions = actions(statement)
-        all_actions.update(current_actions)
         if allowed_statement(statement):
+            allow_actions.update(current_actions)
             allowed.append((current_actions, resources(statement)))
-    return all_actions, allowed
+        elif denied_statement(statement):
+            deny_actions.update(current_actions)
+        else:
+            fail("IAM Statement Effect must be exactly Allow or Deny")
+    return allow_actions, deny_actions, allowed
+
+
+def granted(allow_actions: set[str], deny_actions: set[str]) -> set[str]:
+    # An explicit Deny always wins in IAM, so a capability is only proven by an
+    # Allow that no other statement takes back, and a forbidden capability is
+    # only present when it survives the Denies. Folding both effects into one
+    # action set certified signers that provably could not PutObject and
+    # rejected read policies that had been narrowed with a redundant Deny.
+    return allow_actions - deny_actions
 
 
 def require_delete_scope(
-    name: str, allowed: list[tuple[set[str], list[str]]], marker: str
+    name: str,
+    allowed: list[tuple[set[str], list[str]]],
+    denied: set[str],
+    marker: str,
 ) -> None:
     found = False
     for current_actions, current_resources in allowed:
-        if current_actions & DELETE_ACTIONS:
+        if current_actions & (DELETE_ACTIONS - denied):
             found = True
             for resource in current_resources:
                 if marker not in resource or not resource.endswith("*"):
@@ -198,7 +219,8 @@ def validate_object_policies(arguments: argparse.Namespace) -> None:
     if len(set(principals)) != len(principals):
         fail("read, executor, signer, quarantine-GC, and generation-GC principals must be distinct")
 
-    read_actions, read_allowed = inspect_policy(arguments.read_policy)
+    read_allow, read_deny, read_allowed = inspect_policy(arguments.read_policy)
+    read_actions = granted(read_allow, read_deny)
     if not (read_actions & READ_ACTIONS):
         fail("read/API policy has no S3 read permission")
     if read_actions & (WRITE_ACTIONS | DELETE_ACTIONS):
@@ -206,27 +228,39 @@ def validate_object_policies(arguments: argparse.Namespace) -> None:
     reject_delete("read/API", read_allowed)
 
     for name, path in (("executor", arguments.executor_policy),):
-        current_actions, current_allowed = inspect_policy(path)
+        allow, deny, current_allowed = inspect_policy(path)
+        current_actions = granted(allow, deny)
         if not (current_actions & READ_ACTIONS) or not (current_actions & WRITE_ACTIONS):
             fail(f"{name} policy must have explicit read and create permissions")
-        require_delete_scope(name, current_allowed, "/.quarantine/")
+        require_delete_scope(name, current_allowed, deny, "/.quarantine/")
 
-    signer_actions, signer_allowed = inspect_policy(arguments.signer_policy)
+    signer_allow, signer_deny, signer_allowed = inspect_policy(arguments.signer_policy)
+    signer_actions = granted(signer_allow, signer_deny)
     if not (signer_actions & READ_ACTIONS) or not (signer_actions & WRITE_ACTIONS):
         fail("signer policy must have explicit read and create permissions")
-    require_delete_scope("signer", signer_allowed, "/.quarantine/")
+    require_delete_scope("signer", signer_allowed, signer_deny, "/.quarantine/")
     require_mutation_scope(
         "signer", signer_allowed, WRITE_ACTIONS | DELETE_ACTIONS, "/.quarantine/"
     )
 
-    quarantine_actions, quarantine_allowed = inspect_policy(arguments.quarantine_gc_policy)
+    quarantine_allow, quarantine_deny, quarantine_allowed = inspect_policy(
+        arguments.quarantine_gc_policy
+    )
+    quarantine_actions = granted(quarantine_allow, quarantine_deny)
     if not (quarantine_actions & READ_ACTIONS) or quarantine_actions & WRITE_ACTIONS:
         fail("quarantine GC policy must be read+delete only")
-    require_delete_scope("quarantine GC", quarantine_allowed, "/.quarantine/")
-    generation_actions, generation_allowed = inspect_policy(arguments.generation_gc_policy)
+    require_delete_scope(
+        "quarantine GC", quarantine_allowed, quarantine_deny, "/.quarantine/"
+    )
+    generation_allow, generation_deny, generation_allowed = inspect_policy(
+        arguments.generation_gc_policy
+    )
+    generation_actions = granted(generation_allow, generation_deny)
     if not (generation_actions & READ_ACTIONS) or generation_actions & WRITE_ACTIONS:
         fail("generation GC policy must be read+delete only")
-    require_delete_scope("generation GC", generation_allowed, "/.generations/")
+    require_delete_scope(
+        "generation GC", generation_allowed, generation_deny, "/.generations/"
+    )
     print(json.dumps({
         "status": "passed",
         "principals": principals,

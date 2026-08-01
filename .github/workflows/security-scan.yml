@@ -16,26 +16,41 @@ jobs:
   security-scan:
     name: Trivy Security Scan
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
+      # Two passes: SARIF is what reaches code scanning and must be produced
+      # even when findings exist, so the failing verdict is a separate scan.
       - name: Run Trivy vulnerability scanner
         uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # 0.35.0
         with:
           version: 'v0.69.3'
           scan-type: 'fs'
           scan-ref: '.'
-          format: 'json'
-          output: 'trivy-results.json'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
           severity: 'CRITICAL,HIGH'
 
-      - name: Display Trivy results
+      - name: Upload Trivy SARIF to code scanning
         if: always()
-        run: |
-          if [ -f trivy-results.json ]; then
-            echo "=== Trivy Scan Results ==="
-            cat trivy-results.json | jq '.Results[]? | select(.Vulnerabilities != null) | {Resource: .Target, VulnerabilityCount: (.Vulnerabilities | length)}' | head -50
-          fi
+        uses: github/codeql-action/upload-sarif@dfbc6164313353db46c80e2fcfd38820bd2c3c46 # v3.37.4
+        with:
+          sarif_file: 'trivy-results.sarif'
+          category: trivy-fs
+
+      - name: Fail on CRITICAL or HIGH findings
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # 0.35.0
+        with:
+          version: 'v0.69.3'
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'table'
+          severity: 'CRITICAL,HIGH'
+          ignore-unfixed: true
+          exit-code: '1'
 
   gosec-scan:
     name: GoSec Security Scan

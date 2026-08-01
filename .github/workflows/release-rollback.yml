@@ -66,6 +66,7 @@ jobs:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           set -euo pipefail
+          source scripts/oras-resolve.sh
           if [ "${GITHUB_REF}" != "refs/heads/${DEFAULT_BRANCH}" ] || [ "${CONFIRM}" != "rollback-stable" ]; then
             echo "rollback must run the default-branch workflow with explicit confirmation" >&2
             exit 1
@@ -77,7 +78,11 @@ jobs:
             exit 1
           fi
           target_oci_digest="${TARGET_REF##*@}"
-          current_oci_digest="$(oras resolve "${release_repository}:stable")"
+          oras_resolve_into current_oci_digest "${release_repository}:stable"
+          if [ "${current_oci_digest}" = "none" ]; then
+            echo "there is no stable release to roll back from" >&2
+            exit 1
+          fi
           current_ref="${release_repository}@${current_oci_digest}"
           stable_identity_regex="^https://github.com/${GITHUB_REPOSITORY}/\\.github/workflows/release-(promote|rollback)\\.yml@refs/heads/${DEFAULT_BRANCH}$"
           candidate_identity_regex="^https://github.com/${GITHUB_REPOSITORY}/\\.github/workflows/release-candidate\\.yml@refs/(heads/${DEFAULT_BRANCH}|tags/v[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?)$"
@@ -94,14 +99,20 @@ jobs:
               --certificate-identity-regexp "${stable_identity_regex}" \
               --certificate-oidc-issuer https://token.actions.githubusercontent.com \
               "${directory}/release-manifest.json"
-            python3 scripts/release_manifest.py validate \
-              --manifest "${directory}/release-manifest.json" --root "${directory}"
+            # Each signed bundle is validated against the release config it
+            # shipped with, not this workflow's later checkout.
+            [ -f "${directory}/release-config.json" ] || {
+              echo "${directory} bundle does not carry its release config" >&2
+              exit 1
+            }
+            python3 scripts/release_manifest.py --config "${directory}/release-config.json" \
+              validate --manifest "${directory}/release-manifest.json" --root "${directory}"
             if [ "$(jq -r '.release.channel' "${directory}/release-manifest.json")" != "stable" ]; then
               echo "rollback inputs must both be stable manifests" >&2
               exit 1
             fi
           done
-          current_manifest_digest="$(python3 scripts/release_manifest.py validate --manifest current/release-manifest.json --root current)"
+          current_manifest_digest="$(python3 scripts/release_manifest.py --config current/release-config.json validate --manifest current/release-manifest.json --root current)"
           if [ "${current_manifest_digest}" != "${EXPECTED_CURRENT}" ]; then
             echo "current stable canonical digest does not match rollback CAS input" >&2
             exit 1
@@ -130,11 +141,13 @@ jobs:
           ROLLBACK_REASON: ${{ inputs.reason }}
         run: |
           set -euo pipefail
+          source scripts/oras-resolve.sh
           cp -a target rollback
           rolled_back_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-          python3 scripts/release_manifest.py rollback \
+          python3 scripts/release_manifest.py --config target/release-config.json rollback \
             --current current/release-manifest.json \
             --current-root current \
+            --current-config current/release-config.json \
             --target target/release-manifest.json \
             --target-root target \
             --target-oci-digest "${TARGET_OCI_DIGEST}" \
@@ -144,7 +157,7 @@ jobs:
             --rolled-back-at "${rolled_back_at}" \
             --output-root rollback \
             --output rollback/release-manifest.json
-          rollback_manifest_digest="$(python3 scripts/release_manifest.py validate --manifest rollback/release-manifest.json --root rollback)"
+          rollback_manifest_digest="$(python3 scripts/release_manifest.py --config rollback/release-config.json validate --manifest rollback/release-manifest.json --root rollback)"
           cosign sign-blob --yes --bundle rollback/release-manifest.sigstore.json rollback/release-manifest.json
           signing_identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release-rollback.yml@${GITHUB_REF}"
           cosign verify-blob --bundle rollback/release-manifest.sigstore.json \
@@ -160,25 +173,47 @@ jobs:
             oras push --artifact-type application/vnd.portage-engine.release.v1+json \
               "${RELEASE_REPOSITORY}:${immutable_tag}" "${files[@]}"
           )
-          rollback_oci_digest="$(oras resolve "${RELEASE_REPOSITORY}:${immutable_tag}")"
+          oras_resolve_into rollback_oci_digest "${RELEASE_REPOSITORY}:${immutable_tag}"
+          if [ "${rollback_oci_digest}" = "none" ]; then
+            echo "pushed rollback bundle did not resolve to a digest" >&2
+            exit 1
+          fi
+          # Sign before the cutover. Both stable workflows begin by resolving
+          # `:stable` and verifying its signature, so an alias pointing at an
+          # unsigned revision -- which is what a failed or cancelled `cosign
+          # sign` after the cutover leaves behind -- blocks every subsequent
+          # rollback and promotion, including the one that would repair it. A
+          # revision signed first and then abandoned by a lost compare-and-swap
+          # is inert: reachable only under its content-addressed `-m<digest>`
+          # tag, never aliased, and the same inputs can simply be re-run.
           cosign sign --yes "${RELEASE_REPOSITORY}@${rollback_oci_digest}"
           cosign verify --certificate-identity "${signing_identity}" \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com \
             "${RELEASE_REPOSITORY}@${rollback_oci_digest}" >/dev/null
 
-          if [ "$(oras resolve "${RELEASE_REPOSITORY}:stable")" != "${CURRENT_OCI_DIGEST}" ]; then
+          oras_resolve_into observed_current "${RELEASE_REPOSITORY}:stable"
+          if [ "${observed_current}" != "${CURRENT_OCI_DIGEST}" ]; then
             echo "stable alias changed during rollback; refusing the cutover" >&2
             exit 1
           fi
+          # Role `:stable` moves ahead of the release `:stable` so the manifest
+          # that answers "what is stable" is never authoritative before the
+          # images it names are reachable under that alias. Nothing write-once
+          # is recorded here or anywhere later in this workflow -- a rollback
+          # re-publishes release IDs that were already recorded by the
+          # promotion it reverts to -- so a run that dies partway leaves only
+          # idempotent alias writes and the same inputs can simply be re-run.
           while IFS=$'\t' read -r _ reference; do
             oras tag "${reference}" stable
           done < <(jq -r '.images[] | [.repository, .reference] | @tsv' rollback/release-manifest.json)
-          if [ "$(oras resolve "${RELEASE_REPOSITORY}:stable")" != "${CURRENT_OCI_DIGEST}" ]; then
+          oras_resolve_into observed_current "${RELEASE_REPOSITORY}:stable"
+          if [ "${observed_current}" != "${CURRENT_OCI_DIGEST}" ]; then
             echo "stable alias changed before the rollback cutover" >&2
             exit 1
           fi
           oras tag "${RELEASE_REPOSITORY}@${rollback_oci_digest}" stable
-          if [ "$(oras resolve "${RELEASE_REPOSITORY}:stable")" != "${rollback_oci_digest}" ]; then
+          oras_resolve_into bound_alias "${RELEASE_REPOSITORY}:stable"
+          if [ "${bound_alias}" != "${rollback_oci_digest}" ]; then
             echo "stable alias read-back did not bind the signed rollback revision" >&2
             exit 1
           fi

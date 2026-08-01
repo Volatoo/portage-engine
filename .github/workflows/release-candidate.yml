@@ -298,14 +298,22 @@ jobs:
           SIGNING_IDENTITY: ${{ needs.gate.outputs.signing_identity }}
         run: |
           set -euo pipefail
-          python3 scripts/release_manifest.py index-binaries --root bundle --output bundle/binaries.json
+          source scripts/oras-resolve.sh
+          # The bundle carries the release config it was built against so every
+          # later validation - promotion, rollback, and independent verification
+          # by an operator - reads the same exact-equality role and command
+          # matrix this candidate was signed with.
+          cp release/release-config.json bundle/release-config.json
+          python3 scripts/release_manifest.py --config bundle/release-config.json \
+            index-binaries --root bundle --output bundle/binaries.json
           jq -n \
             --arg binary_sha256 "sha256:$(sha256sum bundle/SHA256SUMS | cut -d' ' -f1)" \
             --arg evidence_sha256 "sha256:$(sha256sum bundle/EVIDENCE.SHA256SUMS | cut -d' ' -f1)" \
             '{binaries:{path:"SHA256SUMS",sha256:$binary_sha256},evidence:{path:"EVIDENCE.SHA256SUMS",sha256:$evidence_sha256}}' \
             >bundle/checksums.json
           created_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-          python3 scripts/release_manifest.py create-candidate \
+          python3 scripts/release_manifest.py --config bundle/release-config.json \
+            create-candidate \
             --release-id "${RELEASE_ID}" \
             --source-repository "${GITHUB_REPOSITORY}" \
             --source-commit "${SOURCE_COMMIT}" \
@@ -317,7 +325,8 @@ jobs:
             --root bundle \
             --output bundle/release-manifest.json
           rm bundle/images.json bundle/binaries.json bundle/checksums.json
-          python3 scripts/release_manifest.py validate --manifest bundle/release-manifest.json --root bundle
+          python3 scripts/release_manifest.py --config bundle/release-config.json \
+            validate --manifest bundle/release-manifest.json --root bundle
           cosign sign-blob --yes --bundle bundle/SHA256SUMS.sigstore.json bundle/SHA256SUMS
           cosign sign-blob --yes --bundle bundle/release-manifest.sigstore.json bundle/release-manifest.json
           cosign verify-blob --bundle bundle/SHA256SUMS.sigstore.json \
@@ -330,7 +339,8 @@ jobs:
             bundle/release-manifest.json
           release_repository="ghcr.io/${GITHUB_REPOSITORY,,}/releases"
           candidate_reference="${release_repository}:${CANDIDATE_TAG}"
-          if oras resolve "${candidate_reference}" >/dev/null 2>&1; then
+          oras_resolve_into existing_candidate "${candidate_reference}"
+          if [ "${existing_candidate}" != "none" ]; then
             echo "candidate tag already exists; refusing to overwrite it" >&2
             exit 1
           fi
@@ -340,7 +350,7 @@ jobs:
             oras push --artifact-type application/vnd.portage-engine.release.v1+json \
               "${candidate_reference}" "${files[@]}"
           )
-          candidate_oci_digest="$(oras resolve "${candidate_reference}")"
+          oras_resolve_into candidate_oci_digest "${candidate_reference}"
           if ! [[ "${candidate_oci_digest}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
             echo "registry returned an invalid candidate digest" >&2
             exit 1

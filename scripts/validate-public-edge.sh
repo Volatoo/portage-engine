@@ -118,6 +118,7 @@ check_public_compose_contract() {
     ($server.OIDC_SESSION_MAX_MINUTES | contains("PORTAGE_OIDC_SESSION_MAX_MINUTES")) and
     ($server.OIDC_STEP_UP_MAX_AGE_MINUTES | contains("PORTAGE_OIDC_STEP_UP_MAX_AGE_MINUTES")) and
     ($server.METRICS_PASSWORD | contains("PORTAGE_METRICS_PASSWORD")) and
+    ($server.TRUSTED_PROXY_CIDRS | contains("PORTAGE_TRUSTED_PROXY_CIDRS")) and
     $dashboard.DEPLOYMENT_MODE == "public" and
     $dashboard.AUTH_ENABLED == "true" and
     $dashboard.ALLOW_ANONYMOUS == "false" and
@@ -148,15 +149,33 @@ check_backend_ports() {
 
 check_edge_static_contract() {
   local config="${repo_root}/deploy/public-edge/nginx.conf.template"
-  local device_identity_block
+  local device_identity_block device_token_block log_format_block
   device_identity_block="$(awk '
     $0 == "    location ^~ /api/v1/iam/device/ {" { emit = 1 }
     emit { print }
     emit && $0 == "    }" { exit }
   ' "${config}")"
+  device_token_block="$(awk '
+    $0 == "    location = /api/v1/iam/device/token {" { emit = 1 }
+    emit { print }
+    emit && $0 == "    }" { exit }
+  ' "${config}")"
+  # The access-log assertion has to see the whole directive: the real
+  # log_format spans three lines and ripgrep matches one line at a time.
+  log_format_block="$(awk '
+    /^log_format / { emit = 1 }
+    emit { print }
+    emit && /;[[:space:]]*$/ { exit }
+  ' "${config}")"
   rg -q 'limit_conn_zone \$binary_remote_addr zone=source_ip_connections:' "${config}" &&
     rg -q 'limit_req_zone \$binary_remote_addr zone=public_requests:' "${config}" &&
     rg -q 'limit_req_zone \$binary_remote_addr zone=identity_requests:' "${config}" &&
+    rg -q 'limit_req_zone \$binary_remote_addr zone=device_token_requests:10m rate=30r/m;' "${config}" &&
+    rg -q '^limit_req_status 429;' "${config}" &&
+    rg -q '^limit_conn_status 429;' "${config}" &&
+    [[ -n "${device_token_block}" ]] &&
+    rg -q 'limit_req zone=device_token_requests burst=10 nodelay;' <<<"${device_token_block}" &&
+    ! rg -q 'zone=identity_requests' <<<"${device_token_block}" &&
     [[ -n "${device_identity_block}" ]] &&
     rg -q 'limit_req zone=public_requests burst=10 nodelay;' <<<"${device_identity_block}" &&
     rg -q 'limit_req zone=identity_requests burst=5 nodelay;' <<<"${device_identity_block}" &&
@@ -171,7 +190,8 @@ check_edge_static_contract() {
     rg -q 'proxy_set_header X-Forwarded-For \$remote_addr;' "${config}" &&
     ! rg -q '\$proxy_add_x_forwarded_for' "${config}" &&
     rg -q '\$remote_addr - \$request_method \$uri \$status' "${config}" &&
-    ! rg -q "log_format[^;]*\$request_uri" "${config}"
+    [[ -n "${log_format_block}" ]] &&
+    ! rg -qF '$request_uri' <<<"${log_format_block}"
 }
 
 check_documented_boundary() {

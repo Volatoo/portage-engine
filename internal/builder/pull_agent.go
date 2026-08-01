@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -21,12 +22,31 @@ import (
 	"github.com/slchris/portage-engine/pkg/config"
 )
 
-const pullBuildLogLimit = 2 << 20
+const (
+	pullBuildLogLimit = 2 << 20
+
+	// pullDialTimeout and pullTLSHandshakeTimeout replace what a hand-built
+	// http.Transport silently gives up: none of http.DefaultTransport's bounds
+	// are inherited. Without them a blackholed dial or a stalled TLS handshake
+	// parks client.Do on the only context this agent has — the process-lifetime
+	// one — and the single sequential pull loop stops claiming work while the
+	// worker still looks alive.
+	pullDialTimeout         = 30 * time.Second
+	pullTLSHandshakeTimeout = 10 * time.Second
+
+	// pullUploadLease mirrors the worker gateway broker's upload-slot lease.
+	// ResponseHeaderTimeout cannot bound an artifact PUT — it starts only after
+	// the body has finished writing, and the HTTP/2 transport ignores it — so
+	// the collect task carries its own deadline. Past the lease the broker can
+	// hand the slot to a new claim, which is exactly the point where finishing
+	// the stream can no longer commit anything.
+	pullUploadLease = 30 * time.Minute
+)
 
 // RunPullAgent runs the worker's only network control surface. It long-polls a
 // dedicated mTLS gateway and never binds an inbound build port.
 func RunPullAgent(ctx context.Context, cfg *config.BuilderConfig, local *LocalBuilder) error {
-	baseURL, client, err := pullHTTPClient(cfg)
+	baseURL, clients, err := pullHTTPClients(cfg)
 	if err != nil {
 		return err
 	}
@@ -36,7 +56,7 @@ func RunPullAgent(ctx context.Context, cfg *config.BuilderConfig, local *LocalBu
 		if err := ctx.Err(); err != nil {
 			return nil
 		}
-		task, err := pullOne(ctx, client, baseURL)
+		task, err := pullOne(ctx, clients.control, baseURL)
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil
@@ -61,8 +81,8 @@ func RunPullAgent(ctx context.Context, cfg *config.BuilderConfig, local *LocalBu
 		if task == nil {
 			continue
 		}
-		completion := executePullTask(ctx, client, baseURL, local, *task)
-		if err := postCompletionWithRetry(ctx, client, baseURL, completion); err != nil {
+		completion := executePullTask(ctx, clients, baseURL, local, *task)
+		if err := postCompletionWithRetry(ctx, clients.control, baseURL, completion); err != nil {
 			// The broker can accept the completion immediately before shutdown
 			// cancels the HTTP request. The scheduler already has the result in
 			// that case, so cancellation is a clean agent stop rather than a
@@ -119,7 +139,19 @@ func postCompletionWithRetry(
 	}
 }
 
-func pullHTTPClient(cfg *config.BuilderConfig) (string, *http.Client, error) {
+// pullClients separates the two very different network shapes that share this
+// one mTLS origin. Control calls are small and must fail fast; an artifact PUT
+// streams a whole binary package under the broker's upload lease. Go's
+// Client.Timeout also covers the request body write, so a single deadline
+// cannot serve both: a several-hundred-MB gpkg on anything but a fast link
+// would abort mid-body, the broker would delete the temporary generation, and
+// the collect phase would destroy the VM with no way to recover.
+type pullClients struct {
+	control  *http.Client
+	transfer *http.Client
+}
+
+func pullHTTPClients(cfg *config.BuilderConfig) (string, *pullClients, error) {
 	parsed, err := url.Parse(strings.TrimSpace(cfg.WorkerGatewayURL))
 	if err != nil || parsed.Scheme != "https" || parsed.Host == "" ||
 		parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" ||
@@ -138,17 +170,50 @@ func pullHTTPClient(cfg *config.BuilderConfig) (string, *http.Client, error) {
 	if !roots.AppendCertsFromPEM(caPEM) {
 		return "", nil, fmt.Errorf("parse worker gateway CA")
 	}
-	transport := &http.Transport{
-		TLSClientConfig: &tls.Config{
-			MinVersion: tls.VersionTLS13,
-			RootCAs:    roots, Certificates: []tls.Certificate{certificate},
-		},
-		ForceAttemptHTTP2: true,
+	tlsConfig := &tls.Config{
+		MinVersion: tls.VersionTLS13,
+		RootCAs:    roots, Certificates: []tls.Certificate{certificate},
 	}
-	return strings.TrimRight(parsed.String(), "/"), &http.Client{
-		Transport: transport,
-		Timeout:   40 * time.Second,
+	control := pullTransport(tlsConfig)
+	// The transfer client is bounded at the transport instead: a stalled
+	// connection still fails, but a slow one is allowed to run to the upload
+	// lease the collect task's context carries. The response header budget
+	// starts only after the body is written, and the broker hashes and commits
+	// multi-GB uploads before answering.
+	transfer := pullTransport(tlsConfig.Clone())
+	transfer.ResponseHeaderTimeout = 5 * time.Minute
+	transfer.IdleConnTimeout = 90 * time.Second
+	return strings.TrimRight(parsed.String(), "/"), &pullClients{
+		control:  &http.Client{Transport: control, Timeout: 40 * time.Second},
+		transfer: &http.Client{Transport: transfer},
 	}, nil
+}
+
+// pullTransport carries the connection-establishment bounds both clients need
+// regardless of how their request bodies differ.
+func pullTransport(tlsConfig *tls.Config) *http.Transport {
+	return &http.Transport{
+		TLSClientConfig: tlsConfig, ForceAttemptHTTP2: true,
+		DialContext: (&net.Dialer{
+			Timeout: pullDialTimeout, KeepAlive: 30 * time.Second,
+		}).DialContext,
+		TLSHandshakeTimeout: pullTLSHandshakeTimeout,
+	}
+}
+
+// pullTaskContext bounds one claimed task. Only the collect action makes a
+// network call the agent cannot otherwise abandon, and the broker's upload
+// lease is the deadline that already governs it. Build and verify run entirely
+// against the local builder and legitimately take hours, so they keep the
+// agent's own lifetime as their only bound.
+func pullTaskContext(
+	ctx context.Context,
+	action string,
+) (context.Context, context.CancelFunc) {
+	if action == workergateway.ActionCollect {
+		return context.WithTimeout(ctx, pullUploadLease)
+	}
+	return context.WithCancel(ctx)
 }
 
 func pullOne(ctx context.Context, client *http.Client, baseURL string) (*workergateway.Task, error) {
@@ -182,12 +247,14 @@ func pullOne(ctx context.Context, client *http.Client, baseURL string) (*workerg
 
 func executePullTask(
 	ctx context.Context,
-	client *http.Client,
+	clients *pullClients,
 	baseURL string,
 	local *LocalBuilder,
 	task workergateway.Task,
 ) workergateway.Completion {
-	payload, err := executePullAction(ctx, client, baseURL, local, task)
+	taskCtx, cancel := pullTaskContext(ctx, task.Action)
+	defer cancel()
+	payload, err := executePullAction(taskCtx, clients, baseURL, local, task)
 	completion := workergateway.Completion{
 		TaskID: task.ID, DeliveryFence: task.DeliveryFence,
 	}
@@ -201,7 +268,7 @@ func executePullTask(
 
 func executePullAction(
 	ctx context.Context,
-	client *http.Client,
+	clients *pullClients,
 	baseURL string,
 	local *LocalBuilder,
 	task workergateway.Task,
@@ -262,7 +329,7 @@ func executePullAction(
 		if err != nil {
 			return nil, err
 		}
-		return uploadPullArtifact(ctx, client, baseURL, request.UploadID, path)
+		return uploadPullArtifact(ctx, clients.transfer, baseURL, request.UploadID, path)
 	default:
 		return nil, fmt.Errorf("unsupported worker action %q", task.Action)
 	}

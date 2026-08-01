@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
@@ -73,8 +74,26 @@ type Server struct {
 	publicStatusUntil    time.Time
 	ledgerStop           chan struct{}
 	ledgerWG             sync.WaitGroup
+	ledgerPruneOnce      sync.Once
+	ledgerStaleAfter     time.Duration
 	binhostStop          chan struct{}
+	trustedProxies       []netip.Prefix
 	settingsMu           sync.Mutex // serializes settings updates + persistence
+}
+
+// trustedProxyPrefixes parses TRUSTED_PROXY_CIDRS once. A malformed entry is
+// dropped rather than widened (Validate() warns about it), so a typo can never
+// make the process believe a client-supplied X-Forwarded-For.
+func trustedProxyPrefixes(cidrs []string) []netip.Prefix {
+	prefixes := make([]netip.Prefix, 0, len(cidrs))
+	for _, raw := range cidrs {
+		prefix, err := netip.ParsePrefix(strings.TrimSpace(raw))
+		if err != nil {
+			continue
+		}
+		prefixes = append(prefixes, prefix.Masked())
+	}
+	return prefixes
 }
 
 // New creates a new Server instance.
@@ -95,6 +114,7 @@ func New(cfg *config.ServerConfig) *Server {
 		builderRegistry: builder.NewRegistry(60*time.Second, 30*time.Second),
 		metrics:         metrics.New(metricsCfg),
 		startTime:       time.Now(),
+		trustedProxies:  trustedProxyPrefixes(cfg.TrustedProxyCIDRs),
 	}
 	s.metrics.SetSchedulerProvider(s.schedulerMetricsSnapshot)
 
@@ -216,7 +236,29 @@ func (s *Server) schedulerMetricsSnapshot() metrics.SchedulerSnapshot {
 		snapshot.DistCCQueueMillis = compile.QueueMillis
 		snapshot.DistCCFailures = compile.FailuresByReason
 	}
+	censusCtx, cancelCensus := context.WithTimeout(
+		context.Background(), 2*time.Second,
+	)
+	totals, err := s.jobLedger.BuildOutcomeTotals(censusCtx)
+	cancelCensus()
+	if err == nil {
+		applyBuildOutcomeCensus(&snapshot, totals)
+	}
 	return snapshot
+}
+
+// applyBuildOutcomeCensus lifts the durable job census onto the scrape
+// snapshot. It stays a separate step rather than an inline assignment so a
+// failed read leaves all three at zero: the exposition only ever raises these
+// counters, so zero republishes the previous reading, while a partially applied
+// census would show more successes than submissions.
+func applyBuildOutcomeCensus(
+	snapshot *metrics.SchedulerSnapshot,
+	totals persistence.BuildOutcomeTotals,
+) {
+	snapshot.JobsSubmitted = totals.Submitted
+	snapshot.JobsSucceeded = totals.Succeeded
+	snapshot.JobsFailed = totals.Failed
 }
 
 func schedulerMetricsSnapshotFromStatus(
@@ -270,6 +312,13 @@ func schedulerMetricsSnapshotFromStatus(
 		ProjectionSnapshotValid: metricBool(projection["valid"]),
 		ProjectionSourcePresent: metricBool(projection["source_watermark_present"]),
 		ProjectionLagSeconds:    metricInt64(projection["lag_seconds"]),
+		// The mTLS gateway census. portage_builders_* is fed by the legacy
+		// register/heartbeat routes, which nothing calls once executors arrive
+		// over the gateway, so these are the only worker counts that move under
+		// the deployed topology.
+		GatewayWorkersActive:     metricInt64(status["active_workers"]),
+		GatewayWorkersCapability: metricInt64(status["capability_workers"]),
+		GatewayWorkersStale:      metricInt64(status["stale_workers"]),
 	}
 	return snapshot
 }
@@ -377,7 +426,11 @@ func (s *Server) Initialize() error {
 			)
 		}
 	}
-	s.builder.StartWorkers()
+	// A worker pool that refused to start leaves a replica that accepts builds
+	// and never runs them; that is a startup failure, not a warning.
+	if err := s.builder.StartWorkers(); err != nil {
+		return fmt.Errorf("start build workers: %w", err)
+	}
 	if executorOnly {
 		log.Printf(
 			"Persistent executor role started without control-plane or Worker Gateway listeners",
@@ -783,6 +836,13 @@ func (s *Server) startBinhostRefresher(interval time.Duration) {
 // initPersistence sets up the server store and loads any previously saved state.
 func (s *Server) initPersistence() error {
 	if s.jobLedger != nil {
+		// The reconciler is installed before the first load because Initialize
+		// downgrades our error to a warning and boots anyway: PostgreSQL is the
+		// only job read authority here, so a replica that gave up after one
+		// failed load would answer every lookup from an empty map until it was
+		// restarted. Readiness stays red (see checkLedgerHealth) until one of
+		// the 5s ticks actually lands a projection.
+		s.startLedgerReconciler(5 * time.Second)
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		durableJobs, loadErr := s.jobLedger.LoadVisible(ctx)
 		cancel()
@@ -791,17 +851,7 @@ func (s *Server) initPersistence() error {
 			return fmt.Errorf("load PostgreSQL job projection: %w", loadErr)
 		}
 		s.builder.SyncLedgerJobs(durableJobs)
-		if pruned, err := s.jobLedger.PruneStaleWorkers(context.Background(), time.Now().Add(-time.Hour)); err != nil {
-			log.Printf("Warning: stale scheduler worker pruning failed: %v", err)
-		} else if pruned > 0 {
-			log.Printf("Pruned %d stale scheduler worker slot(s)", pruned)
-		}
-		if expired, err := s.jobLedger.ExpireTerminal(context.Background(), time.Now().Add(-7*24*time.Hour)); err != nil {
-			log.Printf("Warning: PostgreSQL job retention failed: %v", err)
-		} else if expired > 0 {
-			log.Printf("PostgreSQL job retention hid %d terminal job(s)", expired)
-		}
-		s.startLedgerReconciler(5 * time.Second)
+		s.pruneLedgerOnce()
 		log.Printf("PostgreSQL is the sole job read/write authority; legacy JSON job persistence is disabled")
 		return nil
 	}
@@ -833,10 +883,34 @@ func (s *Server) initPersistence() error {
 	return nil
 }
 
+// pruneLedgerOnce performs the boot-time ledger janitorial work. It is bound to
+// a sync.Once so the reconciler can still run it after a failed first load
+// without repeating it on every tick.
+func (s *Server) pruneLedgerOnce() {
+	s.ledgerPruneOnce.Do(func() {
+		if pruned, err := s.jobLedger.PruneStaleWorkers(context.Background(), time.Now().Add(-time.Hour)); err != nil {
+			log.Printf("Warning: stale scheduler worker pruning failed: %v", err)
+		} else if pruned > 0 {
+			log.Printf("Pruned %d stale scheduler worker slot(s)", pruned)
+		}
+		if expired, err := s.jobLedger.ExpireTerminal(context.Background(), time.Now().Add(-7*24*time.Hour)); err != nil {
+			log.Printf("Warning: PostgreSQL job retention failed: %v", err)
+		} else if expired > 0 {
+			log.Printf("PostgreSQL job retention hid %d terminal job(s)", expired)
+		}
+	})
+}
+
 func (s *Server) startLedgerReconciler(interval time.Duration) {
 	if s.jobLedger == nil || s.ledgerStop != nil {
 		return
 	}
+	// Readiness is judged against projection freshness rather than the ledger's
+	// last write error: ClaimNext records a successful write on every empty
+	// poll, which would wash a permanently stale projection green in about a
+	// second. Six missed refreshes tolerate a slow query without hiding a
+	// projection that has stopped advancing.
+	s.ledgerStaleAfter = interval * 6
 	s.ledgerStop = make(chan struct{})
 	s.ledgerWG.Add(1)
 	go func() {
@@ -857,6 +931,7 @@ func (s *Server) startLedgerReconciler(interval time.Duration) {
 					continue
 				}
 				s.builder.SyncLedgerJobs(jobs)
+				s.pruneLedgerOnce()
 			}
 		}
 	}()
@@ -1306,9 +1381,17 @@ func (s *Server) checkLedgerHealth() (bool, map[string]interface{}) {
 	status := s.jobLedger.Status()
 	reconcile := status.LastReconcile
 	ok := status.LastError == "" && (reconcile.CheckedAt.IsZero() || reconcile.Consistent)
+	// A projection that never loaded, or stopped advancing, is not observable
+	// through LastError: every successful write clears it. The bound is only
+	// installed once the reconciler owns the refresh.
+	stale := s.ledgerStaleAfter > 0 &&
+		(status.LastProjectionAt.IsZero() ||
+			time.Since(status.LastProjectionAt) > s.ledgerStaleAfter)
+	ok = ok && !stale
 	return ok, map[string]interface{}{
 		"enabled":            true,
 		"ok":                 ok,
+		"projection_stale":   stale,
 		"authority":          status.Authority,
 		"writes":             status.Writes,
 		"write_errors":       status.WriteErrors,
@@ -1341,6 +1424,9 @@ func (s *Server) handleReadyz(w http.ResponseWriter, _ *http.Request) {
 	if s.jobLedger != nil {
 		if ledgerOK, ledgerStatus := s.checkLedgerHealth(); !ledgerOK {
 			reason, _ := ledgerStatus["last_error"].(string)
+			if stale, _ := ledgerStatus["projection_stale"].(bool); stale && reason == "" {
+				reason = "PostgreSQL job projection is stale"
+			}
 			if reason == "" {
 				reason = "job ledger reconciliation is inconsistent"
 			}
