@@ -30,6 +30,11 @@ func TestPrometheusSchedulerSnapshot(t *testing.T) {
 			LeasePhaseReclaimed:  5,
 			ProjectionConfigured: true, ProjectionSnapshotValid: true,
 			ProjectionSourcePresent: true, ProjectionLagSeconds: 37,
+			DistCCWorkersFresh: 2, DistCCSlotsTotal: 8, DistCCSlotsLeased: 3,
+			DistCCLocalCompiles: 11, DistCCRemoteCompiles: 17,
+			DistCCHits: 16, DistCCFallbacks: 2, DistCCNetworkBytes: 4096,
+			DistCCQueueMillis: 25,
+			DistCCFailures:    map[string]int64{"connect": 2},
 		}
 	})
 	request := httptest.NewRequest(
@@ -71,6 +76,16 @@ func TestPrometheusSchedulerSnapshot(t *testing.T) {
 		"portage_monitor_projection_snapshot_valid 1",
 		"portage_monitor_projection_source_watermark_present 1",
 		"portage_monitor_projection_lag_seconds 37",
+		"portage_distcc_workers_fresh 2",
+		"portage_distcc_slots_total 8",
+		"portage_distcc_slots_leased 3",
+		"portage_distcc_compile_local_total 11",
+		"portage_distcc_compile_remote_total 17",
+		"portage_distcc_hits_total 16",
+		"portage_distcc_fallback_total 2",
+		"portage_distcc_network_bytes_total 4096",
+		"portage_distcc_queue_milliseconds_total 25",
+		`portage_distcc_failures_total{reason="connect"} 2`,
 	} {
 		if !strings.Contains(body, expected) {
 			t.Fatalf("prometheus body missing %q", expected)

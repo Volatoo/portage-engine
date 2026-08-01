@@ -1072,3 +1072,64 @@ func TestLoadEnvFileStripsQuotes(t *testing.T) {
 		t.Errorf("DATA_DIR = %q, want single-quoted", env["DATA_DIR"])
 	}
 }
+
+func TestLoadServerDistCCAlphaConfig(t *testing.T) {
+	for key, value := range map[string]string{
+		"DATABASE_REQUIRED": "true", "DISTCC_ALPHA_ENABLED": "true",
+		"DISTCC_PACKAGE_ALLOWLIST":          "sys-devel/llvm,sys-devel/gcc",
+		"DISTCC_CHOST":                      "x86_64-pc-linux-gnu",
+		"DISTCC_COMPILER_DIGEST":            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		"DISTCC_TOOLCHAIN_IMAGE_GENERATION": "gentoo-g1",
+		"DISTCC_CPU_FEATURES":               "avx2,sse4.2",
+		"DISTCC_NETWORK_ZONE":               "build-a",
+		"DISTCC_ISOLATED_NETWORK_CIDRS":     "10.44.0.0/24",
+		"DISTCC_SLOTS_PER_JOB":              "3", "DISTCC_LEASE_SECONDS": "90",
+		"DISTCC_WORKER_FRESHNESS_SECONDS": "40",
+		"DISTCC_FALLBACK_POLICY":          "blocked",
+	} {
+		t.Setenv(key, value)
+	}
+	cfg, err := LoadServerConfig(filepath.Join(t.TempDir(), "missing.conf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.DistCCAlphaEnabled || cfg.DistCCSlotsPerJob != 3 ||
+		cfg.DistCCFallbackPolicy != "blocked" ||
+		len(cfg.DistCCPackageAllowlist) != 2 ||
+		len(cfg.DistCCIsolatedNetworkCIDRs) != 1 {
+		t.Fatalf("unexpected server distcc config: %+v", cfg)
+	}
+	for _, warning := range cfg.Validate() {
+		if strings.Contains(warning, "distcc") || strings.Contains(warning, "DISTCC") {
+			t.Fatalf("valid distcc config warning: %s", warning)
+		}
+	}
+}
+
+func TestLoadBuilderDistCCAlphaConfig(t *testing.T) {
+	for key, value := range map[string]string{
+		"DISTCC_ALPHA_ENABLED":              "true",
+		"DISTCC_PACKAGE_ALLOWLIST":          "sys-devel/llvm",
+		"DISTCC_CHOST":                      "x86_64-pc-linux-gnu",
+		"DISTCC_COMPILER_DIGEST":            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		"DISTCC_TOOLCHAIN_IMAGE_GENERATION": "gentoo-g1",
+		"DISTCC_CPU_FEATURES":               "avx2", "DISTCC_NETWORK_ZONE": "build-a",
+		"DISTCC_ISOLATED_NETWORK_CIDRS": "10.44.0.0/24",
+		"ARCHITECTURE":                  "amd64",
+	} {
+		t.Setenv(key, value)
+	}
+	cfg, err := LoadBuilderConfig(filepath.Join(t.TempDir(), "missing.conf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.DistCCAlphaEnabled || cfg.DistCCCHOST != "x86_64-pc-linux-gnu" ||
+		cfg.DistCCNetworkZone != "build-a" || len(cfg.DistCCCPUFeatures) != 1 {
+		t.Fatalf("unexpected builder distcc config: %+v", cfg)
+	}
+	for _, warning := range cfg.Validate() {
+		if strings.Contains(warning, "distcc") || strings.Contains(warning, "DISTCC") {
+			t.Fatalf("valid distcc config warning: %s", warning)
+		}
+	}
+}

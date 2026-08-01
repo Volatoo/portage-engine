@@ -480,6 +480,11 @@ func validateBuildRequest(req *BuildRequest) error {
 	if req.ResourceClass != "" && !registryIDPattern.MatchString(req.ResourceClass) {
 		return fmt.Errorf("invalid resource class %q", req.ResourceClass)
 	}
+	if req.ProjectID != "" {
+		if _, err := uuid.Parse(req.ProjectID); err != nil {
+			return fmt.Errorf("invalid project ID")
+		}
+	}
 	if err := validateRequestMachineSpec(req.MachineSpec); err != nil {
 		return err
 	}
@@ -555,6 +560,30 @@ func validateLocalBuildRequest(req *LocalBuildRequest) error {
 	}
 	if req.ResourceClass != "" && !registryIDPattern.MatchString(req.ResourceClass) {
 		return fmt.Errorf("invalid resource class %q", req.ResourceClass)
+	}
+	if req.ProjectID != "" {
+		if _, err := uuid.Parse(req.ProjectID); err != nil {
+			return fmt.Errorf("invalid project ID")
+		}
+	}
+	if req.AttemptID != "" {
+		if _, err := uuid.Parse(req.AttemptID); err != nil {
+			return fmt.Errorf("invalid attempt ID")
+		}
+	}
+	if req.AttemptFence < 0 || (req.AttemptID == "") != (req.AttemptFence == 0) {
+		return fmt.Errorf("invalid build attempt fence")
+	}
+	if req.CompileLease != nil {
+		if err := req.CompileLease.Validate(time.Now()); err != nil {
+			return fmt.Errorf("invalid distcc lease: %w", err)
+		}
+		if req.ProjectID == "" ||
+			req.CompileLease.Pool.ProjectTrustDomain != req.ProjectID ||
+			req.CompileLease.AttemptID != req.AttemptID ||
+			req.CompileLease.AttemptFence != req.AttemptFence {
+			return fmt.Errorf("distcc lease does not match the claimed project/attempt")
+		}
 	}
 	if len(req.RepositoryIDs) > maxRepositories {
 		return fmt.Errorf("too many repository IDs")

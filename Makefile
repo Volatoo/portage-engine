@@ -1,4 +1,4 @@
-.PHONY: all build clean test test-release test-recovery run-server run-dashboard run-builder run-client build-image-factory build-desktop-runner build-migrate build-signer build-capacity-actuator build-persistent-executor-template test-persistent-executor-gate lint lint-security lint-complexity
+.PHONY: all build clean test test-release test-recovery run-server run-dashboard run-builder run-client build-image-factory build-desktop-runner build-migrate build-signer build-capacity-actuator build-persistent-executor-template test-persistent-executor-gate build-distcc-gate distcc-gate lint lint-security lint-complexity
 
 # Variables
 BINARY_SERVER=bin/portage-server
@@ -10,6 +10,7 @@ BINARY_DESKTOP_RUNNER=bin/portage-desktop-runner
 BINARY_MIGRATE=bin/portage-migrate
 BINARY_SIGNER=bin/portage-signer
 BINARY_CAPACITY_ACTUATOR=bin/portage-capacity-actuator
+BINARY_DISTCC_GATE=bin/portage-distcc-gate
 GO=go
 GOFLAGS=-v
 PYTHON ?= python3
@@ -23,7 +24,7 @@ LDFLAGS=-ldflags "-X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.bu
 all: build
 
 # Build all binaries
-build: build-server build-dashboard build-builder build-client build-image-factory build-desktop-runner build-migrate build-signer build-capacity-actuator
+build: build-server build-dashboard build-builder build-client build-image-factory build-desktop-runner build-migrate build-signer build-capacity-actuator build-distcc-gate
 
 # Build server
 build-server:
@@ -82,6 +83,15 @@ build-persistent-executor-template:
 
 test-persistent-executor-gate:
 	scripts/persistent-executor-gate.sh repo
+
+build-distcc-gate:
+	@echo "Building Distributed Build Alpha comparison gate..."
+	@mkdir -p bin
+	$(GO) build $(GOFLAGS) -o $(BINARY_DISTCC_GATE) cmd/distcc-gate/main.go
+
+# Usage: make distcc-gate LOCAL_EVIDENCE=... DISTCC_EVIDENCE=... GATE_RECEIPT=...
+distcc-gate:
+	$(GO) run ./cmd/distcc-gate -local "$(LOCAL_EVIDENCE)" -distcc "$(DISTCC_EVIDENCE)" -output "$(GATE_RECEIPT)"
 
 # Clean build artifacts
 clean:

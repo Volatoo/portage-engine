@@ -228,13 +228,12 @@ func executePullAction(
 				if err != nil {
 					return nil, err
 				}
-				if job.Status == "failed" {
-					return nil, fmt.Errorf("local build failed: %s", job.Error)
-				}
-				if job.Status == "success" || job.Status == "completed" {
+				if job.Status == "failed" || job.Status == "success" || job.Status == "completed" {
 					if len(job.Log) > pullBuildLogLimit {
 						job.Log = job.Log[len(job.Log)-pullBuildLogLimit:]
 					}
+					// Failed builds are returned as typed results rather than a
+					// transport error so fenced compile telemetry is not discarded.
 					return json.Marshal(job)
 				}
 			}

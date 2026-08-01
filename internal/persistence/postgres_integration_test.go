@@ -1637,6 +1637,27 @@ func TestProjectResourceAndArtifactMigrationsRequireDrainedAttempts(t *testing.T
 			countersTable, counterKeys, err,
 		)
 	}
+	if _, err := runner.Provider().UpTo(ctx, 29); err != nil {
+		t.Fatalf("schema v29 distributed-build migration failed: %v", err)
+	}
+	if version, err := runner.Provider().GetDBVersion(ctx); err != nil ||
+		version != 29 {
+		t.Fatalf("distributed-build migration version=%d err=%v", version, err)
+	}
+	var compileWorkers, compileLeases, compileObservations string
+	if err := fixture.QueryRow(ctx, `
+		SELECT to_regclass('compile_workers')::text,
+		       to_regclass('compile_slot_leases')::text,
+		       to_regclass('compile_observations')::text
+	`).Scan(&compileWorkers, &compileLeases, &compileObservations); err != nil ||
+		compileWorkers != "compile_workers" ||
+		compileLeases != "compile_slot_leases" ||
+		compileObservations != "compile_observations" {
+		t.Fatalf(
+			"distcc tables workers=%q leases=%q observations=%q err=%v",
+			compileWorkers, compileLeases, compileObservations, err,
+		)
+	}
 }
 
 func testDurableWorkerGatewaySpool(

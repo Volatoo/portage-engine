@@ -189,7 +189,8 @@ Compose does not start package builders or mount the host Docker socket. It
 does start the control plane plus its local PostgreSQL, Redis and observability
 foundation. PostgreSQL/Redis metrics and current process logs are collected
 now; shared process log files rotate at 10 MiB with one backup and Docker JSON
-logs are capped separately. Schema v28 makes PostgreSQL the sole online job,
+logs are capped separately. Schema v29 (integrated as reserved migrations
+00027, 00028, then distcc-owned 00029) makes PostgreSQL the sole online job,
 infrastructure-cleanup, signing-task, external-subject and project-membership
 authority, including versioned project admission policy and active-attempt
 resource/phase/artifact/runtime reservations, phase execution context and
@@ -207,6 +208,16 @@ target SLO/latency/cost history are visible in Monitor. Autoscaling can remain
 observe-only or write globally and per-provider budgeted single-slot actions
 for the separate, listener-free `portage-capacity-actuator`; provider calls
 never occur in a scheduler transaction.
+
+Distributed Build Alpha is an independent, default-off compile-only milestone.
+After project-fair admission, schema v29 atomically reserves fenced slots from
+an exact architecture/CHOST/compiler/toolchain/CPU/zone/project-trust pool.
+Disposable builders enable distcc only through a reviewed package-scoped C/C++
+allowlist, reject endpoints outside isolated build-network CIDRs, forbid pump,
+and safely fall back locally or block before staging. Compile workers receive
+no Portage repository, publication/signing, or PVE/PBS authority. Repository
+code does not claim the still-required live distccd/network/PVE evidence; the
+real distccd/PVE, two-job and disconnect Gate is **not-run**.
 
 To exercise the real S3-compatible adapter locally, start the opt-in MinIO
 profile and run its integration Gate:
@@ -324,6 +335,7 @@ logs containing secrets.
 - [Federated identity and project RBAC](docs/IAM.md)
 - [Scheduler fairness and autoscaling](docs/SCHEDULER.md)
 - [Observability alert runbooks and drills](docs/OBSERVABILITY_RUNBOOKS.md)
+- [Distributed Build Alpha](docs/DISTRIBUTED_BUILD_ALPHA.md)
 - [Authentik, Google, GitHub, and generic OIDC providers](docs/IDENTITY_PROVIDERS.md)
 - [Policy-validated Portage configuration](docs/SYSTEM_CONFIG_USAGE.md)
 - [PVE native Gentoo deployment and testing](docs/PVE_TESTING.md)

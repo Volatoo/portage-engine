@@ -90,7 +90,7 @@ jq -e '
   .checks.database.enabled == true and
   .checks.database.required == true and
   .checks.database.ok == true and
-  .checks.database.schema_version == 28 and
+  .checks.database.schema_version == 29 and
   .checks.job_ledger.enabled == true and
   .checks.job_ledger.ok == true and
   .checks.job_ledger.authority == "postgresql" and
@@ -478,7 +478,7 @@ fi
 printf '%s\n' \
   "Compose verification passed." \
   "  endpoints: server dashboard grafana loki tempo otel prometheus" \
-  "  state: PostgreSQL schema v28 sole authority + one-time CLI device authorization + low-cardinality lease expiry/projection lag observability + target history/SLO/cost projection + weighted fair scheduling/anti-starvation + explainable worker soft scoring + capability/provider-pool observations + fenced capacity action/ownership/drain ledger + workload issuer/certificate lifecycle + exact executor capability routing + multi-provider token exchange/back-channel replay protection + session revocation + administrator step-up + active phase hand-off context + durable worker sessions/commands/uploads + IAM/project RBAC/resource + phase work/fences + phase caps + runtime/cloud-cost/artifact budgets + abuse cooldown + scheduler/logs/metadata/infra-cleanup/signing leases/executor fence" \
+  "  state: PostgreSQL schema v29 sole authority + one-time CLI device authorization + low-cardinality lease expiry/projection lag observability + distributed compile inventory/fenced slot leases + target history/SLO/cost projection + weighted fair scheduling/anti-starvation + explainable worker soft scoring + capability/provider-pool observations + fenced capacity action/ownership/drain ledger + workload issuer/certificate lifecycle + exact executor capability routing + multi-provider token exchange/back-channel replay protection + session revocation + administrator step-up + active phase hand-off context + durable worker sessions/commands/uploads + IAM/project RBAC/resource + phase work/fences + phase caps + runtime/cloud-cost/artifact budgets + abuse cooldown + scheduler/logs/metadata/infra-cleanup/signing leases/executor fence" \
   "  signing: isolated outbound-pull signer + least-privilege role + server has public key only" \
   "  capacity: opt-in listener-free actuator + dedicated least-privilege DB role + exact PVE identity/drain/absence fences" \
   "  binhost: official-style per-profile namespace + independently generated Packages index" \

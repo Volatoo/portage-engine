@@ -58,6 +58,16 @@ type SchedulerSnapshot struct {
 	ProjectionSnapshotValid bool
 	ProjectionSourcePresent bool
 	ProjectionLagSeconds    int64
+	DistCCWorkersFresh      int64
+	DistCCSlotsTotal        int64
+	DistCCSlotsLeased       int64
+	DistCCLocalCompiles     int64
+	DistCCRemoteCompiles    int64
+	DistCCHits              int64
+	DistCCFallbacks         int64
+	DistCCNetworkBytes      int64
+	DistCCQueueMillis       int64
+	DistCCFailures          map[string]int64
 }
 
 // Metrics collects various system metrics.
@@ -520,6 +530,9 @@ func writeSchedulerPrometheus(
 		{"portage_capacity_instances_active", "Actuator-owned active persistent executors.", snapshot.CapacityActive},
 		{"portage_capacity_instances_draining", "Actuator-owned persistent executors draining live work.", snapshot.CapacityDraining},
 		{"portage_capacity_instances_deleting", "Actuator-owned persistent executors undergoing exact provider deletion.", snapshot.CapacityDeleting},
+		{"portage_distcc_workers_fresh", "Fresh credential-minimal compile workers.", snapshot.DistCCWorkersFresh},
+		{"portage_distcc_slots_total", "Fresh exact-pool compile slots.", snapshot.DistCCSlotsTotal},
+		{"portage_distcc_slots_leased", "Atomically leased compile slots.", snapshot.DistCCSlotsLeased},
 	}
 	for _, gauge := range gauges {
 		_, _ = fmt.Fprintf(w, "# HELP %s %s\n", gauge.name, gauge.help)
@@ -530,6 +543,7 @@ func writeSchedulerPrometheus(
 	if snapshot.ProjectionConfigured {
 		writeMonitorProjectionPrometheus(w, snapshot)
 	}
+	writeDistCCPrometheus(w, snapshot)
 }
 
 func writeLeaseExpiryPrometheus(
@@ -588,6 +602,40 @@ func writeMonitorProjectionPrometheus(
 		w, "portage_monitor_projection_lag_seconds %d\n",
 		snapshot.ProjectionLagSeconds,
 	)
+}
+
+func writeDistCCPrometheus(
+	w http.ResponseWriter,
+	snapshot SchedulerSnapshot,
+) {
+	counters := []struct {
+		name, help string
+		value      int64
+	}{
+		{"portage_distcc_compile_local_total", "Observed local compiler invocations.", snapshot.DistCCLocalCompiles},
+		{"portage_distcc_compile_remote_total", "Observed remote compiler invocations.", snapshot.DistCCRemoteCompiles},
+		{"portage_distcc_hits_total", "Observed exact-pool compile-slot reservation hits.", snapshot.DistCCHits},
+		{"portage_distcc_fallback_total", "Observed controlled local fallbacks.", snapshot.DistCCFallbacks},
+		{"portage_distcc_network_bytes_total", "Observed distcc network bytes.", snapshot.DistCCNetworkBytes},
+		{"portage_distcc_queue_milliseconds_total", "Observed compile-slot queue milliseconds.", snapshot.DistCCQueueMillis},
+	}
+	for _, counter := range counters {
+		_, _ = fmt.Fprintf(w, "# HELP %s %s\n", counter.name, counter.help)
+		_, _ = fmt.Fprintf(w, "# TYPE %s counter\n", counter.name)
+		_, _ = fmt.Fprintf(w, "%s %d\n", counter.name, counter.value)
+	}
+	_, _ = fmt.Fprintln(w, "# HELP portage_distcc_failures_total Observed distcc failures by bounded reason.")
+	_, _ = fmt.Fprintln(w, "# TYPE portage_distcc_failures_total counter")
+	for _, reason := range []string{
+		"capacity", "connect", "lease-expired", "lease-fenced",
+		"pool-mismatch", "remote-compile", "worker-stale", "policy",
+		"unknown",
+	} {
+		_, _ = fmt.Fprintf(w,
+			"portage_distcc_failures_total{reason=%q} %d\n",
+			reason, snapshot.DistCCFailures[reason],
+		)
+	}
 }
 
 // GetSnapshot returns a snapshot of current metrics.

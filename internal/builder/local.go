@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -19,6 +20,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/slchris/portage-engine/internal/distcc"
 	"github.com/slchris/portage-engine/internal/notification"
 	"github.com/slchris/portage-engine/internal/signing"
 	"github.com/slchris/portage-engine/internal/storage"
@@ -30,17 +32,26 @@ type LocalBuildRequest struct {
 	// ExecutionID is the durable Worker Gateway command ID. Re-delivery of the
 	// same command must return the original BuildJob instead of running emerge
 	// against the native root a second time.
-	ExecutionID   string            `json:"execution_id,omitempty"`
-	PackageName   string            `json:"package_name"`
-	Version       string            `json:"version"`
-	Arch          string            `json:"arch,omitempty"`
-	ProfileID     string            `json:"profile_id,omitempty"`
-	RepositoryIDs []string          `json:"repository_ids,omitempty"`
-	ResourceClass string            `json:"resource_class,omitempty"`
-	UseFlags      map[string]string `json:"use_flags"`
-	Environment   map[string]string `json:"environment"`
-	ConfigBundle  *ConfigBundle     `json:"config_bundle,omitempty"`
-	PackageSpecs  []PackageSpec     `json:"package_specs,omitempty"`
+	ExecutionID   string   `json:"execution_id,omitempty"`
+	PackageName   string   `json:"package_name"`
+	Version       string   `json:"version"`
+	Arch          string   `json:"arch,omitempty"`
+	ProfileID     string   `json:"profile_id,omitempty"`
+	RepositoryIDs []string `json:"repository_ids,omitempty"`
+	ResourceClass string   `json:"resource_class,omitempty"`
+	// ProjectID and attempt fields are copied independently from the durable
+	// scheduler claim. The builder binds them to the lease's trust domain and
+	// attempt fence before enabling any remote compiler wrapper.
+	ProjectID    string            `json:"project_id,omitempty"`
+	AttemptID    string            `json:"attempt_id,omitempty"`
+	AttemptFence int64             `json:"attempt_fence,omitempty"`
+	UseFlags     map[string]string `json:"use_flags"`
+	Environment  map[string]string `json:"environment"`
+	ConfigBundle *ConfigBundle     `json:"config_bundle,omitempty"`
+	PackageSpecs []PackageSpec     `json:"package_specs,omitempty"`
+	// CompileLease is a non-secret, scheduler-issued exact-pool contract. A
+	// builder still applies its local allowlist and isolated-network policy.
+	CompileLease *distcc.Lease `json:"compile_lease,omitempty"`
 }
 
 // BuildJob represents a build job with its status.
@@ -90,6 +101,16 @@ func (j *BuildJob) artifactsSnapshot() []string {
 func (j *BuildJob) setArtifactURL(url string) {
 	j.mu.Lock()
 	j.ArtifactURL = url
+	j.mu.Unlock()
+}
+
+// setMetadata records one builder result without racing status readers.
+func (j *BuildJob) setMetadata(key string, value any) {
+	j.mu.Lock()
+	if j.Metadata == nil {
+		j.Metadata = make(map[string]interface{})
+	}
+	j.Metadata[key] = value
 	j.mu.Unlock()
 }
 
@@ -461,7 +482,33 @@ func buildOptionsFromConfig(cfg *config.BuilderConfig) BuildOptions {
 	if cfg != nil && cfg.BinpkgFormat != "" {
 		format = cfg.BinpkgFormat
 	}
-	return BuildOptions{Format: format}
+	policy := distcc.BuilderPolicy{}
+	if cfg != nil {
+		networks := make([]*net.IPNet, 0, len(cfg.DistCCIsolatedNetworkCIDRs))
+		for _, raw := range cfg.DistCCIsolatedNetworkCIDRs {
+			_, network, err := net.ParseCIDR(raw)
+			if err != nil {
+				log.Printf("Distcc disabled: invalid isolated network %q", raw)
+				return BuildOptions{Format: format}
+			}
+			networks = append(networks, network)
+		}
+		var err error
+		policy, err = distcc.NewBuilderPolicy(distcc.BuilderPolicy{
+			Enabled:          cfg.DistCCAlphaEnabled,
+			Allowlist:        append([]string(nil), cfg.DistCCPackageAllowlist...),
+			IsolatedNetworks: networks, Architecture: cfg.Architecture,
+			CHOST: cfg.DistCCCHOST, CompilerDigest: cfg.DistCCCompilerDigest,
+			ImageGeneration: cfg.DistCCToolchainImageGeneration,
+			CPUFeatures:     append([]string(nil), cfg.DistCCCPUFeatures...),
+			NetworkZone:     cfg.DistCCNetworkZone,
+		})
+		if err != nil {
+			log.Printf("Distcc disabled: %v", err)
+			policy = distcc.BuilderPolicy{}
+		}
+	}
+	return BuildOptions{Format: format, DistCCPolicy: policy}
 }
 
 // initBuildExecutor initializes the build executor.

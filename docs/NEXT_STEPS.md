@@ -81,7 +81,8 @@ membership，不来自 email 或可变 group claim。
 
 ### PostgreSQL、PBS 与 RPO/RTO
 
-- [ ] 在生产 schema v26 上配置 full、differential 和 WAL/PITR 备份。
+- [ ] 在最终整合后的生产 schema v29（00027 → 00028 → 00029）上配置 full、
+  differential 和 WAL/PITR 备份。
 - [ ] 将 backup/WAL repository 放到 NAS，并纳入 PBS VM 备份。
 - [ ] 保持 PostgreSQL `PGDATA` 位于可靠本地块存储，不直接放在 NFS。
 - [ ] 在隔离数据库中恢复并核验 schema、job、attempt、signing task、workload
@@ -156,23 +157,32 @@ membership，不来自 email 或可变 group claim。
 - [ ] 验证 SBOM/provenance 可以从发布制品独立获取和校验。
 - [ ] 建立基础镜像 digest 与安全更新策略。
 
-## P2：Distributed Build Alpha（不阻塞 Public Beta）
+## P2：Distributed Build Alpha（仓库切片已实现；不阻塞 Public Beta）
 
 distcc 应作为独立里程碑，不能直接打开全局开关。
 
-- [ ] 增加 compile worker inventory、slot reservation、lease 和 heartbeat。
-- [ ] 按 architecture、CHOST、compiler/version digest、toolchain image generation、
+- [x] 以 migration 00029 增加 compile worker inventory、原子 slot reservation、
+  fenced lease 和 worker/builder heartbeat；00027/00028 分别保留给并行里程碑。
+- [x] 按 architecture、CHOST、compiler/version digest、toolchain image generation、
   CPU feature、network zone 和 project trust domain 精确分池。
-- [ ] compile worker 不持有 Portage repository、发布权限、签名私钥或 PVE/PBS
-  管理凭证。
-- [ ] `distccd` 只监听隔离构建网络，并限制到持有有效 lease 的 builder。
-- [ ] 默认禁用 pump mode。
-- [ ] 只对 reviewed C/C++ package allowlist 启用。
-- [ ] 小包及 Rust、Go、Java、configure、link、test 保持本地执行。
-- [ ] 收集 local/remote compile、hit rate、fallback、network bytes、queue time 和
-  failure reason。
-- [ ] 对比纯本地与 distcc 的 artifact digest、ABI、安装和 GUI 结果。
-- [ ] 断开 compile worker 时必须安全 fallback 或 blocked，不能污染 staging。
+- [x] 仓库契约不承载 Portage repository、发布权限、签名私钥或 PVE/PBS 管理凭证；
+  现场仍需审核实际 compile-worker image/mount/credential inventory。
+- [x] lease contract 绑定 worker/builder/network identity/pool/expiry/fence；现场仍需
+  用真实隔离网络和 mTLS/L4 sidecar 证明 `distccd` 只允许有效 lease。
+- [x] 无条件禁用 pump mode。
+- [x] server 与 builder 双重 reviewed C/C++ package allowlist。
+- [x] 小包及 Rust、Go、Java 不进入 allowlist；Portage `package.env` 仅给 reviewed
+  atom 启用编译 wrapper，configure、link、install、test 保持本地。
+- [x] 持久化并导出低基数 local/remote compile、hit、fallback、network bytes、
+  queue time 和固定 failure reason；builder compiler wrapper 已把真实调用聚合回
+  manager 的 `RecordCompileObservation` 调用链，现场 sidecar 仍须提供网络授权证据。
+- [x] 增加 local-only 与 distcc artifact digest、ABI、安装和 GUI evidence 的
+  fail-closed 仓库 Gate `make distcc-gate`。
+- [x] 断开时实现 `local` fallback 或 `blocked`；失败 emerge 不进入 collection；
+  output fence 在 collection 前及下载后/staging commit 前复验，失败清理隔离结果。
+- [ ] 以真实 distccd/PVE、至少两个并行 job 和 worker disconnect 完成现场 Gate，
+  保存数据库、网络策略、日志、metrics 与对照 receipt；当前状态 **not-run**，仓库
+  不伪造现场结果。
 
 退出标准：至少两个 job 并行，reviewed C/C++ workload 能借用同构 compile pool；
 资源不超卖，断开 worker 可控降级，产物仍通过同一签名、安装和发布 Gate。
