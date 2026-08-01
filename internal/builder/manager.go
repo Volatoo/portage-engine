@@ -308,6 +308,7 @@ type SchedulerRuntimeStatus struct {
 	CapabilityWorkers  int                      `json:"capability_workers"`
 	StaleWorkers       int                      `json:"stale_workers"`
 	AttemptsLastHour   int                      `json:"attempts_last_hour"`
+	LeaseExpiries      LeaseExpiryStatus        `json:"lease_expiries"`
 	OldestQueuedAt     *time.Time               `json:"oldest_queued_at,omitempty"`
 	OldestLeaseExpires *time.Time               `json:"oldest_lease_expires_at,omitempty"`
 	Fairness           SchedulerFairnessStatus  `json:"fairness"`
@@ -316,12 +317,41 @@ type SchedulerRuntimeStatus struct {
 	Autoscaler         SchedulerAutoscaleStatus `json:"autoscaler"`
 }
 
+// LeaseExpiryStatus is a fixed-cardinality view of durable scheduler recovery
+// outcomes. Adding an identity-bearing field here would also add an unsafe
+// monitoring dimension, so details remain in job and audit events.
+type LeaseExpiryStatus struct {
+	AttemptRequeued   int64 `json:"attempt_requeued"`
+	AttemptFailed     int64 `json:"attempt_failed"`
+	AttemptCanceled   int64 `json:"attempt_canceled"`
+	AdmissionRequeued int64 `json:"admission_requeued"`
+	AdmissionFailed   int64 `json:"admission_failed"`
+	AdmissionCanceled int64 `json:"admission_canceled"`
+	PhaseReclaimed    int64 `json:"phase_reclaimed"`
+}
+
 type TargetHistoryStatus struct {
 	GeneratedAt      time.Time                 `json:"generated_at"`
 	RetentionDays    int                       `json:"retention_days"`
 	SLOTargetPercent float64                   `json:"slo_target_percent"`
 	MinimumSamples   int                       `json:"minimum_samples"`
+	Projection       MonitorProjectionStatus   `json:"projection"`
 	Targets          []TargetReliabilityStatus `json:"targets,omitempty"`
+}
+
+// MonitorProjectionStatus compares the authoritative terminal-event
+// watermark with the event watermark included in the cached Monitor snapshot.
+// Both watermarks originate in PostgreSQL; LagSeconds is zero when caught up
+// or when the source is empty.
+type MonitorProjectionStatus struct {
+	Valid                  bool       `json:"valid"`
+	State                  string     `json:"state"`
+	ObservedAt             time.Time  `json:"observed_at"`
+	SourceWatermarkPresent bool       `json:"source_watermark_present"`
+	SourceWatermarkAt      *time.Time `json:"source_watermark_at,omitempty"`
+	ProjectedWatermarkAt   *time.Time `json:"projected_watermark_at,omitempty"`
+	LagSeconds             int64      `json:"lag_seconds"`
+	AlertThresholdSeconds  int64      `json:"alert_threshold_seconds"`
 }
 
 type TargetReliabilityStatus struct {

@@ -23,30 +23,41 @@ type Config struct {
 }
 
 type SchedulerSnapshot struct {
-	QueuedTasks           int64
-	UnschedulableTasks    int64
-	RunningTasks          int64
-	EligibleProjects      int64
-	StarvedProjects       int64
-	MaxQueueWaitSeconds   int64
-	WorkerDecisions       int64
-	WorkerMultiCandidate  int64
-	TargetSamples30d      int64
-	TargetSuccesses30d    int64
-	TargetFailures30d     int64
-	TargetSLOBreaches30d  int64
-	TargetReservedCost30d int64
-	TargetChargedCost30d  int64
-	AutoscaleActiveSlots  int64
-	AutoscaleDesiredSlots int64
-	AutoscaleBacklog      int64
-	AutoscalePools        int64
-	AutoscaleBlockedPools int64
-	CapacityOpenActions   int64
-	CapacityProvisioning  int64
-	CapacityActive        int64
-	CapacityDraining      int64
-	CapacityDeleting      int64
+	QueuedTasks             int64
+	UnschedulableTasks      int64
+	RunningTasks            int64
+	EligibleProjects        int64
+	StarvedProjects         int64
+	MaxQueueWaitSeconds     int64
+	WorkerDecisions         int64
+	WorkerMultiCandidate    int64
+	TargetSamples30d        int64
+	TargetSuccesses30d      int64
+	TargetFailures30d       int64
+	TargetSLOBreaches30d    int64
+	TargetReservedCost30d   int64
+	TargetChargedCost30d    int64
+	AutoscaleActiveSlots    int64
+	AutoscaleDesiredSlots   int64
+	AutoscaleBacklog        int64
+	AutoscalePools          int64
+	AutoscaleBlockedPools   int64
+	CapacityOpenActions     int64
+	CapacityProvisioning    int64
+	CapacityActive          int64
+	CapacityDraining        int64
+	CapacityDeleting        int64
+	LeaseAttemptRequeued    int64
+	LeaseAttemptFailed      int64
+	LeaseAttemptCanceled    int64
+	LeaseAdmissionRequeued  int64
+	LeaseAdmissionFailed    int64
+	LeaseAdmissionCanceled  int64
+	LeasePhaseReclaimed     int64
+	ProjectionConfigured    bool
+	ProjectionSnapshotValid bool
+	ProjectionSourcePresent bool
+	ProjectionLagSeconds    int64
 }
 
 // Metrics collects various system metrics.
@@ -515,6 +526,68 @@ func writeSchedulerPrometheus(
 		_, _ = fmt.Fprintf(w, "# TYPE %s gauge\n", gauge.name)
 		_, _ = fmt.Fprintf(w, "%s %d\n", gauge.name, gauge.value)
 	}
+	writeLeaseExpiryPrometheus(w, snapshot)
+	if snapshot.ProjectionConfigured {
+		writeMonitorProjectionPrometheus(w, snapshot)
+	}
+}
+
+func writeLeaseExpiryPrometheus(
+	w http.ResponseWriter,
+	snapshot SchedulerSnapshot,
+) {
+	_, _ = fmt.Fprintln(w, "# HELP portage_scheduler_lease_expiries_total Durable scheduler lease expiries by fixed lease kind and recovery result.")
+	_, _ = fmt.Fprintln(w, "# TYPE portage_scheduler_lease_expiries_total counter")
+	series := []struct {
+		lease, result string
+		value         int64
+	}{
+		{"attempt", "requeued", snapshot.LeaseAttemptRequeued},
+		{"attempt", "failed", snapshot.LeaseAttemptFailed},
+		{"attempt", "canceled", snapshot.LeaseAttemptCanceled},
+		{"admission", "requeued", snapshot.LeaseAdmissionRequeued},
+		{"admission", "failed", snapshot.LeaseAdmissionFailed},
+		{"admission", "canceled", snapshot.LeaseAdmissionCanceled},
+		{"phase", "reclaimed", snapshot.LeasePhaseReclaimed},
+	}
+	for _, item := range series {
+		_, _ = fmt.Fprintf(
+			w,
+			"portage_scheduler_lease_expiries_total{lease=%q,result=%q} %d\n",
+			item.lease, item.result, item.value,
+		)
+	}
+}
+
+func boolMetric(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
+}
+
+func writeMonitorProjectionPrometheus(
+	w http.ResponseWriter,
+	snapshot SchedulerSnapshot,
+) {
+	_, _ = fmt.Fprintln(w, "# HELP portage_monitor_projection_snapshot_valid Whether the PostgreSQL-backed Monitor projection snapshot is valid.")
+	_, _ = fmt.Fprintln(w, "# TYPE portage_monitor_projection_snapshot_valid gauge")
+	_, _ = fmt.Fprintf(
+		w, "portage_monitor_projection_snapshot_valid %d\n",
+		boolMetric(snapshot.ProjectionSnapshotValid),
+	)
+	_, _ = fmt.Fprintln(w, "# HELP portage_monitor_projection_source_watermark_present Whether at least one durable terminal source event exists.")
+	_, _ = fmt.Fprintln(w, "# TYPE portage_monitor_projection_source_watermark_present gauge")
+	_, _ = fmt.Fprintf(
+		w, "portage_monitor_projection_source_watermark_present %d\n",
+		boolMetric(snapshot.ProjectionSourcePresent),
+	)
+	_, _ = fmt.Fprintln(w, "# HELP portage_monitor_projection_lag_seconds Durable terminal-event time distance from the cached Monitor projection watermark to its source watermark; before the first projection, source-event age by database clock; zero when current or empty.")
+	_, _ = fmt.Fprintln(w, "# TYPE portage_monitor_projection_lag_seconds gauge")
+	_, _ = fmt.Fprintf(
+		w, "portage_monitor_projection_lag_seconds %d\n",
+		snapshot.ProjectionLagSeconds,
+	)
 }
 
 // GetSnapshot returns a snapshot of current metrics.

@@ -153,10 +153,62 @@
       "gridPos": { "h": 4, "w": 6, "x": 18, "y": 19 },
       "targets": [{ "expr": "portage_storage_errors_total", "legendFormat": "" }],
       "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 1 }] } } }
+    },
+    {
+      "title": "Scheduler Recovery",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 23 }
+    },
+    {
+      "title": "Lease Expiry Recovery Rate",
+      "description": "Durable low-cardinality recovery outcomes; lease and result are closed enums.",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 24 },
+      "targets": [
+        {
+          "expr": "sum by (lease, result) (rate(portage_scheduler_lease_expiries_total[5m]))",
+          "legendFormat": "{{lease}} / {{result}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops", "min": 0 } }
+    },
+    {
+      "title": "Monitor Projection Lag",
+      "description": "Durable terminal-event time distance from the cached projection watermark to its source watermark. Before the first projection it is source-event age by database clock. Zero means current or empty; warning threshold is 120 seconds.",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 7, "w": 6, "x": 12, "y": 24 },
+      "targets": [{ "expr": "portage_monitor_projection_lag_seconds", "legendFormat": "lag" }],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0,
+          "thresholds": { "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 120 }] }
+        }
+      }
+    },
+    {
+      "title": "Monitor Projection State",
+      "description": "Snapshot validity and durable source-watermark presence. An empty source is valid.",
+      "type": "stat",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 7, "w": 6, "x": 18, "y": 24 },
+      "targets": [
+        { "expr": "portage_monitor_projection_snapshot_valid", "legendFormat": "valid" },
+        { "expr": "portage_monitor_projection_source_watermark_present", "legendFormat": "source present" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "max": 1,
+          "thresholds": { "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 1 }] }
+        }
+      }
     }
   ],
   "schemaVersion": 39,
-  "tags": ["portage-engine", "builds"],
+  "tags": ["portage-engine", "builds", "scheduler", "monitor"],
   "templating": {
     "list": [
       {

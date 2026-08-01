@@ -948,7 +948,10 @@ func TestMonitorRendersJobLedgerSurface(t *testing.T) {
 		!strings.Contains(body, `/api/runtime-metadata/status`) ||
 		!strings.Contains(body, `id="cache-status"`) ||
 		!strings.Contains(body, `/api/cache/status`) ||
-		!strings.Contains(body, `write_errors`) {
+		!strings.Contains(body, `write_errors`) ||
+		!strings.Contains(body, `lease_expiries`) ||
+		!strings.Contains(body, `projection.lag_seconds`) ||
+		!strings.Contains(body, `projection.alert_threshold_seconds`) {
 		t.Fatalf("monitor missing ledger surface: status=%d", w.Code)
 	}
 }

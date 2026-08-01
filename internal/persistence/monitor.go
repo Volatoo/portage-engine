@@ -8,14 +8,17 @@ import (
 	"math"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/slchris/portage-engine/internal/builder"
 )
 
 const (
-	monitorRetentionDays  = 30
-	monitorMinimumSamples = 5
-	monitorSLOTarget      = 95.0
-	monitorCacheTTL       = 30 * time.Second
+	monitorRetentionDays   = 30
+	monitorMinimumSamples  = 5
+	monitorSLOTarget       = 95.0
+	monitorCacheTTL        = 30 * time.Second
+	monitorLagAlertSeconds = 120
 )
 
 func monitorTargetID(targetKey string) string {
@@ -33,15 +36,121 @@ func (r *JobRepository) targetHistoryStatus(
 	defer r.monitorMu.Unlock()
 	age := time.Since(r.monitorAt)
 	if !r.monitorAt.IsZero() && age >= 0 && age < monitorCacheTTL {
-		return r.monitor, nil
+		projection, err := loadCachedMonitorProjection(
+			ctx, r.db.Pool(), r.monitor.Projection.ProjectedWatermarkAt,
+		)
+		if err != nil {
+			return builder.TargetHistoryStatus{}, err
+		}
+		status := r.monitor
+		status.Projection = projection
+		return status, nil
 	}
-	status, err := loadTargetHistory(ctx, r.db.Pool())
+	var status builder.TargetHistoryStatus
+	err := r.db.WithTx(ctx, pgx.TxOptions{
+		IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly,
+	}, func(q Querier) error {
+		var err error
+		status, err = loadTargetHistory(ctx, q)
+		if err != nil {
+			return err
+		}
+		status.Projection, err = loadMonitorProjection(ctx, q)
+		if err == nil {
+			status.GeneratedAt = status.Projection.ObservedAt
+		}
+		return err
+	})
 	if err != nil {
 		return builder.TargetHistoryStatus{}, err
 	}
 	r.monitor = status
 	r.monitorAt = time.Now()
 	return status, nil
+}
+
+func loadMonitorProjection(
+	ctx context.Context,
+	q Querier,
+) (builder.MonitorProjectionStatus, error) {
+	var now time.Time
+	var source, projected *time.Time
+	err := q.QueryRow(ctx, `
+		SELECT clock_timestamp(),
+		       (
+		         SELECT max(COALESCE(j.completed_at, j.updated_at))
+		         FROM build_jobs j
+		         WHERE j.legacy_visible = true
+		           AND j.state IN ('completed', 'success', 'failed', 'canceled')
+		       ),
+		       (
+		         SELECT max(COALESCE(j.completed_at, j.updated_at))
+		         FROM monitor_job_outcomes outcomes
+		         JOIN build_jobs j ON j.id = outcomes.job_id
+		       )
+	`).Scan(&now, &source, &projected)
+	if err != nil {
+		return builder.MonitorProjectionStatus{},
+			fmt.Errorf("read monitor projection watermarks: %w", err)
+	}
+	return monitorProjectionStatus(now, source, projected), nil
+}
+
+func loadCachedMonitorProjection(
+	ctx context.Context,
+	q Querier,
+	projected *time.Time,
+) (builder.MonitorProjectionStatus, error) {
+	var now time.Time
+	var source *time.Time
+	err := q.QueryRow(ctx, `
+		SELECT clock_timestamp(),
+		       max(COALESCE(j.completed_at, j.updated_at))
+		FROM build_jobs j
+		WHERE j.legacy_visible = true
+		  AND j.state IN ('completed', 'success', 'failed', 'canceled')
+	`).Scan(&now, &source)
+	if err != nil {
+		return builder.MonitorProjectionStatus{},
+			fmt.Errorf("read monitor source watermark: %w", err)
+	}
+	return monitorProjectionStatus(now, source, projected), nil
+}
+
+func monitorProjectionStatus(
+	now time.Time,
+	source, projected *time.Time,
+) builder.MonitorProjectionStatus {
+	status := builder.MonitorProjectionStatus{
+		Valid:                  true,
+		State:                  "empty",
+		ObservedAt:             now.UTC(),
+		SourceWatermarkPresent: source != nil,
+		SourceWatermarkAt:      source,
+		ProjectedWatermarkAt:   projected,
+		AlertThresholdSeconds:  monitorLagAlertSeconds,
+	}
+	if source == nil {
+		if projected != nil {
+			status.Valid = false
+			status.State = "invalid"
+		}
+		return status
+	}
+	if projected != nil && !projected.Before(*source) {
+		status.State = "current"
+		return status
+	}
+	status.State = "lagging"
+	if projected != nil {
+		status.LagSeconds = int64(source.Sub(*projected).Seconds())
+	} else if now.After(*source) {
+		status.LagSeconds = int64(now.Sub(*source).Seconds())
+	}
+	if status.LagSeconds < 0 {
+		status.LagSeconds = 0
+	}
+	return status
 }
 
 // loadTargetHistory derives a bounded operator view from terminal jobs. It
@@ -51,7 +160,6 @@ func loadTargetHistory(
 	q Querier,
 ) (builder.TargetHistoryStatus, error) {
 	status := builder.TargetHistoryStatus{
-		GeneratedAt:      time.Now().UTC(),
 		RetentionDays:    monitorRetentionDays,
 		SLOTargetPercent: monitorSLOTarget,
 		MinimumSamples:   monitorMinimumSamples,
