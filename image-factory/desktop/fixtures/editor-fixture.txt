@@ -1,0 +1,4 @@
+PORTAGE_ENGINE_DESKTOP_FIXTURE_V1
+
+This file is sealed into the desktop verifier image.
+GTK and Qt scenarios must open this exact digest-bound local fixture.

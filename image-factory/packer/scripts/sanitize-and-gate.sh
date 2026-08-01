@@ -60,11 +60,13 @@ require_command systemctl
 test -s /etc/portage/sets/portage-engine-image
 if [[ $PE_DESKTOP == true ]]; then
   log "verifying desktop runtime contract"
-  for command_name in Xorg Xvfb startxfce4 gtk-launch runuser xrandr xset scrot xdotool; do
+  for command_name in Xorg Xvfb startxfce4 gpg gtk-launch runuser xrandr xset scrot xdotool; do
     require_command "${command_name}"
   done
   require_command /usr/libexec/portage-desktop-agent
   python3 -c 'import gi; gi.require_version("Atspi", "2.0"); from gi.repository import Atspi'
+  test "$(sha256sum /usr/share/portage-engine/desktop-fixtures/editor-fixture.txt | awk '{print $1}')" = 861bc826497b0f7a91a2c8c25e5541f14dc2d5d0109318b080e3c92251498c42
+  test "$(sha256sum /usr/share/portage-engine/desktop-fixtures/webview-fixture.html | awk '{print $1}')" = 40ab1938f53b876bb5c6047f3d8642f060b63dcc0d30870d337bf8abc91e2e34
   id -u portage-e2e >/dev/null
   grep -Fxq 'autologin-user=portage-e2e' /etc/lightdm/lightdm.conf.d/50-portage-engine-e2e.conf
   test "$(stat -c '%U:%G' /home/portage-e2e/.config)" = portage-e2e:portage-e2e

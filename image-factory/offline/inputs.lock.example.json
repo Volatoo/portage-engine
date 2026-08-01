@@ -165,6 +165,22 @@
       "required_for": ["base-systemd", "desktop-verifier"]
     },
     {
+      "id": "fixture/desktop/editor-v1",
+      "kind": "fixture",
+      "path": "factory/desktop/fixtures/editor-fixture.txt",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "size": 0,
+      "required_for": ["base-systemd", "desktop-verifier"]
+    },
+    {
+      "id": "fixture/desktop/webview-v1",
+      "kind": "fixture",
+      "path": "factory/desktop/fixtures/webview-fixture.html",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "size": 0,
+      "required_for": ["base-systemd", "desktop-verifier"]
+    },
+    {
       "id": "build-plan/base-systemd-g1",
       "kind": "build-plan",
       "path": "plans/base-systemd.build.json",

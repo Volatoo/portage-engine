@@ -25,11 +25,17 @@ import urllib.request
 DESKTOP_USER = os.environ.get("PE_DESKTOP_USER", "portage-e2e")
 STAGING_ROOT = pathlib.Path("/var/lib/portage-engine/staging-binhost")
 STAGING_DIGEST = pathlib.Path("/var/lib/portage-engine/staging-binhost.digest")
+STAGING_SIGNER = pathlib.Path("/var/lib/portage-engine/staging-binhost.signer")
+STAGING_GNUPG = pathlib.Path("/var/lib/portage-engine/staging-gnupg")
 BINREPO_CONFIG = pathlib.Path("/etc/portage/binrepos.conf/portage-engine-staging.conf")
 EVIDENCE_ROOT = pathlib.Path("/run/portage-engine/desktop-evidence")
+FIXTURE_ROOT = pathlib.Path("/usr/share/portage-engine/desktop-fixtures")
+BUILD_PLAN = pathlib.Path("/etc/portage-engine/build-plan.json")
 ATOM_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9+._-]*/[A-Za-z0-9][A-Za-z0-9+._-]*$")
 APP_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9+._-]{0,127}\.desktop$")
 DIGEST_RE = re.compile(r"^sha256:[a-f0-9]{64}$")
+FINGERPRINT_RE = re.compile(r"^(?:[A-F0-9]{40}|[A-F0-9]{64})$")
+FIXTURE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 KEY_RE = re.compile(r"^[A-Za-z0-9+_-]{1,128}$")
 SAFE_PATH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9+._/-]{0,511}$")
 MAX_MANIFEST_BYTES = 4 * 1024 * 1024
@@ -86,7 +92,81 @@ def fetch(url: str, limit: int) -> bytes:
     return data
 
 
-def hydrate_staging(origin: str, expected_digest: str) -> None:
+def primary_fingerprints(colon_output: str) -> list[str]:
+    fingerprints: list[str] = []
+    awaiting_primary = False
+    for line in colon_output.splitlines():
+        fields = line.split(":")
+        if not fields:
+            continue
+        if fields[0] == "pub":
+            awaiting_primary = True
+        elif fields[0] == "sub":
+            awaiting_primary = False
+        elif fields[0] == "fpr" and awaiting_primary and len(fields) > 9:
+            fingerprints.append(fields[9])
+            awaiting_primary = False
+    return fingerprints
+
+
+def configure_staging_signer(key_path: str, expected_fingerprint: str) -> None:
+    if not FIXTURE_RE.fullmatch(key_path) or not FINGERPRINT_RE.fullmatch(expected_fingerprint):
+        fail("invalid staging signer policy")
+    source = STAGING_ROOT / key_path
+    try:
+        info = source.lstat()
+    except FileNotFoundError:
+        fail("staging signer key is missing from the locked manifest")
+    if not source.is_file() or source.is_symlink() or info.st_size < 1 or info.st_size > 1024 * 1024:
+        fail("staging signer key is not a bounded regular file")
+    if STAGING_GNUPG.exists():
+        shutil.rmtree(STAGING_GNUPG)
+    STAGING_GNUPG.mkdir(parents=True, mode=0o700)
+    os.chmod(STAGING_GNUPG, 0o700)
+    inspect = subprocess.run(
+        [
+            "/usr/bin/gpg",
+            "--homedir",
+            str(STAGING_GNUPG),
+            "--batch",
+            "--with-colons",
+            "--import-options",
+            "show-only",
+            "--import",
+            str(source),
+        ],
+        check=False,
+        text=True,
+        capture_output=True,
+        timeout=30,
+    )
+    fingerprints = primary_fingerprints(inspect.stdout)
+    if inspect.returncode != 0 or fingerprints != [expected_fingerprint]:
+        fail("staging signer key does not match the reviewed primary fingerprint")
+    subprocess.run(
+        ["/usr/bin/gpg", "--homedir", str(STAGING_GNUPG), "--batch", "--import", str(source)],
+        check=True,
+        text=True,
+        capture_output=True,
+        timeout=30,
+    )
+    subprocess.run(
+        ["/usr/bin/gpg", "--homedir", str(STAGING_GNUPG), "--batch", "--import-ownertrust"],
+        input=f"{expected_fingerprint}:6:\n",
+        check=True,
+        text=True,
+        capture_output=True,
+        timeout=30,
+    )
+    nobody = pwd.getpwnam("nobody")
+    for root, directories, files in os.walk(STAGING_GNUPG):
+        os.chown(root, nobody.pw_uid, nobody.pw_gid)
+        for name in directories + files:
+            os.chown(pathlib.Path(root) / name, nobody.pw_uid, nobody.pw_gid)
+    atomic_write(STAGING_SIGNER, (expected_fingerprint + "\n").encode(), 0o644)
+
+
+def hydrate_staging(origin: str, expected_digest: str, key_path: str = "", expected_fingerprint: str = "") -> None:
     if not DIGEST_RE.fullmatch(expected_digest):
         fail("invalid staging manifest digest")
     manifest_url = checked_url(origin, "MANIFEST.json")
@@ -147,9 +227,21 @@ def hydrate_staging(origin: str, expected_digest: str) -> None:
         if temporary.exists():
             shutil.rmtree(temporary)
     atomic_write(STAGING_DIGEST, (expected_digest + "\n").encode(), 0o644)
+    signed = bool(key_path or expected_fingerprint)
+    if signed:
+        configure_staging_signer(key_path, expected_fingerprint)
+    else:
+        STAGING_SIGNER.unlink(missing_ok=True)
+        if STAGING_GNUPG.exists():
+            shutil.rmtree(STAGING_GNUPG)
     atomic_write(
         BINREPO_CONFIG,
-        b"[portage-engine-staging]\nsync-uri = file:///var/lib/portage-engine/staging-binhost\npriority = 1000\n",
+        (
+            "[portage-engine-staging]\n"
+            "sync-uri = file:///var/lib/portage-engine/staging-binhost\n"
+            "priority = 1000\n"
+            f"verify-signature = {'true' if signed else 'false'}\n"
+        ).encode(),
         0o644,
     )
 
@@ -226,6 +318,141 @@ def desktop_ready() -> None:
         fail("desktop display is not ready")
     if not user_process_running(user, {"xfce4-session"}) or not user_process_running(user, {"xfwm4"}):
         fail("XFCE session and window manager are not ready")
+
+
+def assert_image(profile_id: str, image_id: str, generation: str, display_server: str) -> None:
+    if not all(SAFE_PATH_RE.fullmatch(value) for value in (profile_id, image_id, generation)):
+        fail("invalid expected desktop image identity")
+    if display_server != "x11":
+        fail("direct desktop guest agent supports only X11")
+    try:
+        raw = BUILD_PLAN.read_bytes()
+    except FileNotFoundError:
+        fail("desktop build plan identity is missing")
+    if len(raw) > 1024 * 1024:
+        fail("desktop build plan identity exceeds the reviewed limit")
+    try:
+        plan = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        fail(f"invalid desktop build plan identity: {error}")
+    expected = {
+        "profile_id": profile_id,
+        "image_id": image_id,
+        "generation": generation,
+    }
+    if not isinstance(plan, dict) or any(plan.get(key) != value for key, value in expected.items()):
+        fail("desktop build plan identity does not match the reviewed scenario")
+
+
+def reviewed_fixture(name: str, expected_digest: str) -> pathlib.Path:
+    if not FIXTURE_RE.fullmatch(name) or not DIGEST_RE.fullmatch(expected_digest):
+        fail("invalid desktop fixture policy")
+    path = FIXTURE_ROOT / name
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        fail("reviewed desktop fixture is missing")
+    if not path.is_file() or path.is_symlink() or info.st_size < 1 or info.st_size > 1024 * 1024:
+        fail("reviewed desktop fixture is not a bounded regular file")
+    actual = "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+    if actual != expected_digest:
+        fail("reviewed desktop fixture digest mismatch")
+    return path
+
+
+def launch_application(application: str, fixture: pathlib.Path | None = None) -> None:
+    if not APP_RE.fullmatch(application):
+        fail("invalid desktop application ID")
+    unit = "portage-e2e-" + hashlib.sha256(application.encode()).hexdigest()[:16]
+    _, environment = desktop_identity()
+    # gtk-launch exits after spawning the desktop process. The default
+    # KillMode=control-group would then kill that child as the transient
+    # unit becomes inactive, producing a false-success launch with no
+    # window. Keep the reviewed child alive until close or VM stop.
+    command = [
+        "/usr/bin/systemd-run",
+        "--user",
+        "--property=KillMode=process",
+        f"--unit={unit}",
+    ]
+    command.extend(f"--setenv={key}={value}" for key, value in environment.items())
+    command.extend(["/usr/bin/gtk-launch", application.removesuffix(".desktop")])
+    if fixture is not None:
+        command.append(fixture.as_uri())
+    run_desktop(command)
+
+
+def install_binpkg(atom: str, digest: str, signer_fingerprint: str = "", raw_log_path: str = "") -> None:
+    if not ATOM_RE.fullmatch(atom) or not DIGEST_RE.fullmatch(digest):
+        fail("invalid package atom or staging digest")
+    if not STAGING_DIGEST.is_file() or STAGING_DIGEST.read_text().strip() != digest:
+        fail("hydrated staging snapshot does not match the scenario")
+    signed = bool(signer_fingerprint or raw_log_path)
+    if signed:
+        if not FINGERPRINT_RE.fullmatch(signer_fingerprint) or not STAGING_SIGNER.is_file():
+            fail("signed install lacks a reviewed signer policy")
+        if STAGING_SIGNER.read_text().strip() != signer_fingerprint or not STAGING_GNUPG.is_dir():
+            fail("hydrated staging signer does not match the scenario")
+        ensure_evidence_root()
+        log_path = evidence_path(raw_log_path, ".log")
+    else:
+        log_path = None
+    environment = os.environ.copy()
+    if signed:
+        environment["FEATURES"] = "binpkg-request-signature"
+        environment["BINPKG_GPG_VERIFY_GPG_HOME"] = str(STAGING_GNUPG)
+    result = subprocess.run(
+        [
+            "/usr/bin/emerge",
+            "--usepkgonly",
+            "--binpkg-respect-use=y",
+            "--oneshot",
+            "--jobs=1",
+            atom,
+        ],
+        check=False,
+        text=True,
+        capture_output=True,
+        timeout=900,
+        env=environment,
+    )
+    if log_path is not None:
+        header = (
+            f"atom={atom}\n"
+            f"staging_digest={digest}\n"
+            f"signature_required=true\n"
+            f"signer_fingerprint={signer_fingerprint}\n"
+            f"exit_code={result.returncode}\n"
+        )
+        atomic_write(log_path, (header + result.stdout + result.stderr).encode(), 0o640)
+    if result.returncode != 0:
+        requirement = "signature-required " if signed else ""
+        fail(f"{requirement}binpkg install failed with exit code {result.returncode}")
+
+
+def close_accessible(role: str, name: str, state: str) -> None:
+    if not role or not name or len(role) > 128 or len(name) > 256:
+        fail("invalid accessibility selector")
+    if not accessible_present(role, name, state):
+        fail("accessibility selector was not present before close")
+    run_desktop(["/usr/bin/xdotool", "key", "--clearmodifiers", "Alt+F4"])
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline:
+        if not accessible_present(role, name, state):
+            return
+        time.sleep(1)
+    fail("accessibility selector remained after normal window close")
+
+
+def accessible_present(role: str, name: str, state: str) -> bool:
+    result = run_desktop(
+        [sys.executable, __file__, "_a11y", role, name, state],
+        timeout=10,
+        check=False,
+    )
+    if result.returncode != 0:
+        fail("accessibility query failed in the reviewed desktop session")
+    return result.stdout.strip() == "found"
 
 
 def evidence_path(raw: str, suffix: str) -> pathlib.Path:
@@ -329,53 +556,33 @@ def main(arguments: list[str]) -> None:
     if not arguments:
         fail("desktop guest action is required")
     action, *values = arguments
-    if action == "prepare" and len(values) == 2:
-        hydrate_staging(values[0], values[1])
+    if action == "prepare" and len(values) in {2, 4}:
+        hydrate_staging(*values)
+    elif action == "assert-image" and len(values) == 4:
+        assert_image(*values)
     elif action == "desktop-ready" and not values:
         desktop_ready()
-    elif action == "install" and len(values) == 2:
-        atom, digest = values
-        if not ATOM_RE.fullmatch(atom) or not DIGEST_RE.fullmatch(digest):
-            fail("invalid package atom or staging digest")
-        if not STAGING_DIGEST.is_file() or STAGING_DIGEST.read_text().strip() != digest:
-            fail("hydrated staging snapshot does not match the scenario")
-        subprocess.run(
-            ["/usr/bin/emerge", "--usepkgonly", "--binpkg-respect-use=y", "--oneshot", "--jobs=1", atom],
-            check=True,
-            timeout=900,
-        )
+    elif action == "install" and len(values) in {2, 4}:
+        install_binpkg(*values)
     elif action == "launch" and len(values) == 1:
-        application = values[0]
-        if not APP_RE.fullmatch(application):
-            fail("invalid desktop application ID")
-        unit = "portage-e2e-" + hashlib.sha256(application.encode()).hexdigest()[:16]
-        _, environment = desktop_identity()
-        # gtk-launch exits after spawning the desktop process. The default
-        # KillMode=control-group would then kill that child as the transient
-        # unit becomes inactive, producing a false-success launch with no
-        # window. Keep the reviewed child alive until the VM is stopped.
-        command = [
-            "/usr/bin/systemd-run",
-            "--user",
-            "--property=KillMode=process",
-            f"--unit={unit}",
-        ]
-        command.extend(f"--setenv={key}={value}" for key, value in environment.items())
-        command.extend(["/usr/bin/gtk-launch", application.removesuffix(".desktop")])
-        run_desktop(command)
+        launch_application(values[0])
+    elif action == "launch-fixture" and len(values) == 3:
+        application, fixture, digest = values
+        launch_application(application, reviewed_fixture(fixture, digest))
     elif action == "wait-accessible" and len(values) == 3:
         role, name, state = values
         if not role or not name or len(role) > 128 or len(name) > 256:
             fail("invalid accessibility selector")
         deadline = time.monotonic() + 60
         while time.monotonic() < deadline:
-            result = run_desktop([sys.executable, __file__, "_a11y", role, name, state], timeout=10)
-            if result.stdout.strip() == "found":
+            if accessible_present(role, name, state):
                 return
             time.sleep(1)
         fail("accessibility selector was not found")
     elif action == "_a11y" and len(values) == 3:
         print("found" if scan_accessibility(*values) else "missing")
+    elif action == "close" and len(values) == 3:
+        close_accessible(*values)
     elif action == "key" and len(values) == 1:
         if not KEY_RE.fullmatch(values[0]):
             fail("invalid reviewed key sequence")

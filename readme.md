@@ -100,7 +100,7 @@ flowchart LR
     Gateway --> API
     Worker --> Build[Native emerge]
     Build --> Stage[Unsigned quarantine]
-    Stage --> Verify[Unsigned install / GUI verification]
+    Stage --> Verify[Unsigned native install verification]
     Verify --> Queue[(PostgreSQL signing task)]
     Queue --> Signer[Isolated outbound-pull signer]
     Signer --> SignedVerify[Signed install verification]
@@ -113,7 +113,7 @@ flowchart LR
 - `portage-signer`: digest-bound queue worker and the only private-key owner.
 - `portage-dashboard`: builds, nodes, logs and read-only factory evidence.
 - `portage-client`: optional developer CLI.
-- `portage-desktop-runner`: deterministic native-GUI verification.
+- `portage-desktop-runner`: deterministic native-GUI verification; its version-2 matrix consumes signed candidate binpkgs.
 - `image-factory/`: offline Packer/Catalyst image and release gates.
 
 The default Docker target is the combined trusted-LAN runtime. Public

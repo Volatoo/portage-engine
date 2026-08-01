@@ -293,6 +293,18 @@ build {
   }
 
   provisioner "shell" {
+    inline = ["install -d -m 0755 /tmp/portage-desktop-fixtures"]
+  }
+
+  provisioner "file" {
+    sources = [
+      "../desktop/fixtures/editor-fixture.txt",
+      "../desktop/fixtures/webview-fixture.html",
+    ]
+    destination = "/tmp/portage-desktop-fixtures/"
+  }
+
+  provisioner "shell" {
     environment_vars = [
       "PE_PROFILE_ID=${var.profile_id}",
       "PE_PROFILE_PATH=${var.profile_path}",

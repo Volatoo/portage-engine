@@ -9,7 +9,7 @@
   "steps": [
     {"id": "restore-clean", "action": "restore", "input": {"snapshot": "clean"}},
     {"id": "start-vm", "action": "start", "timeout_seconds": 300},
-    {"id": "install-artifact", "action": "install", "timeout_seconds": 300, "input": {"atom": "app-editors/gvim", "staging_digest": "sha256:replace-with-reviewed-staging-digest"}},
+    {"id": "install-artifact", "action": "install", "timeout_seconds": 300, "input": {"atom": "app-editors/gvim", "staging_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"}},
     {"id": "launch-application", "action": "launch", "input": {"application_id": "gvim.desktop"}},
     {"id": "wait-main-window", "action": "wait_accessible", "input": {"role": "frame", "name": "GVim", "state": "visible"}},
     {"id": "capture-accessibility", "action": "collect_accessibility", "input": {"name": "gvim-accessibility-tree"}},

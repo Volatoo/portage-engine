@@ -21,6 +21,13 @@ func TestGuestAgentWaitsForXFCEAndInjectsUnitEnvironment(t *testing.T) {
 		`command.extend(f"--setenv={key}={value}" for key, value in environment.items())`,
 		`"--property=KillMode=process"`,
 		`fail("desktop user configuration directory is not owner-writable")`,
+		`"verify-signature = {'true' if signed else 'false'}\n"`,
+		`environment["FEATURES"] = "binpkg-request-signature"`,
+		`environment["BINPKG_GPG_VERIFY_GPG_HOME"] = str(STAGING_GNUPG)`,
+		`fingerprints != [expected_fingerprint]`,
+		`reviewed_fixture(fixture, digest)`,
+		`close_accessible(*values)`,
+		`assert_image(*values)`,
 	} {
 		if !strings.Contains(contents, required) {
 			t.Fatalf("desktop guest agent is missing %q", required)

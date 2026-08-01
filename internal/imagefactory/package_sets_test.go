@@ -35,6 +35,7 @@ func TestExamplePackageSetCatalog(t *testing.T) {
 	// first live desktop candidate to compile successfully and then fail closed.
 	for _, atom := range []string{
 		"app-emulation/cloud-init",
+		"app-crypt/gnupg",
 		"dev-build/cmake",
 		"app-accessibility/at-spi2-core",
 		"dev-python/pygobject",

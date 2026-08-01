@@ -1609,7 +1609,7 @@ channel: candidate | stable | retired</code></pre>
         </div>
 
         <div class="callout warning">
-          <strong>核心原则：</strong>能用结构化状态断言的，不用截图；能用可访问性树定位的，不用坐标；只有真正的视觉结果才使用 needle/像素比对；AI 作为最后一层语义判断和故障分析。
+          <strong>核心原则：</strong>能用结构化状态断言的，不用截图；能用可访问性树定位的，不用坐标；只有真正的视觉结果才使用 reviewed needle/像素比对；视觉 AI 只用于确定性 Gate 失败后的 triage，不参与 pass/fail。
         </div>
       </section>
 
@@ -1622,10 +1622,10 @@ channel: candidate | stable | retired</code></pre>
           <div class="flow-step"><strong>1. Build</strong>Native Gentoo 构建并上传 staging</div>
           <div class="flow-step"><strong>2. Schedule</strong>创建 desktop verification job</div>
           <div class="flow-step"><strong>3. Restore</strong>从干净桌面快照启动 VM</div>
-          <div class="flow-step"><strong>4. Install</strong>配置 staging binhost 并安装包</div>
+          <div class="flow-step"><strong>4. Install</strong>配置签名 candidate binhost 并强制验签安装</div>
           <div class="flow-step"><strong>5. Exercise</strong>启动应用并执行 GUI 场景</div>
-          <div class="flow-step"><strong>6. Judge</strong>结构化 + 视觉 + AI 分层判定</div>
-          <div class="flow-step"><strong>7. Promote</strong>通过后签名并原子发布</div>
+          <div class="flow-step"><strong>6. Judge</strong>结构化 + accessibility + reviewed 视觉判定</div>
+          <div class="flow-step"><strong>7. Promote</strong>记录 Gate 后进入原子发布决策</div>
         </div>
 
         <div class="stack">
@@ -1643,7 +1643,7 @@ channel: candidate | stable | retired</code></pre>
           </div>
           <div class="layer">
             <strong>定位与断言</strong>
-            <p>Accessibility tree/AT-SPI → openQA needle/模板匹配 → OCR → 视觉 AI。</p>
+            <p>Accessibility tree/AT-SPI → openQA reviewed needle/模板匹配 → OCR；视觉 AI 只接收失败证据做 triage。</p>
           </div>
           <div class="layer">
             <strong>测试环境</strong>
@@ -1700,7 +1700,7 @@ channel: candidate | stable | retired</code></pre>
             <tr><td>2</td><td>可访问性语义</td><td>窗口 title、role、accessible name、按钮 enabled</td><td>是</td></tr>
             <tr><td>3</td><td>局部 needle / 模板匹配</td><td>主窗口、关键图标、画布区域、错误对话框</td><td>核心区域可阻断</td></tr>
             <tr><td>4</td><td>OCR</td><td>安装器错误、无法访问 accessibility tree 的文本</td><td>视稳定性决定</td></tr>
-            <tr><td>5</td><td>视觉 AI 语义判断</td><td>黑屏、布局严重破坏、错误弹窗、渲染异常</td><td>初期只告警/转人工</td></tr>
+            <tr><td>5</td><td>视觉 AI 失败 triage</td><td>对已失败的黑屏、布局破坏、错误弹窗或渲染异常分类</td><td>否；不参与 pass/fail</td></tr>
           </tbody>
         </table>
 
@@ -1889,7 +1889,7 @@ desktop-mcp/                       # GUI-4；可选、非 release oracle</code><
         </table>
 
         <div class="callout">
-          <strong>第一批桌面场景建议：</strong>选择一个 GTK 应用、一个 Qt 应用和一个 Electron/WebView 应用。每个应用只做“安装 → 启动 → 打开固定 fixture → 关键窗口断言 → 正常退出”，先把环境稳定性做出来，再扩复杂业务流程。
+          <strong>第一批桌面场景静态实现（待真实 PVE/签名候选 Gate）：</strong>schema v2 已加入 GTK Mousepad、Qt FeatherPad 与 WebKitGTK surf 三个场景；每个场景绑定 profile/image generation/X11 backend、签名 staging manifest 与独立 signer fingerprint，执行 readiness → 签名 binpkg 安装 → digest-bound 本地 fixture → AT-SPI/DOM 断言 → screenshot/accessibility/journal evidence → 正常 WM close 并等待节点消失 → 最终 VM stop。surf 以本地 HTML 覆盖 Electron/WebView 列，不依赖运行时公网内容。tracked JSON 的全零 digest/fingerprint 是 runner 会拒绝的静态 sentinel；没有真实新 desktop image、签名 candidate 和 PVE 运行结果，因此不宣称 Gate 通过。Wayland 必须由具备 compositor-native capture/input 的 adapter 单独标记执行，不能把 XWayland 冒充 native Wayland；视觉 AI 仅可用于失败 triage。</div>
         </div>
       </section>
 

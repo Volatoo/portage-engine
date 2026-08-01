@@ -117,7 +117,8 @@ offline-root/
 ├── package-sets/catalog.json
 ├── images/base-systemd.image-manifest.json  # required by desktop
 ├── tools/portage-image-factory-linux-amd64
-├── factory/                            # every consumed script is lock-listed
+├── factory/                            # every consumed script/fixture is lock-listed
+│   └── desktop/fixtures/{editor-fixture.txt,webview-fixture.html}
 ├── seeds/pbs-vm-<vmid>-<snapshot>.attestation.json
 ├── repositories/{gentoo,pe-profiles}-<full-commit>.bundle
 ├── keys/pe-profiles-release.asc
@@ -162,6 +163,14 @@ packer-desktop-image`, so execution-surface or hardware-only changes can wrap
 an accepted desktop template without recompiling its complete package set;
 the source image manifest must still match the exact desktop profile, parent
 chain and repository revisions.
+
+Desktop successors that provide GUI matrix support also seal the generic text
+and HTML fixtures under `/usr/share/portage-engine/desktop-fixtures`. Each is a
+`fixture` object in the input lock. Packer uploads only those reviewed paths,
+and the sanitize Gate compares their exact SHA-256 values before accepting the
+template. Changing fixture bytes therefore requires a new lock, Gate digest and
+desktop image generation; an old image cannot satisfy a schema-version 2
+scenario merely because its profile ID is unchanged.
 
 Every executable/tool object also declares a `platform` such as
 `linux-amd64`. Preflight compares Packer, its plugin/checksum, Terraform, its
@@ -438,6 +447,12 @@ pkrvars under `packer/output/`. The guest then:
 - validates systemd/cloud-init/qemu-agent/desktop commands and removes host
   keys, machine identity, cloud-init state, leases, random seed, journals and
   secret-like configuration.
+
+For desktop images the runtime Gate also requires the capability-limited guest
+agent plus the two digest-pinned fixtures. Application packages in the GTK/Qt/
+WebView scenario matrix are not incidentally baked into this image set: they
+are installed later from a manifest- and signer-bound candidate binrepo with
+Portage signature enforcement. See `docs/DESKTOP_E2E.md` for the live boundary.
 
 ## Disposable Terraform smoke gate
 

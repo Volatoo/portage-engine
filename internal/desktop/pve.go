@@ -45,8 +45,14 @@ type PVEConfig struct {
 	Node                   string `json:"node"`
 	VMID                   int    `json:"vmid"`
 	AllowedSnapshot        string `json:"allowed_snapshot"`
+	ProfileID              string `json:"profile_id,omitempty"`
+	ImageID                string `json:"image_id,omitempty"`
+	ImageGeneration        string `json:"image_generation,omitempty"`
+	DisplayServer          string `json:"display_server,omitempty"`
 	StagingBinhost         string `json:"staging_binhost,omitempty"`
 	StagingDigest          string `json:"staging_digest,omitempty"`
+	StagingKeyPath         string `json:"staging_key_path,omitempty"`
+	StagingKeyFingerprint  string `json:"staging_key_fingerprint,omitempty"`
 	GuestAgentPath         string `json:"guest_agent_path"`
 	ArtifactDirectory      string `json:"artifact_directory"`
 	LifecycleTimeoutSecond int    `json:"lifecycle_timeout_seconds"`
@@ -79,8 +85,8 @@ func LoadPVEConfig(path string) (*PVEConfig, error) {
 
 // Validate checks the PVE desktop-runner configuration contract.
 func (c *PVEConfig) Validate() error {
-	if c.SchemaVersion != 1 || !pveNamePattern.MatchString(c.Node) || c.VMID < 100 || c.VMID > 999999999 || !pveNamePattern.MatchString(c.AllowedSnapshot) {
-		return fmt.Errorf("desktop PVE config requires schema_version 1, valid node/snapshot and VMID")
+	if err := c.validateVersionIdentity(); err != nil {
+		return err
 	}
 	endpoint, err := url.Parse(strings.TrimRight(strings.TrimSpace(c.Endpoint), "/"))
 	if err != nil || endpoint.Scheme != "https" || endpoint.Hostname() == "" || endpoint.User != nil || endpoint.RawQuery != "" || endpoint.Fragment != "" || (endpoint.Path != "" && endpoint.Path != "/api2/json") {
@@ -89,21 +95,90 @@ func (c *PVEConfig) Validate() error {
 	if c.CABundlePath != "" && (!filepath.IsAbs(c.CABundlePath) || c.InsecureSkipTLSVerify) {
 		return fmt.Errorf("desktop PVE CA bundle must be absolute and cannot be combined with insecure TLS")
 	}
-	stagingConfigured := strings.TrimSpace(c.StagingBinhost) != "" || strings.TrimSpace(c.StagingDigest) != ""
-	if stagingConfigured {
-		binhost, err := url.Parse(strings.TrimSpace(c.StagingBinhost))
-		if err != nil || (binhost.Scheme != "http" && binhost.Scheme != "https") || binhost.Hostname() == "" || binhost.User != nil || binhost.RawQuery != "" || binhost.Fragment != "" {
-			return fmt.Errorf("desktop staging binhost must use HTTP(S) without credentials, query, or fragment")
-		}
-		if !sha256Pattern.MatchString(c.StagingDigest) {
-			return fmt.Errorf("desktop staging digest must be a full sha256 digest")
-		}
+	if err := c.validateStaging(); err != nil {
+		return err
 	}
 	if !absoluteGuestBin.MatchString(c.GuestAgentPath) || !filepath.IsAbs(c.ArtifactDirectory) {
 		return fmt.Errorf("desktop guest agent and artifact directory must be absolute safe paths")
 	}
 	if c.LifecycleTimeoutSecond < 30 || c.LifecycleTimeoutSecond > 1800 {
 		return fmt.Errorf("desktop lifecycle timeout must be 30..1800 seconds")
+	}
+	return nil
+}
+
+func (c *PVEConfig) validateVersionIdentity() error {
+	if (c.SchemaVersion != 1 && c.SchemaVersion != 2) || !pveNamePattern.MatchString(c.Node) || c.VMID < 100 || c.VMID > 999999999 || !pveNamePattern.MatchString(c.AllowedSnapshot) {
+		return fmt.Errorf("desktop PVE config requires schema_version 1 or 2, valid node/snapshot and VMID")
+	}
+	if c.SchemaVersion == 1 {
+		if c.ProfileID != "" || c.ImageID != "" || c.ImageGeneration != "" || c.DisplayServer != "" || c.StagingKeyPath != "" || c.StagingKeyFingerprint != "" {
+			return fmt.Errorf("desktop PVE config schema_version 1 must not use version 2 identity or signing fields")
+		}
+	} else {
+		if !scenarioIDPattern.MatchString(c.ProfileID) || !scenarioIDPattern.MatchString(c.ImageID) || !imageGenerationPattern.MatchString(c.ImageGeneration) {
+			return fmt.Errorf("desktop PVE config schema_version 2 requires exact profile, image, and generation identity")
+		}
+		if c.DisplayServer != "x11" {
+			return fmt.Errorf("direct PVE desktop mode currently supports only the x11 display_server")
+		}
+	}
+	return nil
+}
+
+func (c *PVEConfig) validateStaging() error {
+	stagingConfigured := strings.TrimSpace(c.StagingBinhost) != "" || strings.TrimSpace(c.StagingDigest) != "" || strings.TrimSpace(c.StagingKeyPath) != "" || strings.TrimSpace(c.StagingKeyFingerprint) != ""
+	if !stagingConfigured {
+		return nil
+	}
+	binhost, err := url.Parse(strings.TrimSpace(c.StagingBinhost))
+	if err != nil || (binhost.Scheme != "http" && binhost.Scheme != "https") || binhost.Hostname() == "" || binhost.User != nil || binhost.RawQuery != "" || binhost.Fragment != "" {
+		return fmt.Errorf("desktop staging binhost must use HTTP(S) without credentials, query, or fragment")
+	}
+	if !sha256Pattern.MatchString(c.StagingDigest) {
+		return fmt.Errorf("desktop staging digest must be a full sha256 digest")
+	}
+	if c.SchemaVersion == 2 && (!fixtureNamePattern.MatchString(c.StagingKeyPath) || !signerFingerprintPattern.MatchString(c.StagingKeyFingerprint)) {
+		return fmt.Errorf("desktop signed staging requires a safe key path and full uppercase primary fingerprint")
+	}
+	if c.SchemaVersion == 1 && (c.StagingKeyPath != "" || c.StagingKeyFingerprint != "") {
+		return fmt.Errorf("desktop PVE config schema_version 1 does not support signed staging fields")
+	}
+	return nil
+}
+
+// ValidateScenario binds a reviewed scenario to the exact direct-PVE policy.
+func (c *PVEConfig) ValidateScenario(scenario *Scenario) error {
+	if scenario == nil {
+		return fmt.Errorf("desktop scenario is required")
+	}
+	if err := c.Validate(); err != nil {
+		return err
+	}
+	if err := scenario.Validate(); err != nil {
+		return err
+	}
+	if scenario.SchemaVersion != c.SchemaVersion {
+		return fmt.Errorf("desktop scenario schema version does not match direct PVE policy")
+	}
+	if scenario.Steps[0].Input["snapshot"] != c.AllowedSnapshot {
+		return fmt.Errorf("desktop scenario snapshot does not match direct PVE policy")
+	}
+	if scenario.SchemaVersion == 2 {
+		if scenario.ProfileID != c.ProfileID || scenario.ImageID != c.ImageID || scenario.ImageGeneration != c.ImageGeneration || scenario.DisplayServer != c.DisplayServer {
+			return fmt.Errorf("desktop scenario runtime identity does not match direct PVE policy")
+		}
+	}
+	for _, step := range scenario.Steps {
+		if step.Action != "install" {
+			continue
+		}
+		if c.StagingBinhost == "" || step.Input["staging_digest"] != c.StagingDigest {
+			return fmt.Errorf("desktop scenario install does not match direct PVE staging policy")
+		}
+		if scenario.SchemaVersion == 2 && step.Input["signer_fingerprint"] != c.StagingKeyFingerprint {
+			return fmt.Errorf("desktop scenario signer fingerprint does not match direct PVE staging policy")
+		}
 	}
 	return nil
 }
@@ -160,60 +235,50 @@ func NewPVEQGADriver(config *PVEConfig, tokenID, secret string) (*PVEQGADriver, 
 
 // Do executes one bounded action and returns its observation.
 func (d *PVEQGADriver) Do(ctx context.Context, action ActionRequest) (Observation, error) {
+	if err := d.validateActionIdentity(action); err != nil {
+		return Observation{}, err
+	}
 	switch action.Action {
 	case "restore":
-		if action.Input["snapshot"] != d.config.AllowedSnapshot {
-			return Observation{}, fmt.Errorf("snapshot is not allowed by desktop PVE policy")
-		}
-		if err := d.ensureStopped(ctx); err != nil {
-			return Observation{}, err
-		}
-		if err := d.taskPOST(ctx, d.vmPath()+"/snapshot/"+url.PathEscape(d.config.AllowedSnapshot)+"/rollback", url.Values{}); err != nil {
-			return Observation{}, fmt.Errorf("restore reviewed desktop snapshot: %w", err)
-		}
-		return Observation{State: "passed", Message: "reviewed snapshot restored"}, nil
+		return d.restoreSnapshot(ctx, action)
 	case "start":
-		if err := d.ensureStarted(ctx); err != nil {
-			return Observation{}, err
-		}
-		if err := d.ensureDesktopReady(ctx); err != nil {
-			return Observation{}, err
-		}
-		if d.config.StagingBinhost != "" {
-			if _, err := d.guestExec(ctx, []string{d.config.GuestAgentPath, "prepare", d.config.StagingBinhost, d.config.StagingDigest}); err != nil {
-				return Observation{}, fmt.Errorf("prepare locked staging binhost: %w", err)
-			}
-		}
-		return Observation{State: "passed", Message: "VM and guest agent ready"}, nil
+		return d.startDesktop(ctx)
 	case "stop":
 		if err := d.ensureStopped(ctx); err != nil {
 			return Observation{}, err
 		}
 		return Observation{State: "passed", Message: "VM stopped"}, nil
 	case "install":
-		if d.config.StagingBinhost == "" {
-			return Observation{}, fmt.Errorf("install action requires a configured staging binhost")
-		}
-		if action.Input["staging_digest"] != d.config.StagingDigest {
-			return Observation{}, fmt.Errorf("scenario staging digest does not match desktop PVE policy")
-		}
-		_, err := d.guestExec(ctx, []string{d.config.GuestAgentPath, "install", action.Input["atom"], action.Input["staging_digest"]})
-		if err != nil {
-			return Observation{}, err
-		}
-		return Observation{State: "passed", Message: "digest-bound binpkg installed"}, nil
+		return d.installBinpkg(ctx, action)
 	case "launch":
 		_, err := d.guestExec(ctx, []string{d.config.GuestAgentPath, "launch", action.Input["application_id"]})
 		if err != nil {
 			return Observation{}, err
 		}
 		return Observation{State: "passed"}, nil
+	case "launch_fixture":
+		_, err := d.guestExec(ctx, []string{
+			d.config.GuestAgentPath, "launch-fixture", action.Input["application_id"],
+			action.Input["fixture"], action.Input["fixture_digest"],
+		})
+		if err != nil {
+			return Observation{}, err
+		}
+		return Observation{State: "passed", Message: "digest-bound local fixture launched"}, nil
 	case "wait_accessible":
 		_, err := d.guestExec(ctx, []string{d.config.GuestAgentPath, "wait-accessible", action.Input["role"], action.Input["name"], action.Input["state"]})
 		if err != nil {
 			return Observation{}, err
 		}
 		return Observation{State: "passed"}, nil
+	case "close":
+		_, err := d.guestExec(ctx, []string{
+			d.config.GuestAgentPath, "close", action.Input["role"], action.Input["name"], action.Input["state"],
+		})
+		if err != nil {
+			return Observation{}, err
+		}
+		return Observation{State: "passed", Message: "window accepted WM close and accessibility node disappeared"}, nil
 	case "key":
 		_, err := d.guestExec(ctx, []string{d.config.GuestAgentPath, "key", action.Input["keys"]})
 		if err != nil {
@@ -227,14 +292,7 @@ func (d *PVEQGADriver) Do(ctx context.Context, action ActionRequest) (Observatio
 		}
 		return Observation{State: "passed"}, nil
 	case "click":
-		if action.Input["x"] == "" || action.Input["y"] == "" || action.Input["accessibility_id"] != "" || action.Input["needle"] != "" {
-			return Observation{}, fmt.Errorf("direct PVE adapter currently requires reviewed x/y click coordinates")
-		}
-		_, err := d.guestExec(ctx, []string{d.config.GuestAgentPath, "click", action.Input["x"], action.Input["y"]})
-		if err != nil {
-			return Observation{}, err
-		}
-		return Observation{State: "passed"}, nil
+		return d.click(ctx, action)
 	case "screenshot":
 		return d.collectScreenshot(ctx, action)
 	case "collect_accessibility":
@@ -246,6 +304,117 @@ func (d *PVEQGADriver) Do(ctx context.Context, action ActionRequest) (Observatio
 	default:
 		return Observation{}, fmt.Errorf("unsupported direct PVE desktop action %q", action.Action)
 	}
+}
+
+func (d *PVEQGADriver) restoreSnapshot(ctx context.Context, action ActionRequest) (Observation, error) {
+	if action.Input["snapshot"] != d.config.AllowedSnapshot {
+		return Observation{}, fmt.Errorf("snapshot is not allowed by desktop PVE policy")
+	}
+	if err := d.ensureStopped(ctx); err != nil {
+		return Observation{}, err
+	}
+	if err := d.taskPOST(ctx, d.vmPath()+"/snapshot/"+url.PathEscape(d.config.AllowedSnapshot)+"/rollback", url.Values{}); err != nil {
+		return Observation{}, fmt.Errorf("restore reviewed desktop snapshot: %w", err)
+	}
+	return Observation{State: "passed", Message: "reviewed snapshot restored"}, nil
+}
+
+func (d *PVEQGADriver) startDesktop(ctx context.Context) (Observation, error) {
+	if err := d.ensureStarted(ctx); err != nil {
+		return Observation{}, err
+	}
+	if d.config.SchemaVersion == 2 {
+		if _, err := d.guestExec(ctx, []string{
+			d.config.GuestAgentPath, "assert-image", d.config.ProfileID, d.config.ImageID,
+			d.config.ImageGeneration, d.config.DisplayServer,
+		}); err != nil {
+			return Observation{}, fmt.Errorf("verify desktop image identity: %w", err)
+		}
+	}
+	if err := d.ensureDesktopReady(ctx); err != nil {
+		return Observation{}, err
+	}
+	if d.config.StagingBinhost != "" {
+		command := []string{d.config.GuestAgentPath, "prepare", d.config.StagingBinhost, d.config.StagingDigest}
+		if d.config.SchemaVersion == 2 {
+			command = append(command, d.config.StagingKeyPath, d.config.StagingKeyFingerprint)
+		}
+		if _, err := d.guestExec(ctx, command); err != nil {
+			return Observation{}, fmt.Errorf("prepare locked staging binhost: %w", err)
+		}
+	}
+	message := "VM and guest agent ready"
+	if d.config.SchemaVersion == 2 {
+		message = fmt.Sprintf("pinned %s image %s (%s) ready on %s", d.config.ProfileID, d.config.ImageID, d.config.ImageGeneration, d.config.DisplayServer)
+	}
+	return Observation{State: "passed", Message: message}, nil
+}
+
+func (d *PVEQGADriver) installBinpkg(ctx context.Context, action ActionRequest) (Observation, error) {
+	if d.config.StagingBinhost == "" {
+		return Observation{}, fmt.Errorf("install action requires a configured staging binhost")
+	}
+	if action.Input["staging_digest"] != d.config.StagingDigest {
+		return Observation{}, fmt.Errorf("scenario staging digest does not match desktop PVE policy")
+	}
+	if d.config.SchemaVersion == 2 {
+		if action.Input["signer_fingerprint"] != d.config.StagingKeyFingerprint {
+			return Observation{}, fmt.Errorf("scenario signer fingerprint does not match desktop PVE policy")
+		}
+		return d.installSignedBinpkg(ctx, action)
+	}
+	_, err := d.guestExec(ctx, []string{d.config.GuestAgentPath, "install", action.Input["atom"], action.Input["staging_digest"]})
+	if err != nil {
+		return Observation{}, err
+	}
+	return Observation{State: "passed", Message: "digest-bound binpkg installed"}, nil
+}
+
+func (d *PVEQGADriver) click(ctx context.Context, action ActionRequest) (Observation, error) {
+	if action.Input["x"] == "" || action.Input["y"] == "" || action.Input["accessibility_id"] != "" || action.Input["needle"] != "" {
+		return Observation{}, fmt.Errorf("direct PVE adapter currently requires reviewed x/y click coordinates")
+	}
+	_, err := d.guestExec(ctx, []string{d.config.GuestAgentPath, "click", action.Input["x"], action.Input["y"]})
+	if err != nil {
+		return Observation{}, err
+	}
+	return Observation{State: "passed"}, nil
+}
+
+func (d *PVEQGADriver) validateActionIdentity(action ActionRequest) error {
+	if d.config.SchemaVersion != 2 {
+		return nil
+	}
+	if action.ProfileID != d.config.ProfileID || action.ImageID != d.config.ImageID || action.ImageGeneration != d.config.ImageGeneration || action.DisplayServer != d.config.DisplayServer {
+		return fmt.Errorf("desktop action runtime identity does not match direct PVE policy")
+	}
+	return nil
+}
+
+func (d *PVEQGADriver) installSignedBinpkg(ctx context.Context, action ActionRequest) (Observation, error) {
+	base := safeArtifactBase(action.ScenarioID, action.StepID)
+	guestPath := "/run/portage-engine/desktop-evidence/" + base + ".install.log"
+	_, execErr := d.guestExec(ctx, []string{
+		d.config.GuestAgentPath, "install", action.Input["atom"], action.Input["staging_digest"],
+		action.Input["signer_fingerprint"], guestPath,
+	})
+	content, readErr := d.guestFileRead(ctx, guestPath)
+	observation := Observation{State: "passed", Message: "signature-required binpkg installed; signer=" + action.Input["signer_fingerprint"]}
+	if readErr == nil {
+		path, digest, writeErr := d.writeArtifact(base+".install.log", content)
+		if writeErr != nil {
+			return Observation{}, writeErr
+		}
+		observation.Message += "; log=" + digest
+		observation.Artifacts = []string{path}
+	}
+	if execErr != nil {
+		return observation, execErr
+	}
+	if readErr != nil {
+		return Observation{}, fmt.Errorf("collect signed install log: %w", readErr)
+	}
+	return observation, nil
 }
 
 func (d *PVEQGADriver) vmPath() string {

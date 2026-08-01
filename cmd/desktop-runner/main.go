@@ -34,10 +34,16 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	if err := scenario.ValidateRunnable(); err != nil {
+		log.Fatal(err)
+	}
 	var driver desktop.Driver
 	if *pveConfig != "" {
 		config, err := desktop.LoadPVEConfig(*pveConfig)
 		if err != nil {
+			log.Fatal(err)
+		}
+		if err := config.ValidateScenario(scenario); err != nil {
 			log.Fatal(err)
 		}
 		driver, err = desktop.NewPVEQGADriver(config, os.Getenv(*pveTokenIDEnv), os.Getenv(*pveTokenSecretEnv))

@@ -35,12 +35,20 @@ screenshots and logs; it has no arbitrary command action. Give its PVE token a
 dedicated pool and only the VM audit/power/snapshot/guest-agent privileges it
 needs.
 
-The image-only baseline does not require a staging binhost. In that mode both
+The schema-version 1 image-only baseline does not require a staging binhost. In that mode both
 `staging_binhost` and `staging_digest` are omitted from the PVE policy and the
 runner verifies applications already sealed into the image. A scenario that
 contains `install` must configure both fields and remains digest-bound. This
 keeps the Golden Desktop gate independent of the package publication service
 without weakening application-install tests.
+
+Schema version 2 is the application-matrix contract. It additionally binds the
+exact image generation and display server, carries those values on every
+adapter request, and requires every install to name the full primary signing
+fingerprint. Direct PVE policy schema version 2 repeats the profile, image,
+generation, display server, staging manifest, key path and fingerprint. The
+runner rejects any mismatch before VM mutation; after QGA is ready, the guest
+also compares those values with `/etc/portage-engine/build-plan.json`.
 
 `start` does not rely on a fixed sleep. After QGA becomes available, the
 driver repeatedly invokes the named `desktop-ready` capability until the X11
@@ -52,6 +60,15 @@ DISPLAY/Xauthority/D-Bus environment into a transient user unit and uses
 `KillMode=process`: launchers such as `gtk-launch` exit after forking the real
 GUI process, which must remain alive for the accessibility and screenshot
 gates.
+
+The direct guest helper is deliberately X11-specific: readiness requires the
+X socket and `xrandr`, screenshots use `scrot`, and normal close uses a bounded
+`xdotool` `Alt+F4` followed by disappearance of the selected AT-SPI node. A
+native Wayland scenario may use schema version 2 through an HTTP/openQA adapter,
+but that adapter must implement compositor-native input and capture and must
+still enforce the same image identity, fixture digest, accessibility and
+cleanup semantics. Do not silently route a `display_server: wayland` scenario
+through XWayland and call it native Wayland coverage.
 
 Desktop BuildPlans pin `display_model` to `qxl`; non-desktop images pin it to
 `std`. The Packer manifest carries the value and output stamping reads the
@@ -72,17 +89,139 @@ nodes) with parent/index, role, name, and reviewed states. Application logs are
 limited to the deterministic transient user unit created for that application;
 desktop-session and system logs are separate scopes. On a functional failure,
 the runner stops further input but still collects declared screenshots,
-accessibility trees, and logs before its independently timed final stop.
+accessibility trees, and logs, attempts the declared normal close, and then
+runs its independently timed final stop. Schema-version 2 signed installs also
+save the bounded emerge output as a digest-verified evidence artifact.
 
-The staging binhost is a data plane and may use plain HTTP on a trusted LAN.
-It is still immutable: run
+The application matrix consumes a **signed candidate binrepo**, not the legacy
+unsigned verification staging tree. The data plane may use plain HTTP on a
+trusted LAN because every object is content-bound, while the signing key's full
+primary fingerprint must arrive through a separate authenticated operator
+channel. Put `Packages`, signed GPKG files and the reviewed public key (for
+example `signing-key.asc`) in one immutable directory, then run
 `image-factory/desktop/write-staging-manifest.py <binpkg-directory>` after the
-`Packages` index and all binpkgs are complete, then put the printed SHA-256 in
-both the reviewed PVE policy and scenario. On every clean restore the guest
-downloads `MANIFEST.json`, rejects redirects/proxies, verifies every object by
-size and SHA-256, atomically switches to a local `file://` binrepo, and only
-then permits `emerge --usepkgonly`. PVE remains HTTPS because it is the
+directory is complete. Put the printed SHA-256 and independently approved
+fingerprint in both the materialized PVE policy and scenario. On every clean
+restore the guest downloads `MANIFEST.json`, rejects redirects/proxies,
+verifies every object by size and SHA-256, checks that the manifest-bound key
+contains exactly the approved primary fingerprint, creates a dedicated Portage
+keyring, sets `verify-signature = true` and `binpkg-request-signature`, and only
+then permits `emerge --usepkgonly`. A missing, unsigned, wrongly signed or
+wrong-key GPKG fails closed. PVE remains HTTPS because it is the
 credential-bearing control plane.
+
+## GTK, Qt and WebView matrix
+
+The first repeatable matrix deliberately uses small applications with clear
+licenses and stable amd64 Gentoo keywords:
+
+| Class | Scenario | Signed package | Fixture/assertion | License |
+| --- | --- | --- | --- | --- |
+| GTK | `gtk-mousepad.json` | `app-editors/mousepad` | local text file; exact AT-SPI frame name | GPL-2+ |
+| Qt | `qt-featherpad.json` | `app-editors/featherpad` | same local text file; exact AT-SPI frame name | GPL-3+ |
+| WebView | `webview-surf.json` | `www-client/surf` | local HTML only; WebKit-exposed AT-SPI `heading` | MIT |
+
+Surf represents the Electron/WebView column without pulling an Electron SDK,
+Chromium profile or online application. Its HTML has no remote stylesheet,
+script, image or navigation dependency. An Electron-specific scenario may be
+added later with the same schema; renderer DOM/ARIA may be asserted by an
+adapter such as Playwright, but native window lifecycle and failure evidence
+remain runner responsibilities.
+
+Every matrix scenario executes restore, readiness, signature-required install,
+digest-bound fixture launch, accessibility assertion, accessibility/screenshot
+and journal evidence, normal window close with disappearance assertion, and
+final VM stop. The atoms are resolved only inside the repository revision
+pinned by the signed image-factory inputs; the staging manifest then locks the
+exact `Packages`, GPKG and public-key bytes actually installed.
+
+The tracked matrix files and
+`configs/desktop-pve-matrix.example.json` are **static contract templates**.
+Their all-zero staging digest and fingerprint are deliberate sentinels;
+`portage-desktop-runner` rejects them as unmaterialized. Their planned
+`desktop-verifier-matrix-g1` identity must also be replaced by the exact new
+image containing the schema-version 2 guest agent and locked fixtures. They are
+not evidence that PVE, the image build, or the signed package Gate has run.
+
+To prepare a live run, first build a new desktop image through the normal
+signed offline image-factory bundle. Its input lock must contain both
+`fixture/desktop/*` objects, and its BuildPlan must pin the profile, image ID,
+generation, repositories and package-set catalog. Then create the signed
+candidate directory and materialize reviewed copies outside the source tree:
+
+```bash
+candidate_dir=/srv/portage-engine/signed-candidates/gui-matrix-g1
+expected_fingerprint=REPLACE_WITH_INDEPENDENTLY_APPROVED_PRIMARY_FINGERPRINT
+image_id=REPLACE_WITH_BUILT_DESKTOP_IMAGE_ID
+image_generation=REPLACE_WITH_BUILT_DESKTOP_GENERATION
+
+manifest_digest=$(python3 image-factory/desktop/write-staging-manifest.py "$candidate_dir")
+actual_fingerprint=$(gpg --batch --with-colons --import-options show-only \
+  --import "$candidate_dir/signing-key.asc" | awk -F: '$1 == "fpr" { print $10; exit }')
+test "$actual_fingerprint" = "$expected_fingerprint"
+
+install -d -m 0750 /var/lib/portage-engine/desktop-run-inputs
+python3 - \
+  tests/desktop/scenarios/gtk-mousepad.json \
+  /var/lib/portage-engine/desktop-run-inputs/gtk-mousepad.json \
+  "$manifest_digest" "$expected_fingerprint" "$image_id" "$image_generation" <<'PY'
+import json, pathlib, sys
+
+source, output, manifest, fingerprint, image, generation = sys.argv[1:]
+document = json.loads(pathlib.Path(source).read_text())
+document["image_id"] = image
+document["image_generation"] = generation
+for step in document["steps"]:
+    if step["action"] == "install":
+        step["input"]["staging_digest"] = manifest
+        step["input"]["signer_fingerprint"] = fingerprint
+pathlib.Path(output).write_text(json.dumps(document, indent=2) + "\n")
+PY
+```
+
+Repeat the materialization for `qt-featherpad.json` and `webview-surf.json`.
+Materialize a reviewed copy of the schema-version 2 PVE example with the same
+four values, then replace its endpoint, CA, node, VMID, snapshot, staging URL
+and evidence directory with site-approved values. The scenario and PVE policy
+must match exactly; direct PVE mode fails before restore when they do not.
+
+```bash
+python3 - \
+  configs/desktop-pve-matrix.example.json \
+  /var/lib/portage-engine/desktop-run-inputs/desktop-pve-matrix.json \
+  "$manifest_digest" "$expected_fingerprint" "$image_id" "$image_generation" <<'PY'
+import json, pathlib, sys
+
+source, output, manifest, fingerprint, image, generation = sys.argv[1:]
+document = json.loads(pathlib.Path(source).read_text())
+document["image_id"] = image
+document["image_generation"] = generation
+document["staging_digest"] = manifest
+document["staging_key_fingerprint"] = fingerprint
+pathlib.Path(output).write_text(json.dumps(document, indent=2) + "\n")
+PY
+```
+
+With a real image, signed candidate and reviewed policy in place, run each
+materialized scenario explicitly:
+
+```bash
+export PORTAGE_DESKTOP_PVE_TOKEN_ID='desktop-e2e@pve!runner'
+export PORTAGE_DESKTOP_PVE_TOKEN_SECRET='read-from-a-secret-store'
+
+./bin/portage-desktop-runner \
+  -scenario /var/lib/portage-engine/desktop-run-inputs/gtk-mousepad.json \
+  -pve-config /var/lib/portage-engine/desktop-run-inputs/desktop-pve-matrix.json \
+  -output /var/lib/portage-engine/desktop-evidence/gtk-mousepad.result.json
+```
+
+Run the Qt and WebView files with distinct result paths. A passed result is
+credible only when the install step includes its signed-install log artifact,
+the accessibility/screenshot/log steps include digest-verified artifacts, the
+close and stop steps pass, and the result identity matches the built image
+manifest. This repository has no live PVE or materialized signed candidate, so
+the checked-in validation is limited to schema, runner, guest-contract and
+fixture/static tests.
 
 ```bash
 export PORTAGE_DESKTOP_DRIVER_TOKEN='read-from-a-secret-store'
@@ -117,18 +256,23 @@ Content-Type: application/json
 ```
 
 It receives a scenario ID, step ID, action and an action-specific input map.
+Schema-version 2 requests also carry profile ID, image ID, image generation,
+display server and application kind on every action; an adapter must reject
+drift rather than treating those fields as advisory.
 It returns `{"state":"passed|failed","message":"...","artifacts":[...]}`.
 The scenario cannot contain arbitrary shell commands or operator credentials.
 Supported actions cover lifecycle (`restore`, `start`, `stop`), staged install,
-application launch, accessibility waits, bounded keyboard/mouse input, reviewed
-needles, screenshots, accessibility export and scoped log collection. Direct
-PVE mode intentionally rejects needle assertions; use a reviewed openQA/needle
-adapter for that oracle.
+application launch, digest-bound local fixture launch, accessibility waits,
+normal close with accessibility disappearance, bounded keyboard/mouse input,
+reviewed needles, screenshots, accessibility export and scoped log collection.
+Direct PVE mode intentionally rejects needle assertions; use a reviewed
+openQA/needle adapter for that oracle.
 
 The runner requires exactly one restore/start/stop sequence. After a failure it
-skips further functional input, still runs declared screenshot/log collection,
-and always attempts the final stop. Result JSON records times, states and
-artifact references but does not echo typed input.
+skips further functional input, still runs declared screenshot/log collection
+and cleanup actions, and always attempts the final stop. Result JSON records
+times, states, the version-2 runtime identity and artifact references but does
+not echo typed input.
 
 AI vision belongs after this deterministic gate. It may classify a failed
 screenshot or propose a candidate needle/scenario change. It must not receive

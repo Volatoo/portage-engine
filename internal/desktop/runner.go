@@ -14,10 +14,15 @@ import (
 
 // ActionRequest describes one bounded GUI-driver action.
 type ActionRequest struct {
-	ScenarioID string            `json:"scenario_id"`
-	StepID     string            `json:"step_id"`
-	Action     string            `json:"action"`
-	Input      map[string]string `json:"input,omitempty"`
+	ScenarioID      string            `json:"scenario_id"`
+	ProfileID       string            `json:"profile_id,omitempty"`
+	ImageID         string            `json:"image_id,omitempty"`
+	ImageGeneration string            `json:"image_generation,omitempty"`
+	DisplayServer   string            `json:"display_server,omitempty"`
+	ApplicationKind string            `json:"application_kind,omitempty"`
+	StepID          string            `json:"step_id"`
+	Action          string            `json:"action"`
+	Input           map[string]string `json:"input,omitempty"`
 }
 
 // Observation contains the driver result and optional screenshot evidence.
@@ -45,27 +50,34 @@ type StepResult struct {
 
 // Result records the complete deterministic scenario outcome.
 type Result struct {
-	SchemaVersion int          `json:"schema_version"`
-	ScenarioID    string       `json:"scenario_id"`
-	ProfileID     string       `json:"profile_id"`
-	ImageID       string       `json:"image_id"`
-	State         string       `json:"state"`
-	StartedAt     time.Time    `json:"started_at"`
-	CompletedAt   time.Time    `json:"completed_at"`
-	Steps         []StepResult `json:"steps"`
+	SchemaVersion   int          `json:"schema_version"`
+	ScenarioID      string       `json:"scenario_id"`
+	ProfileID       string       `json:"profile_id"`
+	ImageID         string       `json:"image_id"`
+	ImageGeneration string       `json:"image_generation,omitempty"`
+	DisplayServer   string       `json:"display_server,omitempty"`
+	ApplicationKind string       `json:"application_kind,omitempty"`
+	State           string       `json:"state"`
+	StartedAt       time.Time    `json:"started_at"`
+	CompletedAt     time.Time    `json:"completed_at"`
+	Steps           []StepResult `json:"steps"`
 }
 
 // Run executes a validated scenario through the supplied driver.
 func Run(ctx context.Context, scenario *Scenario, driver Driver, now func() time.Time) Result {
 	started := now().UTC()
-	result := Result{SchemaVersion: 1, ScenarioID: scenario.ID, ProfileID: scenario.ProfileID, ImageID: scenario.ImageID, State: "passed", StartedAt: started}
+	result := Result{
+		SchemaVersion: 1, ScenarioID: scenario.ID, ProfileID: scenario.ProfileID, ImageID: scenario.ImageID,
+		ImageGeneration: scenario.ImageGeneration, DisplayServer: scenario.DisplayServer, ApplicationKind: scenario.ApplicationKind,
+		State: "passed", StartedAt: started,
+	}
 	runCtx, cancel := context.WithTimeout(ctx, time.Duration(scenario.TimeoutSeconds)*time.Second)
 	defer cancel()
 	failed := false
 	for _, step := range scenario.Steps {
 		// After the first functional failure, skip further input but still collect
 		// declared evidence and always execute the final stop action.
-		if failed && step.Action != "screenshot" && step.Action != "collect_accessibility" && step.Action != "collect_logs" && step.Action != "stop" {
+		if failed && !isEvidenceOrCleanup(step.Action) {
 			continue
 		}
 		stepStarted := now().UTC()
@@ -74,13 +86,17 @@ func Run(ctx context.Context, scenario *Scenario, driver Driver, now func() time
 			timeout = 60
 		}
 		stepParent := runCtx
-		if step.Action == "stop" {
+		if step.Action == "close" || step.Action == "stop" {
 			// VM cleanup must retain its own bounded chance to run even when the
 			// functional scenario deadline or caller context has expired.
 			stepParent = context.WithoutCancel(ctx)
 		}
 		stepCtx, stepCancel := context.WithTimeout(stepParent, time.Duration(timeout)*time.Second)
-		observation, err := driver.Do(stepCtx, ActionRequest{ScenarioID: scenario.ID, StepID: step.ID, Action: step.Action, Input: step.Input})
+		observation, err := driver.Do(stepCtx, ActionRequest{
+			ScenarioID: scenario.ID, ProfileID: scenario.ProfileID, ImageID: scenario.ImageID,
+			ImageGeneration: scenario.ImageGeneration, DisplayServer: scenario.DisplayServer, ApplicationKind: scenario.ApplicationKind,
+			StepID: step.ID, Action: step.Action, Input: step.Input,
+		})
 		stepCancel()
 		stepResult := StepResult{ID: step.ID, Action: step.Action, State: observation.State, StartedAt: stepStarted, Duration: now().Sub(stepStarted), Message: observation.Message, Artifacts: append([]string(nil), observation.Artifacts...)}
 		if err != nil {
@@ -95,6 +111,15 @@ func Run(ctx context.Context, scenario *Scenario, driver Driver, now func() time
 	}
 	result.CompletedAt = now().UTC()
 	return result
+}
+
+func isEvidenceOrCleanup(action string) bool {
+	switch action {
+	case "screenshot", "collect_accessibility", "collect_logs", "close", "stop":
+		return true
+	default:
+		return false
+	}
 }
 
 // HTTPDriver executes desktop actions through a constrained HTTP adapter.
