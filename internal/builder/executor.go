@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/slchris/portage-engine/internal/distcc"
 	"github.com/slchris/portage-engine/internal/profilecontract"
 )
 
@@ -20,6 +21,8 @@ import (
 type BuildOptions struct {
 	// Format is the BINPKG_FORMAT Portage produces: "gpkg" (default) or "xpak".
 	Format string
+	// DistCCPolicy is local defense in depth for a scheduler-issued lease.
+	DistCCPolicy distcc.BuilderPolicy
 }
 
 // BuildExecutor handles the actual package build process.
@@ -90,6 +93,14 @@ func (be *BuildExecutor) ExecuteBuild(
 	pkgDir := filepath.Join(buildWorkDir, "binpkgs")
 	if err := os.MkdirAll(pkgDir, 0o755); err != nil { // #nosec G301 -- emerge writes as the portage user.
 		return fmt.Errorf("failed to create job package directory: %w", err)
+	}
+	if err := be.configureDistCC(configRoot, bundle, job); err != nil {
+		return err
+	}
+	if job.Request != nil && job.Request.CompileLease != nil {
+		// This defer runs before the workspace cleanup registered above, so
+		// compiler-wrapper events are returned even when emerge fails.
+		defer be.recordDistCCReport(configRoot, job)
 	}
 
 	// Build each package
@@ -205,6 +216,12 @@ func (be *BuildExecutor) buildEnvironment(pkg PackageSpec, bundle *ConfigBundle,
 		for key, value := range m {
 			if key == "FEATURES" {
 				for _, f := range strings.Fields(value) {
+					// Distcc is package-scoped by the reviewed lease contract.
+					// A request may not globally enable distcc or pump mode for
+					// dependencies, Rust/Go/Java, configure, link, or tests.
+					if f == "distcc" || f == "distcc-pump" {
+						continue
+					}
 					features[f] = true
 				}
 				continue

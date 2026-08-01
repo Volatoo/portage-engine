@@ -30,6 +30,7 @@ import (
 
 	"github.com/slchris/portage-engine/internal/binpkg"
 	"github.com/slchris/portage-engine/internal/catalog"
+	"github.com/slchris/portage-engine/internal/distcc"
 	"github.com/slchris/portage-engine/internal/iac"
 	"github.com/slchris/portage-engine/internal/signing"
 	artifactstorage "github.com/slchris/portage-engine/internal/storage"
@@ -57,6 +58,8 @@ type BuildRequest struct {
 	// with. It is forwarded verbatim to the remote builder so the build applies
 	// the exact USE flags / make.conf / repos the client specified.
 	ConfigBundle *ConfigBundle `json:"config_bundle,omitempty"`
+	// CompileLease is server-owned and never accepted from a public request.
+	CompileLease *distcc.Lease `json:"-"`
 	// IdempotencyKey is supplied by the control-plane HTTP boundary. It is not
 	// forwarded to builders; PostgreSQL uses it to deduplicate submissions.
 	IdempotencyKey string `json:"-"`
@@ -620,6 +623,16 @@ type DurableAutoscaleObserver interface {
 	) (SchedulerAutoscaleStatus, error)
 }
 
+// CompileScheduler is the independent hard-routing layer consulted only after
+// normal project fairness has claimed a job/phase.
+type CompileScheduler interface {
+	ReserveCompileSlots(context.Context, distcc.ReservationRequest) (*distcc.Lease, error)
+	HeartbeatCompileLease(context.Context, distcc.Lease, time.Duration, time.Duration) error
+	CheckCompileLease(context.Context, distcc.Lease, time.Duration) error
+	RecordCompileObservation(context.Context, distcc.Lease, distcc.Observation) error
+	ReleaseCompileLease(context.Context, distcc.Lease, string) error
+}
+
 // queuedJob pairs a build request with the job ID assigned at submission, so a
 // worker processes exactly the job it dequeued instead of re-deriving one by
 // scanning for a matching package (which let concurrent workers double-process
@@ -641,6 +654,7 @@ type Manager struct {
 	submitMu     sync.Mutex
 	jobLedger    JobLedger
 	scheduler    DurableScheduler
+	compileQueue CompileScheduler
 	phaseQueue   DurablePhaseScheduler
 	metadata     RuntimeMetadataLedger
 	artifactDB   ArtifactBudgetLedger
@@ -813,6 +827,9 @@ func (m *Manager) SetJobLedger(ledger JobLedger) {
 	m.jobLedger = ledger
 	if scheduler, ok := ledger.(DurableScheduler); ok {
 		m.scheduler = scheduler
+	}
+	if compileQueue, ok := ledger.(CompileScheduler); ok {
+		m.compileQueue = compileQueue
 	}
 	if phaseQueue, ok := ledger.(DurablePhaseScheduler); ok {
 		m.phaseQueue = phaseQueue
@@ -1992,11 +2009,26 @@ func (m *Manager) runBuildOnPullWorkerStableFenced(
 	commandNamespace string,
 	resultFence func() error,
 ) error {
+	compileLease, finishCompile, err := m.beginCompileLease(
+		jobID, identity.WorkerID, "worker-cert:"+identity.WorkerID, req,
+	)
+	if err != nil {
+		return err
+	}
+	compileFailure := ""
+	defer func() { finishCompile(compileFailure) }()
+	claimed, err := m.jobStatusSnapshot(jobID)
+	if err != nil {
+		return err
+	}
 	localReq := LocalBuildRequest{
 		PackageName: req.PackageName, Version: req.Version, Arch: req.Arch,
 		ProfileID: req.ProfileID, RepositoryIDs: append([]string(nil), req.RepositoryIDs...),
 		ResourceClass: req.ResourceClass, UseFlags: make(map[string]string),
 		Environment: make(map[string]string), ConfigBundle: req.ConfigBundle,
+		ProjectID: claimed.ProjectID, AttemptID: claimed.AttemptID,
+		AttemptFence: claimed.FenceToken,
+		CompileLease: compileLease,
 	}
 	for _, flag := range req.UseFlags {
 		if name, disabled := strings.CutPrefix(flag, "-"); disabled {
@@ -2025,7 +2057,17 @@ func (m *Manager) runBuildOnPullWorkerStableFenced(
 		}
 	}
 	if err := dispatch(ctx, identity, workergateway.ActionBuild, localReq, &remote); err != nil {
+		compileFailure = "connect"
 		return fmt.Errorf("outbound worker build failed: %w", err)
+	}
+	m.recordCompileReport(jobID, compileLease, remote.Metadata)
+	if remote.Status == "failed" {
+		compileFailure = "remote-compile"
+		return fmt.Errorf("outbound worker build failed: %s", remote.Error)
+	}
+	if err := m.checkCompileOutput(compileLease); err != nil {
+		compileFailure = "lease-fenced"
+		return fmt.Errorf("distcc output fence rejected before collection: %w", err)
 	}
 	if resultFence != nil {
 		if err := resultFence(); err != nil {
@@ -2047,13 +2089,24 @@ func (m *Manager) runBuildOnPullWorkerStableFenced(
 	snapshot := &remoteJobSnapshot{
 		Status: remote.Status, Error: remote.Error, Log: remote.Log,
 		ArtifactURL: remote.ArtifactURL, Artifacts: append([]string(nil), remote.Artifacts...),
-		Signed: signed, Terminal: true,
+		Signed: signed, Terminal: true, Metadata: remote.Metadata,
 	}
 	if len(snapshot.Artifacts) == 0 {
 		return fmt.Errorf("outbound worker completed without a recorded artifact list")
 	}
+	commitFence := func() error {
+		if err := m.checkCompileOutput(compileLease); err != nil {
+			compileFailure = "lease-fenced"
+			return err
+		}
+		if resultFence != nil {
+			return resultFence()
+		}
+		return nil
+	}
 	if err := m.collectPullArtifacts(
 		jobID, identity, remote.ID, req.PackageName, snapshot, commandNamespace,
+		commitFence,
 	); err != nil {
 		return fmt.Errorf("artifact retrieval failed: %w", err)
 	}
@@ -3319,9 +3372,20 @@ func (m *Manager) cloudCredentials(cs *config.CloudSettings) *iac.CloudCredentia
 // blocks until it reaches a terminal state, updating the local job as it goes.
 func (m *Manager) runBuildOnInstance(jobID string, instance *iac.Instance, req *BuildRequest) error {
 	baseURL := normalizeBuilderURL(instance.BuilderEndpoint)
+	compileLease, finishCompile, err := m.beginCompileLease(
+		jobID, instance.ID, instance.PrivateIP, req,
+	)
+	if err != nil {
+		return err
+	}
+	compileFailure := ""
+	defer func() { finishCompile(compileFailure) }()
+	req.CompileLease = compileLease
+	defer func() { req.CompileLease = nil }()
 
 	remoteJobID, err := m.postBuildToBuilder(baseURL, req)
 	if err != nil {
+		compileFailure = "connect"
 		return fmt.Errorf("failed to submit build to instance: %w", err)
 	}
 
@@ -3357,14 +3421,29 @@ func (m *Manager) runBuildOnInstance(jobID string, instance *iac.Instance, req *
 		}
 
 		if snap.Terminal {
+			m.recordCompileReport(jobID, compileLease, snap.Metadata)
 			if snap.Status == "failed" {
+				compileFailure = "remote-compile"
 				return fmt.Errorf("remote build failed: %s", snap.Error)
+			}
+			if err := m.checkCompileOutput(compileLease); err != nil {
+				compileFailure = "lease-fenced"
+				return fmt.Errorf("distcc output fence rejected before collection: %w", err)
 			}
 			// Success: pull every produced package off the instance into the
 			// central binhost BEFORE the VM can go away. The requested
 			// package's own file becomes the job's primary artifact;
 			// dependencies land alongside it (category preserved).
-			if err := m.collectInstanceArtifacts(jobID, baseURL, remoteJobID, req.PackageName, snap); err != nil {
+			commitFence := func() error {
+				if err := m.checkCompileOutput(compileLease); err != nil {
+					compileFailure = "lease-fenced"
+					return err
+				}
+				return nil
+			}
+			if err := m.collectInstanceArtifacts(
+				jobID, baseURL, remoteJobID, req.PackageName, snap, commitFence,
+			); err != nil {
 				return fmt.Errorf("build succeeded on instance but artifact retrieval failed: %w", err)
 			}
 			return nil
@@ -3381,9 +3460,15 @@ func (m *Manager) postBuildToBuilder(baseURL string, req *BuildRequest) (string,
 		ProfileID:     req.ProfileID,
 		RepositoryIDs: append([]string(nil), req.RepositoryIDs...),
 		ResourceClass: req.ResourceClass,
+		ProjectID:     req.ProjectID,
 		UseFlags:      make(map[string]string),
 		Environment:   make(map[string]string),
 		ConfigBundle:  req.ConfigBundle,
+		CompileLease:  req.CompileLease,
+	}
+	if req.CompileLease != nil {
+		localReq.AttemptID = req.CompileLease.AttemptID
+		localReq.AttemptFence = req.CompileLease.AttemptFence
 	}
 	for _, flag := range req.UseFlags {
 		if name, found := strings.CutPrefix(flag, "-"); found {
@@ -3437,6 +3522,7 @@ type remoteJobSnapshot struct {
 	Artifacts   []string
 	Signed      bool
 	Terminal    bool
+	Metadata    map[string]interface{}
 }
 
 func (m *Manager) fetchInstanceJob(statusURL string) (*remoteJobSnapshot, error) {
@@ -3471,6 +3557,7 @@ func (m *Manager) fetchInstanceJob(statusURL string) (*remoteJobSnapshot, error)
 		Artifacts:   job.Artifacts,
 		Signed:      signed,
 		Terminal:    job.Status == "completed" || job.Status == "failed" || job.Status == "success",
+		Metadata:    job.Metadata,
 	}, nil
 }
 
@@ -3522,6 +3609,7 @@ func (m *Manager) submitToBuilderAt(jobID, builderAddr, baseURL string, req *Bui
 		ProfileID:     req.ProfileID,
 		RepositoryIDs: append([]string(nil), req.RepositoryIDs...),
 		ResourceClass: req.ResourceClass,
+		ProjectID:     req.ProjectID,
 		UseFlags:      make(map[string]string),
 		Environment:   make(map[string]string),
 		ConfigBundle:  req.ConfigBundle, // Forward the full config bundle when present.
@@ -3656,7 +3744,9 @@ func (m *Manager) pollRemoteBuilder(localJobID, builderAddr, remoteJobID string,
 						Artifacts:   append([]string(nil), remoteJob.Artifacts...),
 						Signed:      signed,
 					}
-					if err := m.collectInstanceArtifacts(localJobID, baseURL, remoteJobID, req.PackageName, snap); err != nil {
+					if err := m.collectInstanceArtifacts(
+						localJobID, baseURL, remoteJobID, req.PackageName, snap, nil,
+					); err != nil {
 						m.setFailedStage(localJobID, "collect")
 						m.updateStatus(localJobID, "failed", "", "artifact collection failed: "+err.Error())
 					} else if stage, err := m.verifyAndPublish(localJobID, baseURL, baseURL, req); err != nil {
@@ -5787,7 +5877,11 @@ func errorString(err error) string {
 // a job-private quarantine and records the unpublished relative paths. It
 // falls back to the legacy single-artifact download when the builder predates
 // artifact lists.
-func (m *Manager) collectInstanceArtifacts(jobID, baseURL, remoteJobID, packageName string, snap *remoteJobSnapshot) error {
+func (m *Manager) collectInstanceArtifacts(
+	jobID, baseURL, remoteJobID, packageName string,
+	snap *remoteJobSnapshot,
+	commitFence func() error,
+) error {
 	stagingRoot, err := m.beginArtifactQuarantine(jobID)
 	if err != nil {
 		return err
@@ -5821,6 +5915,9 @@ func (m *Manager) collectInstanceArtifacts(jobID, baseURL, remoteJobID, packageN
 		if err != nil {
 			return err
 		}
+		if err := checkArtifactCommitFence(commitFence); err != nil {
+			return err
+		}
 		m.appendJobLog(jobID, "[collect] quarantined artifact: "+rel)
 		m.appendJobLog(jobID, fmt.Sprintf(
 			"[collect] quarantine budget active=%d limit=%d",
@@ -5834,6 +5931,9 @@ func (m *Manager) collectInstanceArtifacts(jobID, baseURL, remoteJobID, packageN
 		}
 		m.jobsMu.Unlock()
 		if err := m.persistJobQuarantine(jobID, stagingRoot, []string{rel}); err != nil {
+			return err
+		}
+		if err := checkArtifactCommitFence(commitFence); err != nil {
 			return err
 		}
 		success = true
@@ -5870,6 +5970,9 @@ func (m *Manager) collectInstanceArtifacts(jobID, baseURL, remoteJobID, packageN
 	if primary == "" && len(rels) > 0 {
 		primary = rels[0]
 	}
+	if err := checkArtifactCommitFence(commitFence); err != nil {
+		return err
+	}
 	m.jobsMu.Lock()
 	if job, ok := m.jobs[jobID]; ok {
 		job.StagedPrimary = primary
@@ -5878,6 +5981,9 @@ func (m *Manager) collectInstanceArtifacts(jobID, baseURL, remoteJobID, packageN
 	}
 	m.jobsMu.Unlock()
 	if err := m.persistJobQuarantine(jobID, stagingRoot, rels); err != nil {
+		return err
+	}
+	if err := checkArtifactCommitFence(commitFence); err != nil {
 		return err
 	}
 	success = true
@@ -5896,6 +6002,7 @@ func (m *Manager) collectPullArtifacts(
 	remoteJobID, packageName string,
 	snapshot *remoteJobSnapshot,
 	commandNamespace string,
+	commitFence func() error,
 ) error {
 	var stagingRoot string
 	var err error
@@ -5942,6 +6049,9 @@ func (m *Manager) collectPullArtifacts(
 	if primary == "" && len(rels) > 0 {
 		primary = rels[0]
 	}
+	if err := checkArtifactCommitFence(commitFence); err != nil {
+		return err
+	}
 	m.jobsMu.Lock()
 	if job := m.jobs[jobID]; job != nil {
 		job.StagedPrimary = primary
@@ -5952,7 +6062,20 @@ func (m *Manager) collectPullArtifacts(
 	if err := m.persistJobQuarantine(jobID, stagingRoot, rels); err != nil {
 		return err
 	}
+	if err := checkArtifactCommitFence(commitFence); err != nil {
+		return err
+	}
 	success = true
+	return nil
+}
+
+func checkArtifactCommitFence(commitFence func() error) error {
+	if commitFence == nil {
+		return nil
+	}
+	if err := commitFence(); err != nil {
+		return fmt.Errorf("artifact commit fence rejected: %w", err)
+	}
 	return nil
 }
 

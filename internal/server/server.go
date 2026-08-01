@@ -193,7 +193,30 @@ func targetHistoryMetricCounts(value any) (
 }
 
 func (s *Server) schedulerMetricsSnapshot() metrics.SchedulerSnapshot {
-	return schedulerMetricsSnapshotFromStatus(s.builder.GetSchedulerStatus())
+	snapshot := schedulerMetricsSnapshotFromStatus(s.builder.GetSchedulerStatus())
+	if s.jobLedger == nil {
+		return snapshot
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	freshness := time.Duration(s.config.DistCCWorkerFreshnessSeconds) * time.Second
+	if freshness <= 0 {
+		freshness = 45 * time.Second
+	}
+	compile, err := s.jobLedger.CompileMetrics(ctx, freshness, time.Hour)
+	cancel()
+	if err == nil {
+		snapshot.DistCCWorkersFresh = compile.WorkersFresh
+		snapshot.DistCCSlotsTotal = compile.SlotsTotal
+		snapshot.DistCCSlotsLeased = compile.SlotsLeased
+		snapshot.DistCCLocalCompiles = compile.LocalCompiles
+		snapshot.DistCCRemoteCompiles = compile.RemoteCompiles
+		snapshot.DistCCHits = compile.Hits
+		snapshot.DistCCFallbacks = compile.Fallbacks
+		snapshot.DistCCNetworkBytes = compile.NetworkBytes
+		snapshot.DistCCQueueMillis = compile.QueueMillis
+		snapshot.DistCCFailures = compile.FailuresByReason
+	}
+	return snapshot
 }
 
 func schedulerMetricsSnapshotFromStatus(
@@ -211,7 +234,7 @@ func schedulerMetricsSnapshotFromStatus(
 		targetReserved, targetCharged := targetHistoryMetricCounts(
 		targetHistory,
 	)
-	return metrics.SchedulerSnapshot{
+	snapshot := metrics.SchedulerSnapshot{
 		QueuedTasks:             metricInt64(status["queued_tasks"]),
 		UnschedulableTasks:      metricInt64(status["unschedulable_tasks"]),
 		RunningTasks:            metricInt64(status["running_tasks"]),
@@ -248,6 +271,7 @@ func schedulerMetricsSnapshotFromStatus(
 		ProjectionSourcePresent: metricBool(projection["source_watermark_present"]),
 		ProjectionLagSeconds:    metricInt64(projection["lag_seconds"]),
 	}
+	return snapshot
 }
 
 // SetWorkerIssuer installs the listener-trust-bound issuer during startup.

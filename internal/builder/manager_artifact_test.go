@@ -3,6 +3,7 @@ package builder
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -16,6 +17,42 @@ import (
 	artifactstorage "github.com/slchris/portage-engine/internal/storage"
 	"github.com/slchris/portage-engine/pkg/config"
 )
+
+func TestCollectionFenceRejectsDownloadedOutputBeforeStagingCommit(t *testing.T) {
+	parent := t.TempDir()
+	mgr := NewManager(&config.ServerConfig{
+		MaxWorkers: 0, BinpkgPath: filepath.Join(parent, "binpkgs"),
+	})
+	defer mgr.Shutdown()
+	mgr.jobs["job-fenced"] = &BuildStatus{
+		JobID: "job-fenced", Status: "collecting",
+		PackageName: "app-misc/jq", Arch: "amd64",
+	}
+	const rel = "app-misc/jq/jq-1.8.1-1.gpkg.tar"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("remote-derived bytes"))
+	}))
+	defer server.Close()
+	calls := 0
+	err := mgr.collectInstanceArtifacts(
+		"job-fenced", server.URL, "remote-a", "app-misc/jq",
+		&remoteJobSnapshot{Artifacts: []string{rel}},
+		func() error {
+			calls++
+			return errors.New("lease fenced after collection")
+		},
+	)
+	if err == nil || calls != 1 {
+		t.Fatalf("post-collection fence err=%v calls=%d", err, calls)
+	}
+	mgr.jobsMu.RLock()
+	status := *mgr.jobs["job-fenced"]
+	mgr.jobsMu.RUnlock()
+	if status.StagingRoot != "" || status.VerificationToken != "" ||
+		len(status.StagedArtifacts) != 0 || status.StagedPrimary != "" {
+		t.Fatalf("fenced output advanced into staging: %+v", status)
+	}
+}
 
 func TestCopyArtifactWithLimitRejectsUnknownLengthOverflow(t *testing.T) {
 	var destination bytes.Buffer
@@ -175,7 +212,9 @@ func TestVerifyAndPublishKeepsArtifactPrivateUntilVerification(t *testing.T) {
 	defer builderServer.Close()
 
 	snap := &remoteJobSnapshot{Artifacts: []string{rel}}
-	if err := mgr.collectInstanceArtifacts("job-quarantine", builderServer.URL, "remote-1", "app-misc/jq", snap); err != nil {
+	if err := mgr.collectInstanceArtifacts(
+		"job-quarantine", builderServer.URL, "remote-1", "app-misc/jq", snap, nil,
+	); err != nil {
 		t.Fatalf("collectInstanceArtifacts: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(store.BasePath(), filepath.FromSlash(rel))); !os.IsNotExist(err) {
@@ -255,7 +294,7 @@ func TestVerifyFailureRevokesQuarantineWithoutPublishing(t *testing.T) {
 
 	if err := mgr.collectInstanceArtifacts("job-rejected", builderServer.URL, "remote-2", "app-misc/jq", &remoteJobSnapshot{
 		Artifacts: []string{rel},
-	}); err != nil {
+	}, nil); err != nil {
 		t.Fatal(err)
 	}
 	mgr.jobsMu.RLock()

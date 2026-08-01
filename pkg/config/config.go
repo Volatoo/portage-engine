@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -213,6 +214,20 @@ type ServerConfig struct {
 	SchedulerAutoscaleIntervalSeconds  int
 	SchedulerAutoscaleProviderMaxSlots map[string]int
 	SchedulerAutoscaleProviderLimitsOK bool
+	// DistCC Alpha is an opt-in compile-only acceleration layer. Project
+	// fairness/admission remains authoritative before compile-slot routing.
+	DistCCAlphaEnabled             bool
+	DistCCPackageAllowlist         []string
+	DistCCCHOST                    string
+	DistCCCompilerDigest           string
+	DistCCToolchainImageGeneration string
+	DistCCCPUFeatures              []string
+	DistCCNetworkZone              string
+	DistCCIsolatedNetworkCIDRs     []string
+	DistCCSlotsPerJob              int
+	DistCCLeaseSeconds             int
+	DistCCWorkerFreshnessSeconds   int
+	DistCCFallbackPolicy           string
 	// Data persistence
 	DataDir  string // Directory for persisting legacy server state (empty = /var/lib/portage-engine/server)
 	Database DatabaseConfig
@@ -898,6 +913,37 @@ func (c *ServerConfig) validatePhaseExecutor() []string {
 			"CONFIG: scheduler autoscale timing is invalid",
 		)
 	}
+	warnings = append(warnings, c.validateDistCC()...)
+	return warnings
+}
+
+func (c *ServerConfig) validateDistCC() []string {
+	if !c.DistCCAlphaEnabled {
+		return nil
+	}
+	var warnings []string
+	if !c.Database.Enabled || !c.Database.Required {
+		warnings = append(warnings, "CONFIG: DISTCC_ALPHA_ENABLED requires PostgreSQL required mode")
+	}
+	if len(c.DistCCPackageAllowlist) == 0 || c.DistCCCHOST == "" ||
+		c.DistCCCompilerDigest == "" || c.DistCCToolchainImageGeneration == "" ||
+		c.DistCCNetworkZone == "" || len(c.DistCCIsolatedNetworkCIDRs) == 0 {
+		warnings = append(warnings, "CONFIG: enabled distcc requires reviewed allowlist, exact toolchain dimensions, zone, and isolated network CIDR")
+	}
+	if c.DistCCFallbackPolicy != "local" && c.DistCCFallbackPolicy != "blocked" {
+		warnings = append(warnings, "CONFIG: DISTCC_FALLBACK_POLICY must be local or blocked")
+	}
+	if c.DistCCSlotsPerJob < 1 || c.DistCCSlotsPerJob > 256 ||
+		c.DistCCLeaseSeconds < 5 || c.DistCCLeaseSeconds > 3600 ||
+		c.DistCCWorkerFreshnessSeconds < 5 || c.DistCCWorkerFreshnessSeconds > 600 {
+		warnings = append(warnings, "CONFIG: distcc slot, lease, or heartbeat freshness bounds are invalid")
+	}
+	for _, cidr := range c.DistCCIsolatedNetworkCIDRs {
+		if _, _, err := net.ParseCIDR(cidr); err != nil {
+			warnings = append(warnings, "CONFIG: DISTCC_ISOLATED_NETWORK_CIDRS contains an invalid CIDR")
+			break
+		}
+	}
 	return warnings
 }
 
@@ -1245,16 +1291,24 @@ type BuilderConfig struct {
 	ServerAPIKey string
 	// AdvertiseURL is the URL this builder registers with the server (how the
 	// server reaches it). Defaults to http://<hostname>:<port>.
-	AdvertiseURL     string
-	PullEnabled      bool
-	WorkerGatewayURL string
-	WorkerTLSCert    string
-	WorkerTLSKey     string
-	WorkerTLSCA      string
-	NotifyConfig     string
-	MetricsEnabled   bool
-	MetricsPort      string
-	MetricsPassword  string
+	AdvertiseURL                   string
+	PullEnabled                    bool
+	WorkerGatewayURL               string
+	WorkerTLSCert                  string
+	WorkerTLSKey                   string
+	WorkerTLSCA                    string
+	NotifyConfig                   string
+	MetricsEnabled                 bool
+	MetricsPort                    string
+	MetricsPassword                string
+	DistCCAlphaEnabled             bool
+	DistCCPackageAllowlist         []string
+	DistCCCHOST                    string
+	DistCCCompilerDigest           string
+	DistCCToolchainImageGeneration string
+	DistCCCPUFeatures              []string
+	DistCCNetworkZone              string
+	DistCCIsolatedNetworkCIDRs     []string
 
 	// Portage mirror settings.
 	SyncMirror      string // Mirror URL for portage sync (rsync or git)
@@ -1295,6 +1349,19 @@ func (c *BuilderConfig) Validate() []string {
 	}
 	if c.ArtifactDir == "" {
 		warnings = append(warnings, "CONFIG: BUILD_ARTIFACT_DIR is not set")
+	}
+	if c.DistCCAlphaEnabled {
+		if len(c.DistCCPackageAllowlist) == 0 || c.DistCCCHOST == "" ||
+			c.DistCCCompilerDigest == "" || c.DistCCToolchainImageGeneration == "" ||
+			c.DistCCNetworkZone == "" || len(c.DistCCIsolatedNetworkCIDRs) == 0 {
+			warnings = append(warnings, "CONFIG: enabled distcc builder requires reviewed allowlist, exact toolchain dimensions, zone, and isolated network CIDR")
+		}
+		for _, cidr := range c.DistCCIsolatedNetworkCIDRs {
+			if _, _, err := net.ParseCIDR(cidr); err != nil {
+				warnings = append(warnings, "CONFIG: DISTCC_ISOLATED_NETWORK_CIDRS contains an invalid CIDR")
+				break
+			}
+		}
 	}
 
 	return warnings
@@ -1416,6 +1483,11 @@ func LoadServerConfig(path string) (*ServerConfig, error) {
 		SchedulerAutoscaleScaleDownSeconds: 600,
 		SchedulerAutoscaleIntervalSeconds:  15,
 		SchedulerAutoscaleProviderLimitsOK: true,
+		DistCCNetworkZone:                  "default",
+		DistCCSlotsPerJob:                  1,
+		DistCCLeaseSeconds:                 60,
+		DistCCWorkerFreshnessSeconds:       45,
+		DistCCFallbackPolicy:               "local",
 	}
 
 	// If the config file is missing, still honor environment variables (the
@@ -1635,6 +1707,18 @@ func LoadServerConfig(path string) (*ServerConfig, error) {
 		config.SchedulerAutoscaleProviderLimitsOK = parseProviderSlotLimits(
 		getEnvString(env, "SCHEDULER_AUTOSCALE_PROVIDER_MAX_SLOTS", ""),
 	)
+	config.DistCCAlphaEnabled = getEnvBool(env, "DISTCC_ALPHA_ENABLED", false)
+	config.DistCCPackageAllowlist = getEnvStringSlice(env, "DISTCC_PACKAGE_ALLOWLIST", nil)
+	config.DistCCCHOST = getEnvString(env, "DISTCC_CHOST", "")
+	config.DistCCCompilerDigest = getEnvString(env, "DISTCC_COMPILER_DIGEST", "")
+	config.DistCCToolchainImageGeneration = getEnvString(env, "DISTCC_TOOLCHAIN_IMAGE_GENERATION", "")
+	config.DistCCCPUFeatures = getEnvStringSlice(env, "DISTCC_CPU_FEATURES", nil)
+	config.DistCCNetworkZone = getEnvString(env, "DISTCC_NETWORK_ZONE", config.DistCCNetworkZone)
+	config.DistCCIsolatedNetworkCIDRs = getEnvStringSlice(env, "DISTCC_ISOLATED_NETWORK_CIDRS", nil)
+	config.DistCCSlotsPerJob = getEnvInt(env, "DISTCC_SLOTS_PER_JOB", config.DistCCSlotsPerJob)
+	config.DistCCLeaseSeconds = getEnvInt(env, "DISTCC_LEASE_SECONDS", config.DistCCLeaseSeconds)
+	config.DistCCWorkerFreshnessSeconds = getEnvInt(env, "DISTCC_WORKER_FRESHNESS_SECONDS", config.DistCCWorkerFreshnessSeconds)
+	config.DistCCFallbackPolicy = strings.ToLower(getEnvString(env, "DISTCC_FALLBACK_POLICY", config.DistCCFallbackPolicy))
 	config.Database.Enabled = getEnvBool(env, "DATABASE_ENABLED", false)
 	config.Database.Required = getEnvBool(env, "DATABASE_REQUIRED", false)
 	if config.Database.Required {
@@ -1809,6 +1893,7 @@ func LoadBuilderConfig(path string) (*BuilderConfig, error) {
 		BinpkgFormat:       "gpkg",
 		StorageType:        "local",
 		StorageLocalDir:    "/var/binpkgs",
+		DistCCNetworkZone:  "default",
 		// Portage defaults
 		PortageReposPath: "/var/db/repos",
 		PortageConfPath:  "/etc/portage",
@@ -1844,6 +1929,14 @@ func LoadBuilderConfig(path string) (*BuilderConfig, error) {
 
 	config.BinpkgFormat = getEnvString(env, "BINPKG_FORMAT", config.BinpkgFormat)
 	config.BuildFeatures = getEnvString(env, "BUILD_FEATURES", "")
+	config.DistCCAlphaEnabled = getEnvBool(env, "DISTCC_ALPHA_ENABLED", false)
+	config.DistCCPackageAllowlist = getEnvStringSlice(env, "DISTCC_PACKAGE_ALLOWLIST", nil)
+	config.DistCCCHOST = getEnvString(env, "DISTCC_CHOST", "")
+	config.DistCCCompilerDigest = getEnvString(env, "DISTCC_COMPILER_DIGEST", "")
+	config.DistCCToolchainImageGeneration = getEnvString(env, "DISTCC_TOOLCHAIN_IMAGE_GENERATION", "")
+	config.DistCCCPUFeatures = getEnvStringSlice(env, "DISTCC_CPU_FEATURES", nil)
+	config.DistCCNetworkZone = getEnvString(env, "DISTCC_NETWORK_ZONE", config.DistCCNetworkZone)
+	config.DistCCIsolatedNetworkCIDRs = getEnvStringSlice(env, "DISTCC_ISOLATED_NETWORK_CIDRS", nil)
 
 	config.StorageType = getEnvString(env, "STORAGE_TYPE", config.StorageType)
 	config.StorageLocalDir = getEnvString(env, "STORAGE_LOCAL_DIR", config.StorageLocalDir)

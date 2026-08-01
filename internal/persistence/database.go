@@ -23,8 +23,10 @@ import (
 const (
 	// MinSchemaVersion and MaxSchemaVersion define the migration range this
 	// server binary can safely use. A newer schema fails closed.
-	MinSchemaVersion int64 = 28
-	MaxSchemaVersion int64 = 28
+	// Migrations 27, 28, and 29 respectively add CLI device authorization,
+	// scheduler observability, and Distributed Build Alpha state.
+	MinSchemaVersion int64 = 29
+	MaxSchemaVersion int64 = 29
 )
 
 // Querier is the narrow database surface repositories may use. Keeping

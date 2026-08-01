@@ -10,6 +10,11 @@ begin. Entries describe operator-visible changes, not every internal refactor.
 - Browser-assisted `portage-client login` / `device-login` with one-time,
   PostgreSQL-serialized device authorization and a local authenticated
   Dashboard approval page.
+- Default-off Distributed Build Alpha on migration 00029: exact compile-worker
+  pools, atomic fenced slot leases/heartbeats, reviewed package-scoped builder
+  policy, builder-to-persistence compiler telemetry, project/attempt-bound
+  leases, post-collection output fencing, safe fallback/blocking, and a
+  local-only-versus-distcc artifact/ABI/install/GUI comparison Gate.
 - S3-compatible object quarantine, revocable verification capabilities,
   independent signer hand-off, immutable binhost generations, ETag-fenced
   stable channel pointers, deep audit, replication, and reference-aware GC.

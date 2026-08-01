@@ -1,10 +1,17 @@
 # Scheduler fairness and autoscaling
 
-Schema v28 makes project fairness, catalog-derived capacity-pool demand,
+Schema v29 makes project fairness, catalog-derived capacity-pool demand,
 fenced capacity actions, pull-aware worker scoring, the target-history read
-model, and lease-recovery observability part of the PostgreSQL authority.
-Redis remains a wake-up and presence accelerator and may be flushed without
-changing dispatch order.
+model, lease-recovery observability, and Distributed Build Alpha state part of
+the PostgreSQL authority. Migrations 00027, 00028, and 00029 respectively own
+CLI device authorization, monitoring, and distcc. Redis remains a wake-up and
+presence accelerator and may be flushed without changing dispatch order.
+
+Distributed Build Alpha adds a compile-only hard-routing step after a
+project-fair job/phase claim. Its exact compatibility pool and atomically
+leased slots never consume, reset, or subdivide project virtual runtime and do
+not create provider/target fairness queues. See
+[Distributed Build Alpha](DISTRIBUTED_BUILD_ALPHA.md).
 
 ## Dispatch order
 
