@@ -27,7 +27,7 @@ import type { StepUpMethod } from './types';
 export type ApiOutcome<T> =
   | { kind: 'ok'; value: T }
   | { kind: 'unauthorized' }
-  | { kind: 'step-up'; method: StepUpMethod; message: string }
+  | { kind: 'step-up'; method: StepUpMethod | 'unstated'; message: string }
   | { kind: 'error'; status: number; message: string };
 
 export interface RequestOptions {
@@ -138,9 +138,17 @@ export async function request<T>(
     if (response.status === 428 && typeof body === 'object' && body !== null) {
       const fields = body as Record<string, unknown>;
       if (typeof fields['code'] === 'string' && STEP_UP_CODES.has(fields['code'])) {
-        // `method` is absent on the control plane's own 428, which only ever
-        // means a fresh credential of whatever kind established this session.
-        const method = isStepUpMethod(fields['method']) ? fields['method'] : 'federated';
+        // `method` is absent on the control plane's own 428 — stepUpRequired in
+        // internal/server/iam.go answers `{code, error}` and nothing else — and
+        // what it means then is a fresh credential of whatever kind established
+        // this session. Which kind that is, this layer does not know and must
+        // not guess: naming one here picked `federated` for every deployment,
+        // which sent a legacy or local operator on a full navigation to the
+        // login page and threw away the form they were filling in. The caller
+        // knows, because the boot payload states it.
+        const method: StepUpMethod | 'unstated' = isStepUpMethod(fields['method'])
+          ? fields['method']
+          : 'unstated';
         return { kind: 'step-up', method, message };
       }
     }

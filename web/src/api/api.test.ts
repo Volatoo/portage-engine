@@ -70,7 +70,7 @@ describe('step-up is an outcome, not an error', () => {
     expect(outcome.kind === 'step-up' && outcome.method).toBe('unavailable');
   });
 
-  it('defaults the method to federated when the control plane omits it', async () => {
+  it('does not guess a method when the control plane omits it, because it cannot', async () => {
     // internal/server/server.go sends `{error, code}` and no method: the session
     // there was established federally, so re-authenticating is the only answer.
     vi.stubGlobal(
@@ -88,7 +88,13 @@ describe('step-up is an outcome, not an error', () => {
       ),
     );
     const outcome = await request('/api/settings/cloud', { method: 'PUT', body: {} });
-    expect(outcome.kind === 'step-up' && outcome.method).toBe('federated');
+    // This is the shape stepUpRequired in internal/server/iam.go actually
+    // answers with — a code and a sentence. Naming a method here was picking
+    // one for every deployment alike, and the one picked sent a legacy or local
+    // operator on a full navigation that discarded the form they were filling
+    // in. Which credential can satisfy this is the session's property, and the
+    // session is not something a transport rule can see.
+    expect(outcome.kind === 'step-up' && outcome.method).toBe('unstated');
   });
 
   it('leaves a 428 that is not a step-up as an error', async () => {

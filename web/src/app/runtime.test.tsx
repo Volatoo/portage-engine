@@ -21,7 +21,7 @@ import { PROJECT_STORAGE_KEY, ProjectScopeContext } from './project';
 import type { ProjectScope } from './project';
 import { CONSOLE_ROUTES } from './routes';
 import type { ConsoleRoute } from './routes';
-import { useStepUp, withStepUp } from './stepup';
+import { stepUpMethodFor, useStepUp, withStepUp } from './stepup';
 
 /**
  * The shared runtime, which is the layer every page consumes and therefore the
@@ -556,7 +556,12 @@ describe('every project-scoped write sends it too', () => {
 /* ---- the credential prompt ----------------------------------------------- */
 
 describe('a step-up refusal is satisfied where the write was made', () => {
-  const refusal = { kind: 'step-up' as const, message: 'fresh authentication required' };
+  /** What the control plane actually answers: a code and a sentence, no method. */
+  const refusal = {
+    kind: 'step-up' as const,
+    method: 'unstated' as const,
+    message: 'fresh authentication required',
+  };
   const ok = { kind: 'ok' as const, value: 'written' };
 
   it('asks for a local credential and repeats the write once', async () => {
@@ -566,6 +571,7 @@ describe('a step-up refusal is satisfied where the write was made', () => {
     const outcome = await withStepUp(run, {
       elevate: () => Promise.resolve(true),
       reauthenticate,
+      sessionMethod: () => 'federated',
     });
     expect(run).toHaveBeenCalledTimes(2);
     expect(outcome).toEqual(ok);
@@ -577,6 +583,7 @@ describe('a step-up refusal is satisfied where the write was made', () => {
     const outcome = await withStepUp(run, {
       elevate: () => Promise.resolve(true),
       reauthenticate: () => undefined,
+      sessionMethod: () => 'federated',
     });
     expect(run).toHaveBeenCalledTimes(2);
     expect(outcome.kind).toBe('step-up');
@@ -587,6 +594,7 @@ describe('a step-up refusal is satisfied where the write was made', () => {
     const outcome = await withStepUp(run, {
       elevate: () => Promise.resolve(false),
       reauthenticate: () => undefined,
+      sessionMethod: () => 'federated',
     });
     expect(run).toHaveBeenCalledTimes(1);
     expect(outcome).toEqual({ ...refusal, method: 'local' });
@@ -596,10 +604,51 @@ describe('a step-up refusal is satisfied where the write was made', () => {
     const run = vi.fn(() => Promise.resolve({ ...refusal, method: 'federated' as const }));
     const elevate = vi.fn(() => Promise.resolve(true));
     const reauthenticate = vi.fn();
-    await withStepUp(run, { elevate, reauthenticate });
+    await withStepUp(run, { elevate, reauthenticate, sessionMethod: () => 'local' });
     expect(elevate).not.toHaveBeenCalled();
     expect(reauthenticate).toHaveBeenCalledTimes(1);
     expect(run).toHaveBeenCalledTimes(1);
+  });
+
+  // The control plane's own 428 carries `{code, error}` and no `method` at all —
+  // stepUpRequired in internal/server/iam.go never sets one. Every case above
+  // states one, so until these two ran, the branch that decides for the real
+  // payload was the one branch nothing exercised: it defaulted to `federated`,
+  // and a legacy operator lost a filled-in settings form to a navigation.
+  it('asks in place when the 428 names no method and the session is a local one', async () => {
+    const answers = [refusal, ok];
+    const run = vi.fn(() => Promise.resolve(answers.shift() ?? ok));
+    const elevate = vi.fn(() => Promise.resolve(true));
+    const reauthenticate = vi.fn();
+    const outcome = await withStepUp(run, {
+      elevate,
+      reauthenticate,
+      sessionMethod: () => 'local',
+    });
+    expect(reauthenticate, 'a local session was sent on a full navigation').not.toHaveBeenCalled();
+    expect(elevate).toHaveBeenCalledTimes(1);
+    expect(run).toHaveBeenCalledTimes(2);
+    expect(outcome).toEqual(ok);
+  });
+
+  it('goes to the provider when the 428 names no method and the session is federated', async () => {
+    const run = vi.fn(() => Promise.resolve(refusal));
+    const elevate = vi.fn(() => Promise.resolve(true));
+    const reauthenticate = vi.fn();
+    await withStepUp(run, { elevate, reauthenticate, sessionMethod: () => 'federated' });
+    expect(elevate).not.toHaveBeenCalled();
+    expect(reauthenticate).toHaveBeenCalledTimes(1);
+  });
+
+  it('reads the session kind off the field the old console read it off', () => {
+    // internal/dashboard/ui.go:1712 sent exactly these two to the provider.
+    expect(stepUpMethodFor('oidc')).toBe('federated');
+    expect(stepUpMethodFor('federated-session')).toBe('federated');
+    expect(stepUpMethodFor('legacy-api-key')).toBe('local');
+    expect(stepUpMethodFor('local-session')).toBe('local');
+    // An unknown kind is asked in place rather than navigated away from: the
+    // dialog can be dismissed, a navigation cannot be undone.
+    expect(stepUpMethodFor('')).toBe('local');
   });
 
   it('does neither when the deployment holds no step-up credential at all', async () => {
@@ -608,7 +657,7 @@ describe('a step-up refusal is satisfied where the write was made', () => {
     const run = vi.fn(() => Promise.resolve({ ...refusal, method: 'unavailable' as const }));
     const elevate = vi.fn(() => Promise.resolve(true));
     const reauthenticate = vi.fn();
-    const outcome = await withStepUp(run, { elevate, reauthenticate });
+    const outcome = await withStepUp(run, { elevate, reauthenticate, sessionMethod: () => 'local' });
     expect(elevate).not.toHaveBeenCalled();
     expect(reauthenticate).not.toHaveBeenCalled();
     expect(outcome).toEqual({ ...refusal, method: 'unavailable' });
@@ -621,7 +670,7 @@ function stepUpOnce(): (path: string) => unknown {
   return (path: string) => {
     if (path.startsWith('/api/settings/cloud/test') && !refused) {
       refused = true;
-      return new Response(JSON.stringify({ code: 'step_up_required', method: 'local' }), {
+      return new Response(JSON.stringify({ code: 'step_up_required', error: 'fresh step-up authentication required' }), {
         status: 428,
         headers: { 'Content-Type': 'application/json' },
       });
@@ -670,8 +719,8 @@ describe('answering the credential prompt writes only what was asked for', () =>
 /* ---- modality ------------------------------------------------------------ */
 
 /** A page with one control, which raises a credential prompt when activated. */
-function StepUpHarness() {
-  const stepUp = useStepUp();
+function StepUpHarness({ authentication = 'local-session' }: { authentication?: string } = {}) {
+  const stepUp = useStepUp(authentication);
   return (
     <>
       <button

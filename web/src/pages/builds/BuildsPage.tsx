@@ -66,7 +66,7 @@ export function BuildsPage({ route, boot }: PageProps) {
   );
   const builds = usePolledResource(load, POLL_MS, ready);
   const refresh = builds.refresh;
-  const stepUp = useStepUp();
+  const stepUp = useStepUp(boot?.principal?.authentication ?? '');
 
   const [draft, setDraft] = useState('');
   const [query, setQuery] = useState('');
