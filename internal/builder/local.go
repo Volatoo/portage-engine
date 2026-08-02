@@ -8,12 +8,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -916,14 +918,8 @@ func (lb *LocalBuilder) collectAndUploadArtifact(job *BuildJob, outputDir string
 	}
 
 	// Copy every produced package into the artifact dir, category preserved.
-	for _, rel := range rels {
-		dest := filepath.Join(lb.artifactDir, rel)
-		if err := os.MkdirAll(filepath.Dir(dest), 0750); err != nil {
-			return fmt.Errorf("failed to create artifact dir: %w", err)
-		}
-		if err := exec.Command("cp", filepath.Join(outputDir, rel), dest).Run(); err != nil { // #nosec G204 -- fixed cp executable and allow-listed artifact path.
-			return fmt.Errorf("failed to copy artifact %s: %w", rel, err)
-		}
+	if err := lb.copyArtifacts(outputDir, rels); err != nil {
+		return err
 	}
 
 	primary := primaryArtifact(rels, job.Request.PackageName, func(rel string) int64 {
@@ -945,6 +941,84 @@ func (lb *LocalBuilder) collectAndUploadArtifact(job *BuildJob, outputDir string
 	lb.uploadArtifact(job, destPath)
 
 	return nil
+}
+
+// copyArtifacts moves this builder's produced packages into its artifact dir.
+func (lb *LocalBuilder) copyArtifacts(outputDir string, rels []string) error {
+	return copyProducedPackages(outputDir, lb.artifactDir, rels)
+}
+
+// copyProducedPackages moves every produced package from PKGDIR into the
+// artifact dir. Both ends are addressed through a directory root rather than by
+// name: PKGDIR was last written by ebuild code we do not trust, and the
+// artifact dir lives under /var/tmp on a native builder, so either end can hold
+// a symlink that was never a package. A root refuses to traverse a link out of
+// its own tree, which keeps a planted name from turning this copy into an
+// arbitrary read of the builder host or an arbitrary write as the (root) build
+// service. Links that stay inside their tree still resolve, so the legacy
+// PKGDIR layouts that point a category entry at a shared file keep working.
+//
+// Both collectors share this one body on purpose. The native path and the
+// config-bundle path publish into the same artifact dir and feed the same
+// job.Artifacts list, so a rule enforced in only one of them is not enforced at
+// all: the dispatcher in worker() picks between them from the request.
+func copyProducedPackages(outputDir, artifactDir string, rels []string) error {
+	source, err := os.OpenRoot(outputDir)
+	if err != nil {
+		return fmt.Errorf("failed to open build output dir: %w", err)
+	}
+	defer func() { _ = source.Close() }()
+	// The artifact dir is created at startup, but it sits under /var/tmp on a
+	// native builder and a long-lived process can outlive a tmpfiles sweep, so
+	// keep recreating it here as the copy always has.
+	if err := os.MkdirAll(artifactDir, 0750); err != nil {
+		return fmt.Errorf("failed to create artifact dir: %w", err)
+	}
+	destination, err := os.OpenRoot(artifactDir)
+	if err != nil {
+		return fmt.Errorf("failed to open artifact dir: %w", err)
+	}
+	defer func() { _ = destination.Close() }()
+	for _, rel := range rels {
+		if err := copyArtifactBetweenRoots(source, destination, rel); err != nil {
+			return fmt.Errorf("failed to copy artifact %s: %w", rel, err)
+		}
+	}
+	return nil
+}
+
+// copyArtifactBetweenRoots copies one package between two directory roots.
+func copyArtifactBetweenRoots(source, destination *os.Root, rel string) error {
+	in, err := source.Open(rel)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = in.Close() }()
+	info, err := in.Stat()
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("%s is not a regular file", rel)
+	}
+	if dir := filepath.Dir(rel); dir != "." {
+		if err := destination.MkdirAll(dir, 0750); err != nil {
+			return err
+		}
+	}
+	out, err := destination.Create(rel)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+		return err
+	}
+	if err := out.Sync(); err != nil {
+		_ = out.Close()
+		return err
+	}
+	return out.Close()
 }
 
 // gpkgIsSigned reports whether a .gpkg.tar carries an embedded OpenPGP
@@ -970,25 +1044,17 @@ func gpkgIsSigned(path string) bool {
 // waitForArtifacts scans the container output dir for every produced binary
 // package, returning paths relative to outputDir (category preserved).
 func (lb *LocalBuilder) waitForArtifacts(outputDir string) ([]string, error) {
-	var rels []string
 	for i := 0; i < 10; i++ {
 		if i > 0 {
 			_ = exec.Command("sync").Run()
 			time.Sleep(2 * time.Second)
 		}
-		rels = rels[:0]
-		_ = filepath.Walk(outputDir, func(path string, info os.FileInfo, walkErr error) error {
-			if walkErr != nil || info.IsDir() {
-				return nil
-			}
-			name := filepath.Base(path)
-			if strings.HasSuffix(name, ".gpkg.tar") || strings.HasSuffix(name, ".tbz2") {
-				if rel, err := filepath.Rel(outputDir, path); err == nil {
-					rels = append(rels, rel)
-				}
-			}
-			return nil
-		})
+		rels, err := producedBinaryPackages(outputDir)
+		if err != nil {
+			// A PKGDIR that is not there yet is the same non-result as a PKGDIR
+			// with nothing in it: keep waiting for emerge to produce one.
+			continue
+		}
 		if len(rels) > 0 {
 			return rels, nil
 		}
@@ -997,6 +1063,49 @@ func (lb *LocalBuilder) waitForArtifacts(outputDir string) ([]string, error) {
 		}
 	}
 	return nil, fmt.Errorf("no artifacts found in %s", outputDir)
+}
+
+// producedBinaryPackages lists the binary packages one PKGDIR holds, as sorted
+// paths relative to it with the category preserved. Modern GPKG (.gpkg.tar) and
+// legacy XPAK (.tbz2) both count, so the caller finds its output whichever
+// BINPKG_FORMAT the job asked for.
+//
+// The listing is filtered through a root because Walk reports names without
+// following them, and the ebuild that just ran could name anything on the host.
+// An entry counts as a produced package only if it still resolves to a regular
+// file inside PKGDIR, so a symlink aimed at a builder secret is never recorded,
+// copied, or handed to the control plane as a build output. Every collector in
+// this package goes through here for that reason: the recorded list is what the
+// artifact API later serves by name, so a listing that admits an escape hands
+// one out no matter how carefully the copy behind it is written.
+func producedBinaryPackages(pkgDir string) ([]string, error) {
+	root, err := os.OpenRoot(pkgDir)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = root.Close() }()
+	var rels []string
+	_ = filepath.Walk(pkgDir, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil || info.IsDir() {
+			return nil
+		}
+		name := filepath.Base(path)
+		if !strings.HasSuffix(name, ".gpkg.tar") && !strings.HasSuffix(name, ".tbz2") {
+			return nil
+		}
+		rel, relErr := filepath.Rel(pkgDir, path)
+		if relErr != nil {
+			return nil
+		}
+		target, statErr := root.Stat(rel)
+		if statErr != nil || !target.Mode().IsRegular() {
+			return nil
+		}
+		rels = append(rels, rel)
+		return nil
+	})
+	sort.Strings(rels)
+	return rels, nil
 }
 
 // primaryArtifact picks the artifact belonging to the requested package
@@ -1202,14 +1311,31 @@ func (lb *LocalBuilder) GetArtifactPathByRel(jobID, rel string) (string, error) 
 	}
 	for _, known := range job.artifactsSnapshot() {
 		if known == rel {
-			p := filepath.Join(lb.artifactDir, rel)
-			if _, err := os.Stat(p); err != nil {
-				return "", fmt.Errorf("artifact file not found: %s", rel)
-			}
-			return p, nil
+			return lb.resolveArtifact(rel)
 		}
 	}
 	return "", fmt.Errorf("artifact %q not produced by job %s", rel, jobID)
+}
+
+// resolveArtifact turns one recorded artifact path into an absolute path the
+// caller may stream. Matching the recorded list only proves the requester did
+// not invent a path; the entry itself was named by the build, so the file is
+// resolved through the artifact dir's own root. Anything that leaves that tree
+// - a category component or a package name that is a symlink onto the builder
+// host - is reported as a missing artifact instead of being opened and shipped
+// to the control plane, and the same rule rejects a non-regular file that
+// would block or misbehave when read.
+func (lb *LocalBuilder) resolveArtifact(rel string) (string, error) {
+	root, err := os.OpenRoot(lb.artifactDir)
+	if err != nil {
+		return "", fmt.Errorf("artifact file not found: %s", rel)
+	}
+	defer func() { _ = root.Close() }()
+	info, err := root.Stat(rel)
+	if err != nil || !info.Mode().IsRegular() {
+		return "", fmt.Errorf("artifact file not found: %s", rel)
+	}
+	return filepath.Join(lb.artifactDir, rel), nil
 }
 
 // ArtifactInfo contains metadata about a build artifact.
@@ -1257,6 +1383,29 @@ func (lb *LocalBuilder) GetArtifactInfo(jobID string) (*ArtifactInfo, error) {
 	}, nil
 }
 
+// verifySignedArtifactSet checks each downloaded package against the signer key
+// the control plane named, independently of the emerge run that follows.
+//
+// The manifest path is placed by verificationArtifactPath rather than joined
+// here. Every artifact reaching this point was already canonicalised by the
+// prefetch, so today the two agree by construction; the point is that they
+// cannot drift. This preflight is one of the three joins verificationArtifactPath
+// documents itself as covering, and a join that reads its operand straight out
+// of the request would make that documented rule false the moment a caller
+// reaches the verify root by another route.
+func verifySignedArtifactSet(pkgDir, gpgHome, keyID string, artifacts []VerificationArtifact) error {
+	for _, artifact := range artifacts {
+		file, err := verificationArtifactPath(pkgDir, artifact.RelativePath)
+		if err != nil {
+			return err
+		}
+		if err := (signing.GPG{Home: gpgHome, KeyID: keyID}).VerifyGPKG(file); err != nil {
+			return fmt.Errorf("signed artifact %q failed independent GPG verification: %w", artifact.RelativePath, err)
+		}
+	}
+	return nil
+}
+
 // verifyInstallNative installs one digest-bound generation from a fresh local
 // PKGDIR. Remote fetches finish before emerge starts, so Portage cannot reuse a
 // package downloaded by the earlier unsigned gate or contact another binhost.
@@ -1294,11 +1443,8 @@ func (lb *LocalBuilder) verifyInstallNative(request VerifyInstallRequest) (strin
 		if !strings.HasSuffix(strings.ToUpper(fingerprint), strings.ToUpper(request.ExpectedKeyID)) {
 			return "", fmt.Errorf("signer public-key fingerprint %s does not match expected key ID %s", fingerprint, request.ExpectedKeyID)
 		}
-		for _, artifact := range request.Artifacts {
-			file := filepath.Join(pkgDir, filepath.FromSlash(artifact.RelativePath))
-			if err := (signing.GPG{Home: gpgHome, KeyID: request.ExpectedKeyID}).VerifyGPKG(file); err != nil {
-				return "", fmt.Errorf("signed artifact %q failed independent GPG verification: %w", artifact.RelativePath, err)
-			}
+		if err := verifySignedArtifactSet(pkgDir, gpgHome, request.ExpectedKeyID, request.Artifacts); err != nil {
+			return "", err
 		}
 		if out, err := exec.Command("chown", "-R", "nobody:nobody", gpgHome).CombinedOutput(); err != nil {
 			return string(out), fmt.Errorf("failed to assign verify keyring ownership: %w: %s", err, strings.TrimSpace(string(out)))

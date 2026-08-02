@@ -19,6 +19,16 @@ import (
 	"github.com/slchris/portage-engine/internal/signing"
 )
 
+// loopbackVerificationClient is the verification fetcher without its dial
+// policy. The tests below cover the guarantees that policy is orthogonal to —
+// exact bytes, digest binding, redirect refusal — and an httptest server can
+// only be reached over loopback, which the shipped fetcher refuses on purpose.
+// The policy itself is exercised by
+// TestPrefetchVerificationGenerationRefusesWorkerLocalTargets.
+func loopbackVerificationClient() *http.Client {
+	return verificationHTTPClient(nil)
+}
+
 func TestPrefetchVerificationGenerationBindsExactBytes(t *testing.T) {
 	const rel = "app-misc/jq/jq-1.8.2.gpkg.tar"
 	payload := []byte("exact signed generation bytes")
@@ -42,7 +52,8 @@ func TestPrefetchVerificationGenerationBindsExactBytes(t *testing.T) {
 		SHA256:       hex.EncodeToString(digest[:]),
 		Size:         int64(len(payload)),
 	}
-	if err := prefetchVerificationGeneration(server.URL+"/generation", pkgDir, []VerificationArtifact{artifact}); err != nil {
+	if err := prefetchVerificationGenerationVia(loopbackVerificationClient(),
+		server.URL+"/generation", pkgDir, []VerificationArtifact{artifact}); err != nil {
 		t.Fatal(err)
 	}
 	got, err := os.ReadFile(filepath.Join(pkgDir, filepath.FromSlash(rel)))
@@ -72,7 +83,8 @@ func TestPrefetchVerificationGenerationRejectsDigestMismatch(t *testing.T) {
 		SHA256:       strings.Repeat("0", 64),
 		Size:         int64(len(payload)),
 	}
-	err := prefetchVerificationGeneration(server.URL, t.TempDir(), []VerificationArtifact{artifact})
+	err := prefetchVerificationGenerationVia(loopbackVerificationClient(),
+		server.URL, t.TempDir(), []VerificationArtifact{artifact})
 	if err == nil || !strings.Contains(err.Error(), "proof mismatch") {
 		t.Fatalf("prefetch error = %v, want digest proof mismatch", err)
 	}
@@ -94,9 +106,124 @@ func TestPrefetchVerificationGenerationRejectsRedirect(t *testing.T) {
 		SHA256:       strings.Repeat("0", 64),
 		Size:         1,
 	}
-	err := prefetchVerificationGeneration(server.URL, t.TempDir(), []VerificationArtifact{artifact})
+	err := prefetchVerificationGenerationVia(loopbackVerificationClient(),
+		server.URL, t.TempDir(), []VerificationArtifact{artifact})
 	if err == nil || !strings.Contains(err.Error(), "must not redirect") {
 		t.Fatalf("prefetch error = %v, want redirect rejection", err)
+	}
+}
+
+// TestPrefetchVerificationGenerationRefusesWorkerLocalTargets drives the
+// request-forgery attack: a binhost URL is untrusted input, and the builder
+// sits inside the build VM, so the URL is aimed at the two things the VM can
+// reach and the party supplying the URL cannot — the hypervisor's link-local
+// metadata service and the worker's own loopback surface.
+func TestPrefetchVerificationGenerationRefusesWorkerLocalTargets(t *testing.T) {
+	local := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("worker-only response that must never be fetched"))
+	}))
+	defer local.Close()
+
+	artifact := VerificationArtifact{
+		RelativePath: "app-misc/jq/jq-1.8.2.gpkg.tar",
+		SHA256:       strings.Repeat("0", 64),
+		Size:         1,
+	}
+	for name, baseURL := range map[string]string{
+		"cloud metadata":  "http://169.254.169.254/latest/meta-data",
+		"worker loopback": local.URL,
+		"loopback by name": "http://localhost:" +
+			local.URL[strings.LastIndex(local.URL, ":")+1:],
+		"unspecified": "http://0.0.0.0:9090",
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := prefetchVerificationGeneration(baseURL, t.TempDir(), []VerificationArtifact{artifact})
+			if err == nil {
+				t.Fatalf("prefetch from %s succeeded", baseURL)
+			}
+			if !strings.Contains(err.Error(), "the build VM must never fetch from") {
+				t.Fatalf("prefetch from %s failed with %v, want the address policy refusal", baseURL, err)
+			}
+		})
+	}
+}
+
+// TestValidateVerifyInstallRequestRefusesWorkerLocalBinhost proves the same
+// policy fails the request at the contract boundary, and that an ordinary
+// private-LAN binhost — which is what every real deployment publishes — still
+// passes.
+func TestValidateVerifyInstallRequestRefusesWorkerLocalBinhost(t *testing.T) {
+	base := VerifyInstallRequest{
+		PackageName: "app-misc/jq",
+		Generation:  "unsigned",
+		Artifacts: []VerificationArtifact{{
+			RelativePath: "app-misc/jq/jq-1.8.2.gpkg.tar",
+			SHA256:       strings.Repeat("a", 64),
+			Size:         1,
+		}},
+	}
+	for _, blocked := range []string{
+		"http://169.254.169.254/latest/meta-data",
+		"http://127.0.0.1:9090/api/v1/status",
+		"http://localhost:2112/metrics",
+		"http://[::1]:9090/",
+		"http://[::ffff:127.0.0.1]:9090/",
+	} {
+		base.BinhostURL = blocked
+		err := validateVerifyInstallRequest(base)
+		if err == nil || !strings.Contains(err.Error(), "the build VM must never fetch from") {
+			t.Fatalf("validation of %s = %v, want the address policy refusal", blocked, err)
+		}
+	}
+	for _, allowed := range []string{
+		"http://10.31.0.2:8080/verify-binhost/abc",
+		"http://10.42.0.156:8080/verify-binhost/abc",
+		"https://binhost.example.org/verify-binhost/abc",
+	} {
+		base.BinhostURL = allowed
+		if err := validateVerifyInstallRequest(base); err != nil {
+			t.Fatalf("validation of legitimate binhost %s = %v", allowed, err)
+		}
+	}
+}
+
+// TestPrefetchVerificationGenerationConfinesArtifactPaths checks the rule the
+// four dismissed path-injection alerts rest on, at the place that rests on it,
+// rather than leaving it as an assertion in a scanner's UI.
+func TestPrefetchVerificationGenerationConfinesArtifactPaths(t *testing.T) {
+	pkgDir := t.TempDir()
+	for _, escape := range []string{
+		"../../../../etc/portage/make.conf",
+		"/etc/portage/make.conf",
+		"app-misc/../../escape.gpkg.tar",
+		"./app-misc/jq.gpkg.tar",
+		"",
+	} {
+		if _, err := verificationArtifactPath(pkgDir, escape); err == nil {
+			t.Fatalf("verification artifact path %q was accepted", escape)
+		}
+	}
+	got, err := verificationArtifactPath(pkgDir, "app-misc/jq/jq-1.8.2.gpkg.tar")
+	if err != nil {
+		t.Fatalf("legitimate artifact path rejected: %v", err)
+	}
+	if want := filepath.Join(pkgDir, "app-misc", "jq", "jq-1.8.2.gpkg.tar"); got != want {
+		t.Fatalf("verification artifact path = %q, want %q", got, want)
+	}
+
+	index := []byte("VERSION: 0\nPACKAGES: 1\n\nCPV: app-misc/jq-1.8.2\nPATH: ../../escape.gpkg.tar\n\n")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(index)
+	}))
+	defer server.Close()
+	err = prefetchVerificationGenerationVia(loopbackVerificationClient(), server.URL, pkgDir,
+		[]VerificationArtifact{{
+			RelativePath: "../../escape.gpkg.tar",
+			SHA256:       strings.Repeat("0", 64),
+			Size:         1,
+		}})
+	if err == nil || !strings.Contains(err.Error(), "not canonical and relative") {
+		t.Fatalf("prefetch of an escaping manifest path = %v, want a confinement refusal", err)
 	}
 }
 

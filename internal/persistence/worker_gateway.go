@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -632,16 +633,52 @@ func (r *JobRepository) WorkerCommandResult(
 	}, nil
 }
 
+// checkGatewayUploadID admits only the canonical uuid spelling. The id column
+// is a uuid, so PostgreSQL would happily match a braced or URN-prefixed form
+// against the same row while the gateway carried that alternate spelling into
+// a temporary filename.
+func checkGatewayUploadID(uploadID string) error {
+	parsed, err := uuid.Parse(uploadID)
+	if err != nil {
+		return fmt.Errorf("invalid worker upload id: %w", err)
+	}
+	if parsed.String() != uploadID {
+		return fmt.Errorf("worker upload id is not in canonical form")
+	}
+	return nil
+}
+
+// checkGatewayDestination holds the capability row to the only shape the
+// control plane can produce: an absolute, already-normalized path. It runs on
+// the way in and again on the way out, because the row is what the gateway
+// ultimately hands to the filesystem, and a row written by anything other than
+// PrepareWorkerUpload — a direct UPDATE, a restored dump, a compromised
+// replica — must not be able to name a relative or unresolved location.
+func checkGatewayDestination(destination string) error {
+	if destination == "" || len(destination) > maxGatewayDestinationBytes {
+		return fmt.Errorf("invalid durable worker upload capability")
+	}
+	if !filepath.IsAbs(destination) || filepath.Clean(destination) != destination {
+		return fmt.Errorf(
+			"durable worker upload destination must be an absolute normalized path",
+		)
+	}
+	return nil
+}
+
 func (r *JobRepository) PrepareWorkerUpload(
 	ctx context.Context,
 	identity workergateway.Identity,
 	uploadID, destination string,
 	maxBytes int64,
 ) error {
-	if _, err := uuid.Parse(uploadID); err != nil {
-		return fmt.Errorf("invalid worker upload id: %w", err)
+	if err := checkGatewayUploadID(uploadID); err != nil {
+		return err
 	}
-	if destination == "" || len(destination) > maxGatewayDestinationBytes || maxBytes <= 0 {
+	if err := checkGatewayDestination(destination); err != nil {
+		return err
+	}
+	if maxBytes <= 0 {
 		return fmt.Errorf("invalid durable worker upload capability")
 	}
 	tag, err := r.db.pool.Exec(ctx, `
@@ -682,6 +719,9 @@ func (r *JobRepository) ClaimWorkerUpload(
 	if lease <= 0 {
 		return claim, fmt.Errorf("worker upload lease must be positive")
 	}
+	if err := checkGatewayUploadID(uploadID); err != nil {
+		return claim, err
+	}
 	err := r.db.WithTx(ctx, pgx.TxOptions{}, func(q Querier) error {
 		if err := touchWorkerSessionTx(ctx, q, identity); err != nil {
 			return err
@@ -713,6 +753,9 @@ func (r *JobRepository) ClaimWorkerUpload(
 		}
 		if err != nil {
 			return fmt.Errorf("lock durable worker upload: %w", err)
+		}
+		if err := checkGatewayDestination(destination); err != nil {
+			return err
 		}
 		claim = workergateway.UploadClaim{
 			ID: uploadID, Destination: destination, MaxBytes: maxBytes,

@@ -319,49 +319,37 @@ func prepareNativeProfile(bundle *ConfigBundle, configRoot string) (string, erro
 }
 
 // collectArtifacts collects built package artifacts.
+//
+// The package structure is typically:
+//
+//	GPKG:  PKGDIR/category/package/package-version.gpkg.tar
+//	XPAK:  PKGDIR/category/package-version.tbz2
+//
+// This is the config-bundle half of a collection stage the native path also
+// performs, into the same artifact dir and onto the same job.Artifacts list.
+// Both halves therefore share producedBinaryPackages and copyProducedPackages
+// instead of walking and copying themselves: emerge has just run arbitrary
+// ebuild code as root with this PKGDIR as its output, so a name that only looks
+// like a produced package must not be listed, must not be dereferenced into the
+// artifact dir, and must not be written through on the way in. Sharing the body
+// is the point: the request shape alone decides which half runs, so a rule that
+// lives in only one of them is a rule the request can opt out of.
 func (be *BuildExecutor) collectArtifacts(pkgDir string, job *BuildJob) error {
-	// The package structure is typically:
-	//   GPKG:  PKGDIR/category/package/package-version.gpkg.tar
-	//   XPAK:  PKGDIR/category/package-version.tbz2
-	var rels []string
-
-	err := filepath.Walk(pkgDir, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		// Match modern GPKG (.gpkg.tar) and legacy XPAK (.tbz2) so artifacts are
-		// found regardless of the configured format.
-		if !info.IsDir() && (strings.HasSuffix(info.Name(), ".gpkg.tar") || strings.HasSuffix(info.Name(), ".tbz2")) {
-			rel, relErr := filepath.Rel(pkgDir, path)
-			if relErr != nil || rel == "." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
-				return fmt.Errorf("invalid package path %s", path)
-			}
-			rels = append(rels, rel)
-		}
-		return nil
-	})
-
+	rels, err := producedBinaryPackages(pkgDir)
 	if err != nil {
 		return fmt.Errorf("failed to search for packages: %w", err)
 	}
-
 	if len(rels) == 0 {
 		return fmt.Errorf("no binary packages found")
 	}
-	sort.Strings(rels)
 
 	// Copy artifacts to the shared serving directory with category preserved,
 	// while the job records only its own paths (never stale warm-pool output).
+	if err := copyProducedPackages(pkgDir, be.artifactDir, rels); err != nil {
+		return fmt.Errorf("failed to copy artifact: %w", err)
+	}
 	for _, rel := range rels {
-		pkgPath := filepath.Join(pkgDir, rel)
-		destPath := filepath.Join(be.artifactDir, rel)
-		if err := os.MkdirAll(filepath.Dir(destPath), 0o750); err != nil {
-			return fmt.Errorf("failed to create artifact directory: %w", err)
-		}
-		if err := be.copyFile(pkgPath, destPath); err != nil {
-			return fmt.Errorf("failed to copy artifact: %w", err)
-		}
-		job.appendLog(fmt.Sprintf("Artifact collected: %s\n", destPath))
+		job.appendLog(fmt.Sprintf("Artifact collected: %s\n", filepath.Join(be.artifactDir, rel)))
 	}
 	primary := primaryArtifact(rels, job.Request.PackageName, func(rel string) int64 {
 		if info, statErr := os.Stat(filepath.Join(be.artifactDir, rel)); statErr == nil {
@@ -373,31 +361,6 @@ func (be *BuildExecutor) collectArtifacts(pkgDir string, job *BuildJob) error {
 	job.setArtifacts(rels)
 
 	return nil
-}
-
-// copyFile copies a file from src to dst.
-func (be *BuildExecutor) copyFile(src, dst string) error {
-	sourceFile, err := os.Open(src) // #nosec G304 -- src is resolved from the trusted executor worktree, not an HTTP request.
-	if err != nil {
-		return err
-	}
-	defer func() {
-		_ = sourceFile.Close()
-	}()
-
-	destFile, err := os.Create(dst) // #nosec G304 -- dst is resolved beneath the executor-owned worktree.
-	if err != nil {
-		return err
-	}
-	defer func() {
-		_ = destFile.Close()
-	}()
-
-	if _, err := sourceFile.WriteTo(destFile); err != nil {
-		return err
-	}
-
-	return destFile.Sync()
 }
 
 // verifyRepositoryRevisions fails closed when a catalog-pinned git repository

@@ -86,7 +86,9 @@ func TestApplyPVEEgressPolicyReplacesOutboundRulesAndVerifiesReadback(t *testing
 			ID: "mirror", Hosts: []string{"nas.internal"}, CIDRs: []string{"10.31.0.2/32"}, Protocol: "tcp", Ports: []int{80, 443},
 		}},
 	}
-	auth := PVEAuth{TokenID: "test@pve!builder", TokenSecret: "secret"}
+	// The fixture speaks plain HTTP, which is how a trusted-LAN Proxmox is
+	// reached, and that is what the insecure opt-in declares.
+	auth := PVEAuth{TokenID: "test@pve!builder", TokenSecret: "secret", Insecure: true}
 	evidence, err := ApplyPVEEgressPolicy(context.Background(), server.URL, auth, "pve01", "9100", policy, time.Unix(100, 0))
 	if err != nil {
 		t.Fatal(err)
@@ -144,7 +146,7 @@ func TestApplyPVEEgressPolicyRejectsReadbackDrift(t *testing.T) {
 		ID: "egress/test", Mode: catalog.EgressModeEnforce, Channel: "stable",
 		Rules: []catalog.EgressRule{{ID: "mirror", Hosts: []string{"nas.internal"}, CIDRs: []string{"10.31.0.2/32"}, Protocol: "tcp", Ports: []int{443}}},
 	}
-	_, err := ApplyPVEEgressPolicy(context.Background(), server.URL, PVEAuth{TokenID: "id", TokenSecret: "secret"}, "pve", "9000", policy, time.Now())
+	_, err := ApplyPVEEgressPolicy(context.Background(), server.URL, PVEAuth{TokenID: "id", TokenSecret: "secret", Insecure: true}, "pve", "9000", policy, time.Now())
 	if err == nil || !strings.Contains(err.Error(), "readback differs") {
 		t.Fatalf("readback drift was accepted: %v", err)
 	}
@@ -160,7 +162,7 @@ func TestApplyPVEEgressPolicyRejectsDisabledClusterFirewall(t *testing.T) {
 		ID: "egress/test", Mode: catalog.EgressModeEnforce, Channel: "stable",
 		Rules: []catalog.EgressRule{{ID: "mirror", Hosts: []string{"nas.internal"}, CIDRs: []string{"10.31.0.2/32"}, Protocol: "tcp", Ports: []int{443}}},
 	}
-	_, err := ApplyPVEEgressPolicy(context.Background(), server.URL, PVEAuth{TokenID: "id", TokenSecret: "secret"}, "pve", "9000", policy, time.Now())
+	_, err := ApplyPVEEgressPolicy(context.Background(), server.URL, PVEAuth{TokenID: "id", TokenSecret: "secret", Insecure: true}, "pve", "9000", policy, time.Now())
 	if err == nil || !strings.Contains(err.Error(), "cluster firewall is disabled") {
 		t.Fatalf("disabled cluster firewall was accepted: %v", err)
 	}
@@ -174,7 +176,7 @@ func TestVerifyPVEFirewallOptionsRejectsImplicitInputPolicy(t *testing.T) {
 	defer server.Close()
 
 	client, err := newPVEAPIClient(context.Background(), server.URL, PVEAuth{
-		TokenID: "id", TokenSecret: "secret",
+		TokenID: "id", TokenSecret: "secret", Insecure: true,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -232,7 +234,7 @@ func TestClosePVEVMInboundScopesChangeToTargetVMAndVerifiesReadback(t *testing.T
 	defer server.Close()
 
 	err := ClosePVEVMInbound(context.Background(), server.URL,
-		PVEAuth{TokenID: "id", TokenSecret: "secret"}, "pve01", "9100")
+		PVEAuth{TokenID: "id", TokenSecret: "secret", Insecure: true}, "pve01", "9100")
 	if err != nil {
 		t.Fatal(err)
 	}

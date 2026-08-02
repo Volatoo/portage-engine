@@ -154,7 +154,13 @@ func PVEInstanceSpecFromMap(m map[string]string) *PVEInstanceSpec {
 
 // PVEProvisioner handles PVE-specific infrastructure provisioning.
 type PVEProvisioner struct {
-	config   *PVEConfig
+	config *PVEConfig
+	// endpoint is the gated copy of config.Endpoint taken at construction, and
+	// it is the only spelling the generators are allowed to emit. config is a
+	// pointer the caller still owns, so reading config.Endpoint again at
+	// generation time would let a later mutation put an endpoint into the HCL
+	// that never passed NewPVEProvisioner.
+	endpoint string
 	stateDir string
 }
 
@@ -164,8 +170,25 @@ func NewPVEProvisioner(config *PVEConfig) (*PVEProvisioner, error) {
 		return nil, fmt.Errorf("config is required")
 	}
 
-	if config.Endpoint == "" {
-		return nil, fmt.Errorf("PVE endpoint is required")
+	// Terraform is a second delivery path for the same credential. The generated
+	// provider block names the endpoint in pm_api_url and hands it the API token
+	// (via var.pve_token_secret) or the password, so `terraform apply` reaches
+	// whatever host this string names just as directly as the Go client does.
+	// Gating it here — with validatePVEEndpoint, the same function the API calls
+	// in pve_scheduler.go use, not a second spelling of the rule that can drift
+	// from it — is what keeps the HCL path from being the way around that gate.
+	// config.Insecure is the provisioner's copy of the operator's plaintext
+	// opt-in: it is the very flag emitted below as pm_tls_insecure, so a trusted
+	// LAN endpoint such as http://10.31.0.200:8006 keeps working exactly where
+	// the operator has already accepted cleartext, and nowhere else.
+	if err := validatePVEEndpoint(config.Endpoint, config.Insecure); err != nil {
+		return nil, err
+	}
+	// Match what validatePVEEndpoint actually inspected and what the Go client
+	// sends, so the string stored below is the string that was gated.
+	endpoint := strings.TrimRight(config.Endpoint, "/")
+	if err := checkPVEEndpointHCLSafe(endpoint); err != nil {
+		return nil, err
 	}
 
 	stateDir := config.StateDir
@@ -179,8 +202,49 @@ func NewPVEProvisioner(config *PVEConfig) (*PVEProvisioner, error) {
 
 	return &PVEProvisioner{
 		config:   config,
+		endpoint: endpoint,
 		stateDir: stateDir,
 	}, nil
+}
+
+// checkPVEEndpointHCLSafe rejects endpoints carrying characters that would not
+// survive being pasted into a quoted HCL string literal.
+//
+// This is a different question from validatePVEEndpoint's, which decides where
+// the credential goes and deliberately says nothing about the host's spelling
+// beyond "net/url accepted it and the URL is bare". net/url is lenient there in
+// a way that matters here: it treats a double quote as an ordinary host
+// character, so `https://pve.example.com"` parses cleanly, reconstructs
+// identically, and passes the bare-scheme://host check — and then lands
+// unescaped in `pm_api_url = "…"` and in the pve_endpoint variable default,
+// where it closes the literal early and turns the generated config into
+// something terraform will not parse. Today the blast radius stops there only
+// because net/url separately refuses spaces, backslashes and braces in a host,
+// which is an accident of that package rather than a promise to us; `${` being
+// unreachable is not a property this file should be leaning on.
+//
+// So constrain the endpoint to the characters a hostname, an IPv6 literal or a
+// port is actually made of, once, at the door, instead of escaping at each
+// interpolation site — there are two of them and the third one added would
+// forget. Every endpoint this system produces is already of that shape:
+// https://pve.example.com:8006 from the deploy configs, http://10.31.0.200:8006
+// from the LAN cluster, the https://host:port the image factory derives by
+// stripping /api2/json off proxmox_url. The one thing this does turn away is a
+// non-ASCII (IDN) hostname, which nothing here emits and which Go's HTTP client
+// would not resolve unencoded anyway.
+func checkPVEEndpointHCLSafe(endpoint string) error {
+	for _, r := range endpoint {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		// "/" and ":" carry the scheme separator and the port; "[]" and "%" the
+		// IPv6 literal and its zone id. "%" cannot begin an HCL "%{" directive
+		// here because "{" is not in this set.
+		case r == '.', r == '-', r == '_', r == ':', r == '/', r == '[', r == ']', r == '%':
+		default:
+			return fmt.Errorf("PVE endpoint %q contains %q, which is not valid in a host, port or scheme and cannot be written into the generated Terraform configuration", endpoint, r)
+		}
+	}
+	return nil
 }
 
 // GenerateMainTF generates the main.tf file for PVE.
@@ -364,7 +428,7 @@ output "node" {
 		time.Now().Format(time.RFC3339),
 		pveProviderVersion,
 		authVariables,
-		p.config.Endpoint,
+		p.endpoint,
 		p.config.Insecure,
 		authBlock,
 		instanceName,
@@ -599,7 +663,7 @@ variable "vm_network" {
   default     = "%s"
 }
 `,
-		p.config.Endpoint,
+		p.endpoint,
 		spec.Node,
 		spec.Cores,
 		spec.MemoryMB,

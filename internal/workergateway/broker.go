@@ -24,6 +24,9 @@ const (
 	defaultPollWait     = 25 * time.Second
 	defaultCommandLease = 90 * time.Second
 	defaultUploadLease  = 30 * time.Minute
+	// memoryUploadSuffix names the single generation the standalone path uses.
+	// Without a database there is no fence to distinguish attempts.
+	memoryUploadSuffix = ".uploading"
 )
 
 type ClaimChecker func(context.Context, Identity) error
@@ -96,7 +99,9 @@ func (b *Broker) SetDurableStore(store DurableStore) {
 // SetUploadRoot confines every worker upload destination to a control-plane
 // owned directory. Durable claims are revalidated against this boundary after
 // they are read from PostgreSQL, so a corrupt row cannot become a filesystem
-// write primitive.
+// write primitive. Until it is called the Broker has no spool boundary and
+// refuses uploads outright: a deployment that forgets to configure one must
+// lose artifact collection, not gain an unbounded write primitive.
 func (b *Broker) SetUploadRoot(root string) {
 	b.mu.Lock()
 	b.uploadRoot = filepath.Clean(root)
@@ -195,6 +200,7 @@ func (b *Broker) Unregister(workerID string) {
 	b.mu.Lock()
 	s := b.sessions[workerID]
 	store := b.store
+	uploadRoot := b.uploadRoot
 	delete(b.sessions, workerID)
 	if s == nil {
 		b.mu.Unlock()
@@ -217,7 +223,7 @@ func (b *Broker) Unregister(workerID string) {
 		)
 	}
 	for _, slot := range uploads {
-		_ = os.Remove(slot.path + ".uploading")
+		discardUploadGeneration(uploadRoot, slot.path, memoryUploadSuffix)
 	}
 	for _, pending := range pendingTasks {
 		select {
@@ -407,8 +413,8 @@ func (b *Broker) PrepareUploadID(
 	if maxBytes <= 0 {
 		return "", fmt.Errorf("upload size limit must be positive")
 	}
-	if _, err := uuid.Parse(uploadID); err != nil {
-		return "", fmt.Errorf("invalid upload id: %w", err)
+	if !canonicalUploadID(uploadID) {
+		return "", fmt.Errorf("invalid upload id")
 	}
 	b.mu.Lock()
 	store := b.store
@@ -418,13 +424,13 @@ func (b *Broker) PrepareUploadID(
 	if err != nil && store == nil {
 		return "", err
 	}
-	destination, err = confinedUploadDestination(uploadRoot, destination)
+	confined, err := confinedUploadDestination(uploadRoot, destination)
 	if err != nil {
 		return "", err
 	}
 	if store != nil {
 		if err := store.PrepareWorkerUpload(
-			context.Background(), identity, uploadID, destination, maxBytes,
+			context.Background(), identity, uploadID, confined.absolute, maxBytes,
 		); err != nil {
 			return "", err
 		}
@@ -436,8 +442,18 @@ func (b *Broker) PrepareUploadID(
 	if err != nil {
 		return "", err
 	}
-	s.uploads[uploadID] = &uploadSlot{path: destination, maxBytes: maxBytes}
+	s.uploads[uploadID] = &uploadSlot{path: confined.absolute, maxBytes: maxBytes}
 	return uploadID, nil
+}
+
+// canonicalUploadID accepts only the exact spelling the control plane emits.
+// uuid.Parse on its own also admits braced, URN-prefixed and dash-less forms,
+// all of which match the same uuid column but reach the spool as a different
+// filename, so a worker could pick the generation name for a capability the
+// control plane created.
+func canonicalUploadID(uploadID string) bool {
+	parsed, err := uuid.Parse(uploadID)
+	return err == nil && parsed.String() == uploadID
 }
 
 func (b *Broker) validateClaim(ctx context.Context, identity Identity) error {
@@ -629,7 +645,7 @@ func (b *Broker) handleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	uploadID := strings.TrimPrefix(r.URL.Path, "/v1/uploads/")
-	if uploadID == "" || strings.Contains(uploadID, "/") {
+	if !canonicalUploadID(uploadID) {
 		http.Error(w, "invalid upload id", http.StatusBadRequest)
 		return
 	}
@@ -664,7 +680,7 @@ func (b *Broker) handleDurableUploadRequest(
 	b.mu.Lock()
 	uploadRoot := b.uploadRoot
 	b.mu.Unlock()
-	claim.Destination, err = confinedUploadDestination(uploadRoot, claim.Destination)
+	target, err := openUploadTarget(uploadRoot, claim.Destination)
 	if err != nil {
 		_ = store.CancelWorkerUpload(
 			r.Context(), identity, claim.ID, claim.Fence,
@@ -672,11 +688,13 @@ func (b *Broker) handleDurableUploadRequest(
 		http.Error(w, "upload destination is outside the artifact spool", http.StatusConflict)
 		return
 	}
+	defer target.close()
+	claim.Destination = target.absolute
 	if !claim.Completed {
-		b.handleDurableUpload(w, r, store, identity, claim)
+		b.handleDurableUpload(w, r, store, identity, claim, target)
 		return
 	}
-	if err := recoverCompletedUpload(claim); err != nil {
+	if err := recoverCompletedUpload(target, claim); err != nil {
 		http.Error(w, "recover committed artifact", http.StatusInternalServerError)
 		return
 	}
@@ -704,21 +722,22 @@ func (b *Broker) handleMemoryUpload(
 	uploadRoot := b.uploadRoot
 	b.mu.Unlock()
 
-	destination, err := confinedUploadDestination(uploadRoot, slot.path)
+	target, err := openUploadTarget(uploadRoot, slot.path)
 	if err != nil {
 		http.Error(w, "upload destination is outside the artifact spool", http.StatusConflict)
 		return
 	}
+	defer target.close()
 	if r.ContentLength < 0 || r.ContentLength > slot.maxBytes {
 		http.Error(w, "invalid artifact content length", http.StatusRequestEntityTooLarge)
 		return
 	}
-	if err := os.MkdirAll(filepath.Dir(destination), 0o750); err != nil { // #nosec G703 -- destination passed the configured spool-root check.
+	if err := target.prepareParent(); err != nil {
 		http.Error(w, "prepare artifact destination", http.StatusInternalServerError)
 		return
 	}
-	tmp := destination + ".uploading"
-	file, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) // #nosec G304,G703 -- destination passed the configured spool-root check.
+	tmp := target.relative + memoryUploadSuffix
+	file, err := target.create(tmp)
 	if err != nil {
 		http.Error(w, "create artifact destination", http.StatusInternalServerError)
 		return
@@ -727,7 +746,7 @@ func (b *Broker) handleMemoryUpload(
 	written, copyErr := io.Copy(io.MultiWriter(file, hash), io.LimitReader(r.Body, slot.maxBytes+1))
 	closeErr := file.Close()
 	if copyErr != nil || closeErr != nil || written > slot.maxBytes || written != r.ContentLength {
-		_ = os.Remove(tmp) // #nosec G703 -- tmp is derived from the confined destination.
+		_ = target.root.Remove(tmp)
 		http.Error(w, "artifact upload failed", http.StatusBadRequest)
 		return
 	}
@@ -735,12 +754,12 @@ func (b *Broker) handleMemoryUpload(
 	provided := strings.ToLower(strings.TrimSpace(r.Header.Get("X-Content-SHA256")))
 	if len(provided) != sha256.Size*2 ||
 		subtle.ConstantTimeCompare([]byte(provided), []byte(digest)) != 1 {
-		_ = os.Remove(tmp) // #nosec G703 -- tmp is derived from the confined destination.
+		_ = target.root.Remove(tmp)
 		http.Error(w, "artifact digest mismatch", http.StatusUnprocessableEntity)
 		return
 	}
-	if err := os.Rename(tmp, destination); err != nil { // #nosec G703 -- both paths are confined to the configured spool root.
-		_ = os.Remove(tmp) // #nosec G703 -- tmp is derived from the confined destination.
+	if err := target.root.Rename(tmp, target.relative); err != nil {
+		_ = target.root.Remove(tmp)
 		http.Error(w, "commit artifact upload", http.StatusInternalServerError)
 		return
 	}
@@ -748,26 +767,111 @@ func (b *Broker) handleMemoryUpload(
 	_ = json.NewEncoder(w).Encode(CollectResult{SHA256: digest, Size: written})
 }
 
-func confinedUploadDestination(root, destination string) (string, error) {
+// confinedUploadDestination resolves destination inside root and returns both
+// the absolute name the capability record carries and the root-relative name
+// every filesystem call is issued with. An unconfigured root is an error: the
+// alternative — treating "no root" as "anywhere" — turns a deployment mistake
+// into a filesystem write primitive for whichever worker happens to hold a
+// live certificate.
+func confinedUploadDestination(root, destination string) (confinedUpload, error) {
+	if strings.TrimSpace(root) == "" {
+		return confinedUpload{}, fmt.Errorf("worker upload root is not configured")
+	}
 	absoluteDestination, err := filepath.Abs(destination)
 	if err != nil {
-		return "", fmt.Errorf("resolve upload destination: %w", err)
+		return confinedUpload{}, fmt.Errorf("resolve upload destination: %w", err)
 	}
 	absoluteDestination = filepath.Clean(absoluteDestination)
-	if strings.TrimSpace(root) == "" {
-		return absoluteDestination, nil
-	}
 	absoluteRoot, err := filepath.Abs(root)
 	if err != nil {
-		return "", fmt.Errorf("resolve upload root: %w", err)
+		return confinedUpload{}, fmt.Errorf("resolve upload root: %w", err)
 	}
 	absoluteRoot = filepath.Clean(absoluteRoot)
 	relative, err := filepath.Rel(absoluteRoot, absoluteDestination)
 	if err != nil || relative == "." || relative == ".." ||
 		strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
-		return "", fmt.Errorf("upload destination is outside configured root")
+		return confinedUpload{}, fmt.Errorf("upload destination is outside configured root")
 	}
-	return absoluteDestination, nil
+	return confinedUpload{
+		root: absoluteRoot, absolute: absoluteDestination, relative: relative,
+	}, nil
+}
+
+// confinedUpload is the lexical half of the confinement: an upload destination
+// that provably spells out a location under the configured root.
+type confinedUpload struct {
+	root     string
+	absolute string
+	relative string
+}
+
+// uploadTarget is a spool destination that has been resolved once and is then
+// operated on exclusively through an open handle on the root. The lexical
+// prefix check above is necessary but not sufficient: it compares strings, and
+// a symlink planted anywhere under the spool would satisfy it while sending the
+// write somewhere else entirely. Going through *os.Root makes every component
+// resolve under the root or fail, so the confinement survives a spool tree the
+// build VM has managed to touch.
+type uploadTarget struct {
+	root     *os.Root
+	absolute string
+	relative string
+}
+
+func openUploadTarget(root, destination string) (*uploadTarget, error) {
+	confined, err := confinedUploadDestination(root, destination)
+	if err != nil {
+		return nil, err
+	}
+	handle, err := os.OpenRoot(confined.root)
+	if errors.Is(err, os.ErrNotExist) {
+		// The spool root itself is operator configuration, not worker input,
+		// and the code this replaced created it on the way to the destination.
+		// Keep a first upload on a fresh data directory working.
+		if mkdirErr := os.MkdirAll(confined.root, 0o750); mkdirErr != nil {
+			return nil, fmt.Errorf("create upload root: %w", mkdirErr)
+		}
+		handle, err = os.OpenRoot(confined.root)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("open upload root: %w", err)
+	}
+	return &uploadTarget{
+		root: handle, absolute: confined.absolute, relative: confined.relative,
+	}, nil
+}
+
+func (t *uploadTarget) close() {
+	if t != nil && t.root != nil {
+		_ = t.root.Close()
+	}
+}
+
+// create opens the generation file for writing. O_EXCL refuses an existing
+// entry of any kind, a dangling symlink included, so the write can only ever
+// land on a file this call has just created inside the root.
+func (t *uploadTarget) create(name string) (*os.File, error) {
+	return t.root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+}
+
+func (t *uploadTarget) prepareParent() error {
+	parent := filepath.Dir(t.relative)
+	if parent == "." {
+		return nil
+	}
+	return t.root.MkdirAll(parent, 0o750)
+}
+
+// discardUploadGeneration removes an abandoned temporary generation. It is
+// best-effort cleanup, so a destination that no longer resolves inside the root
+// is simply left alone rather than chased with an unconfined os.Remove.
+func discardUploadGeneration(root, destination, suffix string) {
+	target, err := openUploadTarget(root, destination)
+	if err != nil {
+		return
+	}
+	defer target.close()
+	_ = target.root.Remove(target.relative + suffix)
 }
 
 func (b *Broker) handleDurableUpload(
@@ -776,6 +880,7 @@ func (b *Broker) handleDurableUpload(
 	store DurableStore,
 	identity Identity,
 	claim UploadClaim,
+	target *uploadTarget,
 ) {
 	if r.ContentLength < 0 || r.ContentLength > claim.MaxBytes {
 		_ = store.CancelWorkerUpload(
@@ -784,15 +889,13 @@ func (b *Broker) handleDurableUpload(
 		http.Error(w, "invalid artifact content length", http.StatusRequestEntityTooLarge)
 		return
 	}
-	if err := os.MkdirAll(filepath.Dir(claim.Destination), 0o750); err != nil {
+	if err := target.prepareParent(); err != nil {
 		http.Error(w, "prepare artifact destination", http.StatusInternalServerError)
 		return
 	}
-	tmp := durableUploadGeneration(claim)
-	_ = os.Remove(tmp)
-	file, err := os.OpenFile(
-		tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600,
-	) // #nosec G304 -- destination is selected by trusted control-plane code.
+	tmp := target.relative + uploadGenerationSuffix(claim)
+	_ = target.root.Remove(tmp)
+	file, err := target.create(tmp)
 	if err != nil {
 		http.Error(w, "create artifact destination", http.StatusInternalServerError)
 		return
@@ -804,7 +907,7 @@ func (b *Broker) handleDurableUpload(
 	closeErr := file.Close()
 	if copyErr != nil || closeErr != nil || written > claim.MaxBytes ||
 		written != r.ContentLength {
-		_ = os.Remove(tmp)
+		_ = target.root.Remove(tmp)
 		_ = store.CancelWorkerUpload(
 			r.Context(), identity, claim.ID, claim.Fence,
 		)
@@ -815,7 +918,7 @@ func (b *Broker) handleDurableUpload(
 	provided := strings.ToLower(strings.TrimSpace(r.Header.Get("X-Content-SHA256")))
 	if len(provided) != sha256.Size*2 ||
 		subtle.ConstantTimeCompare([]byte(provided), []byte(digest)) != 1 {
-		_ = os.Remove(tmp)
+		_ = target.root.Remove(tmp)
 		_ = store.CancelWorkerUpload(
 			r.Context(), identity, claim.ID, claim.Fence,
 		)
@@ -825,11 +928,11 @@ func (b *Broker) handleDurableUpload(
 	if err := store.CompleteWorkerUpload(
 		r.Context(), identity, claim.ID, claim.Fence, digest, written,
 	); err != nil {
-		_ = os.Remove(tmp)
+		_ = target.root.Remove(tmp)
 		http.Error(w, "upload fence is stale", http.StatusConflict)
 		return
 	}
-	if err := os.Rename(tmp, claim.Destination); err != nil {
+	if err := target.root.Rename(tmp, target.relative); err != nil {
 		http.Error(w, "commit artifact upload", http.StatusInternalServerError)
 		return
 	}
@@ -837,26 +940,29 @@ func (b *Broker) handleDurableUpload(
 	_ = json.NewEncoder(w).Encode(CollectResult{SHA256: digest, Size: written})
 }
 
-func durableUploadGeneration(claim UploadClaim) string {
-	return fmt.Sprintf("%s.uploading.%s.%d", claim.Destination, claim.ID, claim.Fence)
+// uploadGenerationSuffix names one fenced attempt at a destination. It is
+// appended to a root-relative name, never joined as a path, so the fence and
+// the canonical upload id can only extend the final component.
+func uploadGenerationSuffix(claim UploadClaim) string {
+	return fmt.Sprintf(".uploading.%s.%d", claim.ID, claim.Fence)
 }
 
-func recoverCompletedUpload(claim UploadClaim) error {
-	if uploadFileMatches(claim.Destination, claim) {
+func recoverCompletedUpload(target *uploadTarget, claim UploadClaim) error {
+	if uploadFileMatches(target, target.relative, claim) {
 		return nil
 	}
-	tmp := durableUploadGeneration(claim)
-	if !uploadFileMatches(tmp, claim) {
+	tmp := target.relative + uploadGenerationSuffix(claim)
+	if !uploadFileMatches(target, tmp, claim) {
 		return fmt.Errorf("completed upload generation is missing or has the wrong digest")
 	}
-	if err := os.Rename(tmp, claim.Destination); err != nil {
+	if err := target.root.Rename(tmp, target.relative); err != nil {
 		return err
 	}
 	return nil
 }
 
-func uploadFileMatches(path string, claim UploadClaim) bool {
-	file, err := os.Open(path) // #nosec G304 -- path is a server-created upload capability.
+func uploadFileMatches(target *uploadTarget, name string, claim UploadClaim) bool {
+	file, err := target.root.Open(name)
 	if err != nil {
 		return false
 	}

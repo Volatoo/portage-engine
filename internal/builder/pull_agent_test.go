@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"io"
 	"math/big"
 	"net"
 	"net/http"
@@ -265,7 +266,11 @@ func TestPullAgentStreamsArtifactOverRealMTLS(t *testing.T) {
 	}
 	cancelConnect()
 
-	destination := filepath.Join(temp, "quarantine", filepath.FromSlash(relative))
+	// The gateway refuses uploads until it has a spool boundary, exactly as the
+	// manager configures one from BINPKG_PATH before any quarantine exists.
+	spool := filepath.Join(temp, "quarantine")
+	broker.SetUploadRoot(spool)
+	destination := filepath.Join(spool, filepath.FromSlash(relative))
 	uploadID, err := broker.PrepareUpload(identity, destination, 1024)
 	if err != nil {
 		t.Fatal(err)
@@ -298,5 +303,64 @@ func TestPullAgentStreamsArtifactOverRealMTLS(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("pull agent did not stop")
+	}
+}
+
+// TestOpenArtifactConfinesDeliveryToTheArtifactDirectory drives the attack that
+// the recorded-artifact allowlist cannot see. The list is built by walking a
+// directory the build's own ebuild code writes into as root and is reloaded
+// verbatim from jobs.json, so it can name a path that leaves the tree either
+// lexically or through a symlink the build planted. Both ways an artifact
+// leaves a worker go through this call.
+func TestOpenArtifactConfinesDeliveryToTheArtifactDirectory(t *testing.T) {
+	root := t.TempDir()
+	artifactDir := filepath.Join(root, "artifacts")
+	if err := os.MkdirAll(filepath.Join(artifactDir, "app-misc"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	secret := filepath.Join(root, "signing-key.asc")
+	if err := os.WriteFile(secret, []byte("PRIVATE KEY MATERIAL"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	genuine := filepath.Join(artifactDir, "app-misc", "jq-1.8.2-1.gpkg.tar")
+	if err := os.WriteFile(genuine, []byte("package bytes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	planted := filepath.Join(artifactDir, "app-misc", "leak-1.gpkg.tar")
+	if err := os.Symlink(secret, planted); err != nil {
+		t.Fatal(err)
+	}
+	local := &LocalBuilder{artifactDir: artifactDir}
+
+	for name, path := range map[string]string{
+		"symlink out of the tree": planted,
+		"lexical traversal":       filepath.Join(artifactDir, "..", "signing-key.asc"),
+		"absolute path":           secret,
+		"the artifact directory":  artifactDir,
+	} {
+		t.Run(name, func(t *testing.T) {
+			file, _, err := local.OpenArtifact(path)
+			if err == nil {
+				contents, _ := io.ReadAll(file)
+				_ = file.Close()
+				t.Fatalf("OpenArtifact(%q) succeeded and returned %q", path, contents)
+			}
+		})
+	}
+
+	file, info, err := local.OpenArtifact(genuine)
+	if err != nil {
+		t.Fatalf("OpenArtifact rejected a genuine artifact: %v", err)
+	}
+	defer func() { _ = file.Close() }()
+	if info.Size() != int64(len("package bytes")) {
+		t.Fatalf("genuine artifact size = %d", info.Size())
+	}
+	contents, err := io.ReadAll(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(contents) != "package bytes" {
+		t.Fatalf("genuine artifact contents = %q", contents)
 	}
 }

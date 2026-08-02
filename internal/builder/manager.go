@@ -5095,8 +5095,36 @@ func (m *Manager) ServeVerificationBinhost(w http.ResponseWriter, r *http.Reques
 		m.serveObjectVerificationBinhost(w, r, token, parts[1])
 		return
 	}
-	root := filepath.Join(m.artifactQuarantineBase(), token)
-	marker, err := os.ReadFile(filepath.Join(root, verificationCapabilityFile)) // #nosec G304,G703 -- token is regex-validated and confined to the quarantine base.
+	// Compatibility mode puts the quarantine on a filesystem the signer also
+	// mounts, so the tree this reads is writable by another trust domain. A
+	// cleaned relative path only proves the request did not spell an escape;
+	// it says nothing about what the directory entries themselves point at.
+	// Everything below is therefore addressed through the quarantine root,
+	// which refuses to traverse a component that links out of the quarantine.
+	// Without that, a planted directory symlink would redirect an
+	// unsigned-artifact read anywhere the server can reach, including the
+	// published binhost this capability exists to keep artifacts out of.
+	//
+	// The root is anchored on the base and the token opened beneath it,
+	// because os.OpenRoot resolves its own argument by name: opening
+	// base/<token> in one call would let the same writer who can plant an
+	// entry inside the token directory replace the token directory itself
+	// with a symlink, and that entry decides where the confinement points
+	// before there is any confinement to stop it. Addressed as a component,
+	// the token is resolved under the base root like every path below it.
+	base, err := os.OpenRoot(m.artifactQuarantineBase())
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	defer func() { _ = base.Close() }()
+	quarantineRoot, err := base.OpenRoot(token)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	defer func() { _ = quarantineRoot.Close() }()
+	marker, err := quarantineRoot.ReadFile(verificationCapabilityFile)
 	if err != nil {
 		http.NotFound(w, r)
 		return
@@ -5113,15 +5141,27 @@ func (m *Manager) ServeVerificationBinhost(w http.ResponseWriter, r *http.Reques
 		http.NotFound(w, r)
 		return
 	}
-	file := filepath.Join(root, filepath.FromSlash(rel))
-	info, err := os.Lstat(file) // #nosec G703 -- token and cleaned relative path are confined to the quarantine root above.
+	local := filepath.FromSlash(rel)
+	if entry, err := quarantineRoot.Lstat(local); err != nil || !entry.Mode().IsRegular() {
+		http.NotFound(w, r)
+		return
+	}
+	file, err := quarantineRoot.Open(local)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	defer func() { _ = file.Close() }()
+	info, err := file.Stat()
 	if err != nil || !info.Mode().IsRegular() {
 		http.NotFound(w, r)
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	http.ServeFile(w, r, file) // #nosec G703 -- regular-file and quarantine-root confinement checks passed above.
+	// The open descriptor is served rather than the name it was opened by, so
+	// no second resolution can land on a different file than the one checked.
+	http.ServeContent(w, r, filepath.Base(rel), info.ModTime(), file)
 }
 
 func (m *Manager) serveObjectVerificationBinhost(

@@ -211,8 +211,20 @@ func readUnsignedGPKG(path string) ([]gpkgMember, string, error) {
 }
 
 // VerifyGPKG verifies every payload signature and the signed Manifest.
+//
+// The path is opened read-only and nothing here writes, renames, or unlinks,
+// so what this reports about a package is a property of its bytes and of this
+// keyring, never of where the file sits. Two callers rely on that split and
+// each supplies its own confinement: SignGPKG self-verifies the temporary file
+// it just wrote beside the package, and the builder's install gate verifies
+// members of a fresh PKGDIR whose relative paths passed ValidateArtifact and
+// whose bytes were already bound to the control plane's digests. A caller that
+// cannot say which directory the path is confined to must not reach this
+// function with an operator- or worker-supplied name: it would learn whether
+// that file exists and parses as a GPKG, which is a confinement question this
+// function deliberately does not answer.
 func (g GPG) VerifyGPKG(path string) error {
-	file, err := os.Open(path) // #nosec G304 -- signer-owned output path.
+	file, err := os.Open(path) // #nosec G304 -- callers confine the path; see the invariant above.
 	if err != nil {
 		return err
 	}

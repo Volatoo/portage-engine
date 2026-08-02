@@ -5,12 +5,15 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/netip"
 	neturl "net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/slchris/portage-engine/internal/signing"
@@ -60,6 +63,9 @@ func validateVerifyInstallRequest(request VerifyInstallRequest) error {
 		parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
 		return fmt.Errorf("verification binhost must be an absolute http or https URL without credentials, query, or fragment")
 	}
+	if err := checkVerificationBinhostHost(parsed.Hostname()); err != nil {
+		return err
+	}
 	if len(request.Artifacts) == 0 || len(request.Artifacts) > maxVerificationArtifacts {
 		return fmt.Errorf("verification requires 1..%d artifacts", maxVerificationArtifacts)
 	}
@@ -89,16 +95,120 @@ func validateVerifyInstallRequest(request VerifyInstallRequest) error {
 	return nil
 }
 
-// prefetchVerificationGeneration retrieves one immutable Packages index and
-// the exact manifest supplied by the control plane. Redirects and mismatched
-// bytes are rejected before Portage starts.
-func prefetchVerificationGeneration(baseURL, pkgDir string, artifacts []VerificationArtifact) error {
-	client := &http.Client{
+// verificationBinhostReachError explains a refused verification address in the
+// terms an operator debugging a failed job needs.
+type verificationBinhostReachError struct {
+	target string
+	reason string
+}
+
+func (e *verificationBinhostReachError) Error() string {
+	return fmt.Sprintf("verification binhost %s is a %s address the build VM must never fetch from", e.target, e.reason)
+}
+
+// unreachableVerificationAddress names the addresses a verification download is
+// never allowed to reach. The builder lives inside the disposable build VM, so
+// its socket sees a network the party supplying the binhost URL does not: the
+// hypervisor's link-local metadata service, which hands out cloud-init user
+// data and instance credentials, and whatever the VM image bound to loopback
+// precisely because loopback was assumed private. That URL is untrusted input
+// on both control surfaces — an operator POST to /api/v1/verify, a gateway task
+// payload in pull mode — so it can name either of them.
+//
+// Private LAN ranges deliberately stay reachable. The quarantine binhost really
+// does live on an internal address; SERVER_CALLBACK_URL is required to be
+// routable from the VM, and refusing RFC1918 would refuse every real
+// deployment.
+func unreachableVerificationAddress(addr netip.Addr) string {
+	switch addr = addr.Unmap(); {
+	case !addr.IsValid():
+		return "malformed"
+	case addr.IsLoopback():
+		return "loopback"
+	case addr.IsLinkLocalUnicast(), addr.IsLinkLocalMulticast():
+		return "link-local"
+	case addr.IsUnspecified():
+		return "unspecified"
+	case addr.IsInterfaceLocalMulticast(), addr.IsMulticast():
+		return "multicast"
+	}
+	return ""
+}
+
+// checkVerificationBinhostHost rejects a binhost that spells the forbidden
+// destination as a literal, so the request fails at the contract boundary with
+// a legible reason instead of deep inside a download. A name is left to the
+// dialer below: only the dialer sees which address the name actually resolved
+// to at connect time.
+func checkVerificationBinhostHost(host string) error {
+	if strings.EqualFold(host, "localhost") {
+		return &verificationBinhostReachError{target: host, reason: "loopback"}
+	}
+	addr, err := netip.ParseAddr(host)
+	if err != nil {
+		return nil
+	}
+	if reason := unreachableVerificationAddress(addr); reason != "" {
+		return &verificationBinhostReachError{target: host, reason: reason}
+	}
+	return nil
+}
+
+// refuseUnreachableVerificationDial is the dialer hook that makes the policy
+// stick. It runs once per connection against the concrete address the socket is
+// about to use, so a host name whose second DNS answer points at the metadata
+// service is refused just as a literal is.
+func refuseUnreachableVerificationDial(_, address string, _ syscall.RawConn) error {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return &verificationBinhostReachError{target: address, reason: "malformed"}
+	}
+	addr, err := netip.ParseAddr(host)
+	if err != nil {
+		return &verificationBinhostReachError{target: host, reason: "malformed"}
+	}
+	if reason := unreachableVerificationAddress(addr); reason != "" {
+		return &verificationBinhostReachError{target: host, reason: reason}
+	}
+	return nil
+}
+
+// verificationHTTPClient builds the fetcher used for one generation. The
+// control hook is a parameter so the transport's other guarantees can be
+// exercised on their own; every production path passes
+// refuseUnreachableVerificationDial.
+//
+// The transport carries no proxy. A proxy would resolve and connect on this
+// process's behalf, which would hand the untrusted binhost URL a way around the
+// address policy, and nothing in this system fetches a binhost through one:
+// the image factory explicitly clears the proxy environment before it builds.
+func verificationHTTPClient(control func(network, address string, conn syscall.RawConn) error) *http.Client {
+	dialer := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second, Control: control}
+	return &http.Client{
 		Timeout: 15 * time.Minute,
+		Transport: &http.Transport{
+			DialContext:           dialer.DialContext,
+			ForceAttemptHTTP2:     true,
+			MaxIdleConns:          10,
+			IdleConnTimeout:       90 * time.Second,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ExpectContinueTimeout: time.Second,
+		},
 		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 			return fmt.Errorf("verification downloads must not redirect")
 		},
 	}
+}
+
+// prefetchVerificationGeneration retrieves one immutable Packages index and
+// the exact manifest supplied by the control plane. Redirects and mismatched
+// bytes are rejected before Portage starts.
+func prefetchVerificationGeneration(baseURL, pkgDir string, artifacts []VerificationArtifact) error {
+	return prefetchVerificationGenerationVia(
+		verificationHTTPClient(refuseUnreachableVerificationDial), baseURL, pkgDir, artifacts)
+}
+
+func prefetchVerificationGenerationVia(client *http.Client, baseURL, pkgDir string, artifacts []VerificationArtifact) error {
 	indexPath := filepath.Join(pkgDir, "Packages")
 	if err := downloadVerificationFile(client, baseURL, "Packages", indexPath, maxVerificationIndexBytes, ""); err != nil {
 		return err
@@ -111,12 +221,35 @@ func prefetchVerificationGeneration(baseURL, pkgDir string, artifacts []Verifica
 		if !indexContainsArtifact(index, artifact.RelativePath) {
 			return fmt.Errorf("packages index does not contain exact path %q", artifact.RelativePath)
 		}
-		destination := filepath.Join(pkgDir, filepath.FromSlash(artifact.RelativePath))
+		destination, err := verificationArtifactPath(pkgDir, artifact.RelativePath)
+		if err != nil {
+			return err
+		}
 		if err := downloadVerificationFile(client, baseURL, artifact.RelativePath, destination, artifact.Size, artifact.SHA256); err != nil {
 			return err
 		}
 	}
 	return verifyLocalArtifactSet(pkgDir, artifacts)
+}
+
+// verificationArtifactPath places one manifest entry inside the throwaway
+// PKGDIR the builder just created. Every request that reaches the prefetch has
+// already passed validateVerifyInstallRequest, whose signing.ValidateArtifact
+// call refuses an absolute or non-canonical relative path, which is why the
+// download, the signature preflight and the re-hash below can join a manifest
+// path onto a directory at all. That is the whole reason those joins are safe,
+// so the rule is spelled out here as a check rather than left as a claim in a
+// scanner's dismissal: prefetchVerificationGeneration is reachable from
+// anywhere in this package, and a future caller that skips the request
+// validator still must not be able to write outside the directory.
+func verificationArtifactPath(pkgDir, relativePath string) (string, error) {
+	clean := filepath.ToSlash(filepath.Clean(relativePath))
+	if relativePath == "" || filepath.IsAbs(relativePath) ||
+		clean != filepath.ToSlash(relativePath) ||
+		clean == "." || clean == ".." || strings.HasPrefix(clean, "../") {
+		return "", fmt.Errorf("verification artifact path %q is not canonical and relative", relativePath)
+	}
+	return filepath.Join(pkgDir, filepath.FromSlash(clean)), nil
 }
 
 func indexContainsArtifact(index []byte, relativePath string) bool {
@@ -145,10 +278,10 @@ func downloadVerificationFile(client *http.Client, baseURL, relativePath, destin
 	if expectedDigest != "" && response.ContentLength >= 0 && response.ContentLength != expectedSize {
 		return fmt.Errorf("download %q size header is %d, expected %d", relativePath, response.ContentLength, expectedSize)
 	}
-	if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil { // #nosec G301 -- the isolated verify root must be traversable by Portage.
+	if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil { // #nosec G301,G304 -- destination came from verificationArtifactPath, which confines it to the internally-created verify PKGDIR.
 		return err
 	}
-	temp, err := os.CreateTemp(filepath.Dir(destination), "."+filepath.Base(destination)+".download-*")
+	temp, err := os.CreateTemp(filepath.Dir(destination), "."+filepath.Base(destination)+".download-*") // #nosec G304 -- same confined destination directory.
 	if err != nil {
 		return err
 	}
@@ -180,7 +313,7 @@ func downloadVerificationFile(client *http.Client, baseURL, relativePath, destin
 	if err := os.Chmod(tempPath, 0o644); err != nil { // #nosec G302 -- this is a public signing key copied into the verification binhost.
 		return err
 	}
-	if err := os.Rename(tempPath, destination); err != nil {
+	if err := os.Rename(tempPath, destination); err != nil { // #nosec G304 -- destination came from verificationArtifactPath and stays under the verify PKGDIR.
 		return err
 	}
 	return nil
@@ -206,8 +339,11 @@ func verificationObjectURL(baseURL, relativePath string) (string, error) {
 
 func verifyLocalArtifactSet(pkgDir string, artifacts []VerificationArtifact) error {
 	for _, artifact := range artifacts {
-		file := filepath.Join(pkgDir, filepath.FromSlash(artifact.RelativePath))
-		handle, err := os.Open(file) // #nosec G304 -- artifact.RelativePath is validated and confined to the temporary PKGDIR.
+		file, err := verificationArtifactPath(pkgDir, artifact.RelativePath)
+		if err != nil {
+			return err
+		}
+		handle, err := os.Open(file) // #nosec G304 -- verificationArtifactPath confines this read to the temporary PKGDIR.
 		if err != nil {
 			return err
 		}
