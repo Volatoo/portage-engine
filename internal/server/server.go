@@ -1389,17 +1389,21 @@ func (s *Server) checkLedgerHealth() (bool, map[string]interface{}) {
 			time.Since(status.LastProjectionAt) > s.ledgerStaleAfter)
 	ok = ok && !stale
 	return ok, map[string]interface{}{
-		"enabled":            true,
-		"ok":                 ok,
-		"projection_stale":   stale,
-		"authority":          status.Authority,
-		"writes":             status.Writes,
-		"write_errors":       status.WriteErrors,
-		"projection_errors":  status.ProjectionErrors,
-		"last_write_at":      status.LastWriteAt,
-		"last_projection_at": status.LastProjectionAt,
-		"last_error":         status.LastError,
-		"last_reconcile":     reconcile,
+		"enabled":           true,
+		"ok":                ok,
+		"projection_stale":  stale,
+		"authority":         status.Authority,
+		"writes":            status.Writes,
+		"write_errors":      status.WriteErrors,
+		"projection_errors": status.ProjectionErrors,
+		"last_write_at":     status.LastWriteAt,
+		// Reported next to write_errors so a non-zero count is a fact an
+		// operator can act on rather than one they have to go and reproduce.
+		"last_write_error":    status.LastWriteError,
+		"last_write_error_at": status.LastWriteErrorAt,
+		"last_projection_at":  status.LastProjectionAt,
+		"last_error":          status.LastError,
+		"last_reconcile":      reconcile,
 	}
 }
 

@@ -40,13 +40,22 @@ type LedgerReconcileReport struct {
 // JobLedgerStatus is the low-cardinality runtime status exposed to health and
 // the operator UI.
 type JobLedgerStatus struct {
-	Authority        string                `json:"authority"`
-	Writes           uint64                `json:"writes"`
-	WriteErrors      uint64                `json:"write_errors"`
-	ProjectionErrors uint64                `json:"projection_errors"`
-	LastWriteAt      time.Time             `json:"last_write_at,omitempty"`
-	LastProjectionAt time.Time             `json:"last_projection_at,omitempty"`
-	LastError        string                `json:"last_error,omitempty"`
+	Authority        string    `json:"authority"`
+	Writes           uint64    `json:"writes"`
+	WriteErrors      uint64    `json:"write_errors"`
+	ProjectionErrors uint64    `json:"projection_errors"`
+	LastWriteAt      time.Time `json:"last_write_at,omitempty"`
+	LastProjectionAt time.Time `json:"last_projection_at,omitempty"`
+	LastError        string    `json:"last_error,omitempty"`
+	// The most recent write failure, kept for as long as the count that reports
+	// it. LastError above is cleared by the next successful write, which is what
+	// makes it useful for "is the ledger unhealthy now" and useless for "what
+	// were those nineteen errors": on a repository taking seventeen thousand
+	// writes the message is gone before anyone reads the number. An operator who
+	// can see that writes have failed and cannot see how is being told to go
+	// look somewhere the answer is not.
+	LastWriteError   string                `json:"last_write_error,omitempty"`
+	LastWriteErrorAt time.Time             `json:"last_write_error_at,omitempty"`
 	LastReconcile    LedgerReconcileReport `json:"last_reconcile"`
 }
 
@@ -1214,6 +1223,8 @@ func (r *JobRepository) recordWrite(err error) {
 	if err != nil {
 		r.stats.WriteErrors++
 		r.stats.LastError = err.Error()
+		r.stats.LastWriteError = err.Error()
+		r.stats.LastWriteErrorAt = time.Now().UTC()
 		return
 	}
 	r.stats.Writes++

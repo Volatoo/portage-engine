@@ -62,6 +62,43 @@ function ledgerWith(overrides: Partial<LedgerStatus> = {}): LedgerStatus {
   };
 }
 
+describe('a write-error count comes with something to act on', () => {
+  // The count is cumulative and `last_error` is not: internal/persistence/jobs.go
+  // clears it on the next successful write. On the deployment this was found on,
+  // nineteen errors sat under seventeen thousand writes with nothing said about
+  // any of them, which is a number an operator can read and cannot use.
+  it('prints the retained failure, which is the only one a busy ledger still has', () => {
+    const markup = paint(
+      <LedgerCard
+        ledger={ledgerWith({
+          write_errors: 19,
+          last_error: '',
+          last_write_error: 'insert build_jobs: deadlock detected',
+          last_write_error_at: '2026-08-02T10:03:04Z',
+        })}
+      />,
+    );
+    expect(markup).toContain('insert build_jobs: deadlock detected');
+  });
+
+  it('says it once when both fields carry the same sentence', () => {
+    const said = 'insert build_jobs: deadlock detected';
+    const markup = paint(
+      <LedgerCard ledger={ledgerWith({ write_errors: 19, last_error: said, last_write_error: said })} />,
+    );
+    expect(markup.split(said)).toHaveLength(2);
+  });
+
+  it('badges nineteen errors as degraded even where the server still says ok', () => {
+    // internal/server/server.go computes `ok` from LastError, which the next
+    // successful write clears, and treats a reconcile that never ran as fine —
+    // so `ok` is true here. The card is what the reader sees; it must not be.
+    const markup = paint(<LedgerCard ledger={ledgerWith({ write_errors: 19, ok: true })} />);
+    expect(markup).toContain(messagesFor('en').t('mon.ledger.degraded'));
+    expect(markup).toContain('data-verdict="red"');
+  });
+});
+
 describe('a Go zero time is a state, not a date', () => {
   it('renders the translated "never" rather than year 1, in both languages', () => {
     for (const lang of ['en', 'zh'] as const) {
