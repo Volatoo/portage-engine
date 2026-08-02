@@ -1,0 +1,161 @@
+/* The surfaces a reader meets outside the console shell — the landing page,
+   the public community pages, the sign-in and device cards — and the form
+   fields all four of them and the settings page share.
+
+   These sit before the shell in the cascade because that is where they sat in
+   the stylesheet this file is ported from, and two pairs here depend on it:
+   `.card .card-pad` in components.css beats `.public-docs .card-pad` below at
+   equal specificity, and `.field input.device-code` beats the typed-input rule
+   above it the same way. index.css states the rule. */
+/* ---- landing ---- */
+.landing-nav {
+  display: flex; align-items: center; justify-content: space-between;
+  height: 48px; padding: 0 var(--bodyGutter);
+  border-bottom: var(--keyline);
+}
+.landing-nav .brand { font: var(--body-emphasized); color: var(--systemPrimary); }
+.landing-nav .side { display: flex; align-items: center; gap: 8px; }
+.landing-nav .public-links { display: flex; align-items: center; gap: 4px; }
+.landing-nav .public-link {
+  color: var(--systemSecondary); font: var(--callout-emphasized);
+  padding: 6px 9px; border-radius: var(--buttonRadius);
+}
+.landing-nav .public-link:hover, .landing-nav .public-link[aria-current="page"] {
+  background: var(--systemQuinary); color: var(--systemPrimary);
+}
+@media (max-width: 640px) {
+  .landing-nav { height: auto; min-height: 48px; flex-wrap: wrap; padding-top: 7px; padding-bottom: 7px; }
+  .landing-nav .public-links { order: 3; width: 100%; }
+}
+.landing-hero { max-width: var(--readingWidth); margin: 0 auto; padding: 96px var(--bodyGutter) 64px; text-align: center; }
+.landing-hero .eyebrow { font: var(--subhead-emphasized); text-transform: uppercase; letter-spacing: .06em; color: var(--systemSecondary); margin-bottom: 12px; }
+.landing-hero h1 { font: var(--header-emphasized); text-wrap: balance; margin-bottom: 14px; }
+.landing-hero .sub { font: var(--title-3-tall); color: var(--systemSecondary); text-wrap: pretty; margin-bottom: 28px; }
+.landing-hero .cta { display: flex; gap: 10px; justify-content: center; }
+.landing-grid {
+  display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px;
+  max-width: var(--shellWidth); margin: 0 auto; padding: 0 var(--bodyGutter) 64px;
+}
+@media (max-width: 800px) { .landing-grid { grid-template-columns: 1fr; } }
+.landing-card {
+  background: var(--pageRaised); border-radius: var(--radius-large);
+  box-shadow: var(--shadow-small); padding: 20px; min-height: 150px;
+}
+.landing-card h4 { font: var(--subhead-emphasized); text-transform: uppercase; color: var(--systemSecondary); margin-bottom: 3px; }
+.landing-card h3 { font: var(--title-2-emphasized); margin-bottom: 6px; }
+.landing-card p  { font: var(--body-tall); color: var(--systemSecondary); text-wrap: pretty; }
+.landing-flow { max-width: var(--shellWidth); margin: 0 auto; padding: 0 var(--bodyGutter) 80px; }
+.landing-flow h2 { font: var(--title-2-emphasized); margin-bottom: 13px; }
+.landing-flow .steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; }
+@media (max-width: 800px) { .landing-flow .steps { grid-template-columns: 1fr; } }
+/* min-width:0 and a wrapping command line, together: a grid item defaults to a
+   min-content floor, and the command was the widest min-content in the row, so
+   the track could not shrink below it and the document scrolled sideways. */
+.landing-flow .step { min-width: 0; }
+.landing-flow .step h4 { font: var(--subhead-emphasized); text-transform: uppercase; color: var(--systemSecondary); margin-bottom: 4px; }
+.landing-flow .step p { font: var(--body-tall); color: var(--systemSecondary); }
+.landing-flow .step .mono { font: 400 .78125rem/1.6 var(--font-mono); color: var(--systemPrimary); background: var(--systemQuinary); border-radius: var(--buttonRadius); padding: 8px 10px; margin-top: 8px; display: block; overflow-wrap: anywhere; white-space: pre-wrap; }
+.landing-footer { border-top: var(--keyline); padding: 20px var(--bodyGutter); font: var(--footnote); color: var(--systemSecondary); text-align: center; }
+
+/* ---- public community pages ---- */
+.public-main { max-width: var(--shellWidth); margin: 0 auto; padding: 54px var(--bodyGutter) 80px; }
+.public-head { margin-bottom: 24px; max-width: var(--readingWidth); }
+.public-head h1 { font: var(--header-emphasized); margin-bottom: 8px; }
+.public-head p { font: var(--title-3-tall); color: var(--systemSecondary); text-wrap: pretty; }
+.public-search {
+  display: grid; grid-template-columns: minmax(220px, 1fr) minmax(190px, 280px) auto;
+  gap: 10px; align-items: end;
+}
+.public-search .field { margin: 0; }
+.public-search input, .public-search select { min-height: 38px; }
+.package-summary { padding: 13px 20px; color: var(--systemSecondary); border-bottom: var(--keyline); }
+/* Identifiers, not prose. overflow-wrap: anywhere let the column offer a break
+   between every pair of glyphs, so app-misc/hello-2.12.3-1 came back cut at
+   whatever column the row happened to end on and the reader had to reassemble
+   it; break-word breaks an atom only when it genuinely cannot fit, and the
+   title carries the whole string either way. */
+.package-name { font: 600 .8125rem/1.4 var(--font-mono); overflow-wrap: break-word; }
+.package-profile { max-width: 300px; overflow-wrap: break-word; }
+.package-flags { display: block; margin-top: 3px; font: var(--footnote); color: var(--systemSecondary); overflow-wrap: anywhere; }
+.public-pagination { display: flex; justify-content: space-between; align-items: center; padding: 14px 20px; border-top: var(--keyline); }
+.status-overall { padding: 24px 20px; display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.status-overall strong { display: block; font: var(--title-2-emphasized); margin-bottom: 4px; }
+.status-overall p { color: var(--systemSecondary); }
+.status-list { border-top: var(--keyline); }
+.status-row { display: flex; justify-content: space-between; gap: 20px; padding: 15px 20px; border-bottom: var(--keyline); overflow-wrap: anywhere; }
+.status-row:last-child { border-bottom: 0; }
+.status-row span:first-child { font: var(--body-emphasized); }
+.public-docs { max-width: var(--readingWidth); }
+.public-docs .card-pad { padding: 24px; }
+.public-docs .notice { padding: 12px 14px; background: var(--systemQuinary); border-radius: var(--radius-medium); margin: 12px 0 18px; color: var(--systemSecondary); }
+.public-docs a { overflow-wrap: anywhere; }
+@media (max-width: 700px) {
+  .public-main { padding-top: 34px; }
+  .public-search { grid-template-columns: 1fr; }
+  .status-overall { align-items: flex-start; flex-direction: column; }
+}
+
+/* ---- auth card (login) ---- */
+.auth-wrap { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: var(--bodyGutter); }
+.auth-card {
+  width: min(100%, var(--authCardWidth)); background: var(--pageRaised); border-radius: var(--radius-large);
+  box-shadow: var(--shadow-medium); padding: 28px;
+}
+.auth-card .brand { font: var(--subhead-emphasized); text-transform: uppercase; color: var(--systemSecondary); margin-bottom: 6px; }
+.auth-card h1 { font: var(--title-1-emphasized); margin-bottom: 18px; }
+.auth-card .btn { width: 100%; margin-top: 6px; }
+.auth-card a.btn { display: inline-flex; justify-content: center; text-decoration: none; }
+.auth-err { font: var(--callout); color: var(--dangerInk); min-height: 15px; margin: 8px 0 2px; overflow-wrap: anywhere; }
+.auth-note { font: var(--callout); color: var(--systemSecondary); margin-top: 14px; text-align: center; display: flex; justify-content: center; gap: 10px; align-items: center; }
+.auth-divider { display: flex; align-items: center; gap: 10px; margin: 14px 0 10px; color: var(--systemSecondary); font: var(--footnote); }
+.auth-divider::before, .auth-divider::after { content: ""; flex: 1; border-top: var(--keyline); }
+.device-card { width: min(100%, var(--deviceCardWidth)); }
+.device-intro { color: var(--systemSecondary); font: var(--body-tall); margin-bottom: 18px; }
+/* Two lines of --callout, because that is what a real principal string and a
+   real error take: reserving one line put the Approve/Deny row 17px higher
+   than where it lands, under the pointer that is about to click it. */
+.device-identity { color: var(--systemSecondary); font: var(--callout); min-height: 35px; margin: 10px 0; overflow-wrap: anywhere; }
+.device-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+/* width:auto is load-bearing: .auth-card .btn sets width:100% and flex-basis
+   auto reads it, so without this the two actions stack full-width and Deny
+   becomes an identical bar under Approve. */
+.device-actions .btn { flex: 1 1 auto; width: auto; margin-top: 0; }
+.device-result { font: var(--callout); min-height: 35px; margin-top: 12px; overflow-wrap: anywhere; }
+.device-result[data-state="error"] { color: var(--dangerInk); }
+.device-result[data-state="success"] { color: var(--successInk); }
+
+/* ---- form fields ---- */
+.field { margin-bottom: 12px; }
+.field label { display: block; font: var(--callout-emphasized); color: var(--systemSecondary); margin-bottom: 4px; }
+.field input[type=text], .field input[type=password], .field input[type=number], .field select {
+  width: 100%; height: 32px; padding: 6px 8px;
+  font: var(--body); font-family: var(--font-family); color: var(--systemPrimary);
+  background: var(--controlBG); border: 1px solid var(--controlBorder); border-radius: var(--buttonRadius);
+}
+.field input:focus, .field select:focus { outline: 3px solid var(--focusRing); outline-offset: 1px; }
+/* A placeholder here is not decoration: it carries the format for twenty-odd
+   settings fields and, for every secret field, the only statement of whether a
+   value is already stored. */
+.field input::placeholder, .field textarea::placeholder { color: var(--systemSecondary); }
+.field textarea {
+  width: 100%; min-height: 120px; padding: 8px;
+  font: 400 .78125rem/1.6 var(--font-mono); color: var(--systemPrimary);
+  background: var(--controlBG); border: 1px solid var(--controlBorder); border-radius: var(--buttonRadius);
+  resize: vertical;
+}
+.field textarea:focus { outline: 3px solid var(--focusRing); outline-offset: 1px; }
+.field .hint { font: var(--footnote); color: var(--systemSecondary); margin-top: 3px; }
+/* A server rejection is written next to the control it belongs to and pointed
+   at by aria-describedby, not left on the form footer. */
+.field .field-error { color: var(--dangerInk); }
+.field.check { display: flex; align-items: center; gap: 8px; }
+.field.check label { margin: 0; font: var(--body); color: var(--systemPrimary); }
+/* This one font-size stays in px: iOS Safari zooms the page when a focused
+   input computes under 16px, and a rem would follow a reader who shrank the
+   root font. */
+@media (max-width: 483px) { .field input, .field select { font-size: 16px; height: 38px; border-radius: var(--radius-small); } }
+/* Declared after .field input[type=text] and at equal specificity, so order is
+   what makes it win: this is the one string on the page a user compares
+   character by character with their terminal, and the monospace alignment the
+   code alphabet is designed around only exists if the shorthand survives. */
+.field input.device-code { font: var(--title-2-emphasized); font-family: var(--font-mono); letter-spacing: .08em; text-transform: uppercase; }

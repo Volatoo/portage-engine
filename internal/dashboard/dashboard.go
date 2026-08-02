@@ -21,6 +21,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
+	"github.com/slchris/portage-engine/internal/dashboard/webassets"
 	"github.com/slchris/portage-engine/pkg/config"
 )
 
@@ -47,6 +48,11 @@ type Dashboard struct {
 	streamClient *http.Client
 	oidc         *oidcRuntime
 	providers    map[string]*oidcRuntime
+	// console is the ported frontend, compiled in from web/dist. It is nil when
+	// this binary was built without running the frontend build, which is a
+	// normal state for `go build ./...` on a working copy and never a normal
+	// state for a release; the routes under /ui say so rather than 404ing.
+	console *webassets.Console
 }
 
 // ClusterStatus represents the overall cluster status.
@@ -76,9 +82,18 @@ func New(cfg *config.DashboardConfig) *Dashboard {
 	template.Must(tmpl.New("status").Parse(statusHTML))
 	template.Must(tmpl.New("shell").Parse(shellHTML))
 
+	// The ported console is loaded once, not per request: it is compiled into
+	// this binary, so a failure here is a build-time fact and repeating the
+	// attempt on every request would only repeat the same answer.
+	console, err := webassets.Load()
+	if err != nil {
+		log.Printf("Console bundle unavailable, /ui will report it: %v", err)
+	}
+
 	return &Dashboard{
 		config:    cfg,
 		templates: tmpl,
+		console:   console,
 		// httpClient carries control-plane JSON, where a wedged backend must
 		// not pin a browser request open. streamClient carries the two bodies
 		// with no bounded length — binary-package downloads and the job event
@@ -110,7 +125,7 @@ func (d *Dashboard) pageData(r *http.Request, extra map[string]interface{}) map[
 			})
 		}
 	}
-	if len(providers) == 0 && (d.oidc != nil || d.config.OIDCEnabled) {
+	if len(providers) == 0 && d.legacySingleOIDC() {
 		providers = append(providers, identityProviderView{
 			ID: "oidc", DisplayName: "Identity provider",
 			LoginURL: loginURLWithContext("/auth/oidc/start", stepUp, returnTo),
@@ -132,6 +147,26 @@ func (d *Dashboard) pageData(r *http.Request, extra map[string]interface{}) map[
 		data[k] = v
 	}
 	return data
+}
+
+// legacySingleOIDC reports the pre-multi-provider configuration: one identity
+// provider, unnamed, reachable at /auth/oidc/start.
+func (d *Dashboard) legacySingleOIDC() bool {
+	return d.oidc != nil || d.config.OIDCEnabled
+}
+
+// oidcAvailable reports whether any federated sign-in exists, for callers that
+// want the boolean without assembling the provider list. pageData above is the
+// one caller that needs the list itself; both answers come from these same two
+// facts, so a deployment cannot offer a provider on one console and not the
+// other.
+func (d *Dashboard) oidcAvailable() bool {
+	for _, provider := range d.config.IdentityProviders {
+		if d.providers[provider.ID] != nil {
+			return true
+		}
+	}
+	return d.legacySingleOIDC()
 }
 
 func loginURLWithContext(path string, stepUp bool, returnTo string) string {
@@ -349,6 +384,14 @@ func (d *Dashboard) Router() http.Handler {
 		w.Header().Set("ETag", appleCSSETag)
 		http.ServeContent(w, r, "apple.css", time.Time{}, strings.NewReader(appleCSS))
 	})
+	// The ported console. It is mounted beside the old one rather than over it:
+	// /ui/... serves the Vite bundle's shell, /static/ui/... serves its hashed
+	// assets. The longer pattern wins in ServeMux, so /static/ui/ is answered
+	// here and never falls through to the on-disk static handler below.
+	mux.Handle(consoleAssetPrefix, d.consoleAssetHandler())
+	mux.HandleFunc(consoleBase, d.handleConsole)
+	mux.HandleFunc(consoleBase+"/", d.handleConsole)
+
 	mux.HandleFunc("/static/", d.handleStatic)
 
 	// Apply middleware
@@ -1490,7 +1533,11 @@ func (d *Dashboard) authMiddleware(next http.Handler) http.Handler {
 			r.URL.Path == "/auth/oidc/start" || r.URL.Path == "/auth/oidc/callback" ||
 			strings.HasPrefix(r.URL.Path, "/auth/provider/") ||
 			strings.HasPrefix(r.URL.Path, "/binpkgs/") ||
-			strings.HasPrefix(r.URL.Path, "/static/") {
+			strings.HasPrefix(r.URL.Path, "/static/") ||
+			// The ported console's community pages. The answer comes from the
+			// route table in console.go, so this list and that one cannot come
+			// to disagree about which pages a reader without a session may see.
+			consolePathIsPublic(r.URL.Path) {
 			next.ServeHTTP(w, r)
 			return
 		}

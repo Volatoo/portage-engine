@@ -66,3 +66,10 @@ linters:
       - linters:
           - staticcheck
         text: "ST1005"
+    paths:
+      # npm packages are allowed to ship whatever they like, and at least one in
+      # the console's tree ships a Go implementation alongside its JavaScript.
+      # `./...` walks into it on any machine that has run `npm ci`, so without
+      # this the lint result depends on whether a developer has installed the
+      # frontend. Code we do not write is reported upstream, not edited here.
+      - 'web/node_modules'

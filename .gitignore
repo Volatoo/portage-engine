@@ -35,9 +35,16 @@ go.work
 *~
 .DS_Store
 
-# Build directories
+# Build directories. `dist/` also covers the console bundle at
+# internal/dashboard/webassets/bundle/dist, which `npm run build` writes and
+# go:embed compiles in. The .gitkeep beside it is tracked on purpose: //go:embed
+# fails when its pattern matches nothing, so without one committed file in
+# bundle/ a Go-only checkout would not compile.
 build/
 dist/
+
+# Console toolchain
+node_modules/
 
 # Logs
 *.log

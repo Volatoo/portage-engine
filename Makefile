@@ -1,4 +1,4 @@
-.PHONY: all build clean test test-release test-recovery run-server run-dashboard run-builder run-client build-image-factory build-desktop-runner build-migrate build-signer build-capacity-actuator build-persistent-executor-template test-persistent-executor-gate build-distcc-gate distcc-gate lint lint-security lint-complexity
+.PHONY: all build clean test test-release test-recovery run-server run-dashboard run-builder run-client build-image-factory build-desktop-runner build-migrate build-signer build-capacity-actuator build-persistent-executor-template test-persistent-executor-gate build-distcc-gate distcc-gate lint lint-security lint-complexity web-deps web-build web-lint web-test web-clean web
 
 # Variables
 BINARY_SERVER=bin/portage-server
@@ -14,6 +14,12 @@ BINARY_DISTCC_GATE=bin/portage-distcc-gate
 GO=go
 GOFLAGS=-v
 PYTHON ?= python3
+NPM ?= npm
+WEB_DIR=web
+# Where `npm run build` writes. web/vite.config.ts points its outDir here, so
+# the bytes go:embed compiles in are the bytes Vite just emitted; there is no
+# copy step in between that could carry a stale tree.
+WEB_DIST=internal/dashboard/webassets/bundle/dist
 GOLANGCI_LINT_VERSION ?= v2.7.2
 GOLANGCI_LINT = $(GO) run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
@@ -23,8 +29,39 @@ LDFLAGS=-ldflags "-X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.bu
 
 all: build
 
-# Build all binaries
-build: build-server build-dashboard build-builder build-client build-image-factory build-desktop-runner build-migrate build-signer build-capacity-actuator build-distcc-gate
+# Build all binaries. The console bundle comes first: the dashboard binary
+# embeds it, and a Go build that runs before it produces a binary that compiles,
+# starts, serves every old route, and answers 503 on /ui — which is the one
+# failure an operator would only find in a browser.
+build: web-build build-server build-dashboard build-builder build-client build-image-factory build-desktop-runner build-migrate build-signer build-capacity-actuator build-distcc-gate
+
+# ---- operator console (web/) ----
+# The frontend is a real project with its own toolchain: Vite + React +
+# TypeScript, built with npm, compiled into the Go binary with go:embed. The
+# lockfile is committed and every install goes through `npm ci`, so a build
+# resolves the same tree it resolved last time and an offline mirror can serve it.
+
+web-deps:
+	@echo "Installing console dependencies..."
+	cd $(WEB_DIR) && $(NPM) ci
+
+web-build:
+	@echo "Building Portage Engine Console..."
+	cd $(WEB_DIR) && $(NPM) run build
+
+web-lint:
+	@echo "Linting console (eslint, stylelint, prettier)..."
+	cd $(WEB_DIR) && $(NPM) run lint
+
+web-test:
+	@echo "Testing console..."
+	cd $(WEB_DIR) && $(NPM) run test
+
+web-clean:
+	@rm -rf $(WEB_DIST)
+
+# Everything the console has to pass, in the order CI runs it.
+web: web-deps web-build web-lint web-test
 
 # Build server
 build-server:
@@ -94,7 +131,7 @@ distcc-gate:
 	$(GO) run ./cmd/distcc-gate -local "$(LOCAL_EVIDENCE)" -distcc "$(DISTCC_EVIDENCE)" -output "$(GATE_RECEIPT)"
 
 # Clean build artifacts
-clean:
+clean: web-clean
 	@echo "Cleaning..."
 	@rm -rf bin/
 	@$(GO) clean

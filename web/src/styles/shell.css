@@ -1,0 +1,93 @@
+/* The authenticated shell: the rail, its phone-width replacement, the content
+   column, the page head, and the one rule that keeps a gated destination
+   hidden. */
+/* ---- app shell ---- */
+.shell { display: flex; min-height: 100vh; }
+.sidebar {
+  width: 260px; flex-shrink: 0;
+  background: var(--navSidebarBG);
+  border-inline-end: 1px solid var(--labelDivider);
+  padding: 20px 12px;
+  display: flex; flex-direction: column; gap: 2px;
+  position: sticky; top: 0; height: 100vh;
+  /* The rail is a fixed 100vh box holding content whose height the server does
+     not know: the quota block grows every time a project crosses a threshold.
+     Without this it overflowed visibly and 758px of it — the language toggle,
+     Sign Out, the binhost line — sat past the bottom of the viewport with no
+     way to reach any of it. Scrolling is what a rail that can grow does. */
+  overflow-y: auto;
+}
+/* And the growth must not be paid for by the items above it. .nav-item carries
+   overflow:hidden for its ellipsis, which zeroes a flex item's automatic
+   minimum size, so the eight destinations were free to be compressed to 18px
+   each with their labels cut mid-word — the same mechanism the topbar rule
+   below escapes with flex:none. */
+.sidebar .nav-item { flex-shrink: 0; }
+.sidebar .brand { font: var(--body-emphasized); padding: 4px 8px 16px; color: var(--systemPrimary); }
+.sidebar .brand span { display: block; font: var(--footnote); color: var(--systemSecondary); margin-top: 2px; }
+.nav-item {
+  display: block; padding: 8px; border-radius: var(--radius-medium);
+  font: var(--body); color: var(--systemPrimary);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  transition: background-color 175ms ease-in;
+}
+.nav-item:hover { background: var(--systemQuinary); }
+.nav-item[aria-current="page"] { background: rgba(var(--keyColor-rgb), calc(var(--alpha-multiplier) * .08)); color: var(--onTintInk); font: var(--body-emphasized); }
+.sidebar .spacer { flex: 1; }
+.sidebar .foot { padding: 8px; font: var(--footnote); color: var(--systemSecondary); }
+.sidebar .foot a { color: var(--systemSecondary); font: var(--callout); }
+.project-context { padding: 10px 8px; border-top: 1px solid var(--labelDivider); }
+/* --caption-1/--caption-2 were never declared anywhere, so both slots fell
+   back to inherited 14px/400 and read as nav items. --footnote is the rung
+   this always meant. */
+.project-context label { display: block; font: var(--footnote); color: var(--systemSecondary); margin-bottom: 5px; }
+.project-context select {
+  width: 100%; height: 32px; padding: 0 8px; color: var(--systemPrimary);
+  background: var(--controlBG); border: 1px solid var(--controlBorder); border-radius: var(--radius-small);
+}
+.project-context .identity { margin-top: 5px; font: var(--footnote); color: var(--systemSecondary); overflow-wrap: anywhere; }
+
+.content { flex: 1; min-width: 0; padding: 28px var(--bodyGutter) 60px; }
+.page-head { display: flex; align-items: end; justify-content: space-between; gap: 12px; margin-bottom: 20px; flex-wrap: wrap; }
+.page-head h1 { font: var(--title-1-emphasized); }
+.page-head .sub { font: var(--callout); color: var(--systemSecondary); margin-top: 4px; }
+.page-head .actions { display: flex; gap: 8px; align-items: center; }
+
+.topbar { display: none; }
+@media (max-width: 700px) {
+  .shell { display: block; }
+  .sidebar { display: none; }
+  .topbar {
+    display: flex; align-items: center; gap: 4px;
+    position: sticky; top: 0; z-index: 100; height: 44px;
+    padding: 0 12px; overflow-x: auto;
+    background: var(--pageFloor);
+    border-bottom: var(--keyline);
+  }
+  .topbar .brand { font: var(--body-emphasized); margin-right: 8px; white-space: nowrap; }
+  /* flex:none is what makes the topbar's overflow-x real. .nav-item carries
+     overflow:hidden for the sidebar, and that zeroes a flex item's automatic
+     minimum size, so all eight items shrank to one letter each and the bar
+     never scrolled — under 700px this bar is the only navigation there is. */
+  .topbar .nav-item { flex: none; padding: 6px 10px; border-radius: var(--radius-pill); white-space: nowrap; }
+  /* The sidebar is display:none here, so everything that only lived in it —
+     the project switcher, the identity, the language control and Sign Out —
+     had no replacement at all on a phone. It follows the nav in the same
+     scrolling row. */
+  .topbar .topbar-chrome { display: flex; align-items: center; gap: 6px; flex: none; margin-inline-start: 12px; }
+  .topbar .topbar-chrome select {
+    height: 28px; max-width: 132px; font: var(--callout);
+    color: var(--systemPrimary); background: var(--controlBG);
+    border: 1px solid var(--controlBorder); border-radius: var(--radius-small);
+  }
+  .topbar .topbar-chrome .identity {
+    font: var(--footnote); color: var(--systemSecondary);
+    max-width: 132px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .topbar .topbar-chrome a { font: var(--callout); color: var(--systemSecondary); white-space: nowrap; }
+}
+
+/* A gated destination ships hidden and is revealed only once IAM confirms the
+   capability, so [hidden] has to beat the component display rules above it —
+   .nav-item's own display:block would otherwise un-hide every admin route. */
+[hidden] { display: none !important; }

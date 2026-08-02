@@ -57,44 +57,53 @@ func signToken(secret, subject string, now time.Time, ttl time.Duration) (string
 
 // verifyToken validates the signature and expiry of token against secret.
 func verifyToken(secret, token string, now time.Time) error {
+	_, err := verifyTokenClaims(secret, token, now)
+	return err
+}
+
+// verifyTokenClaims is verifyToken for callers that need the subject as well as
+// the verdict. The claims are returned only on the success path, so there is no
+// way to read a subject out of a token whose signature or expiry did not check
+// out.
+func verifyTokenClaims(secret, token string, now time.Time) (jwtClaims, error) {
 	parts := strings.Split(token, ".")
 	if len(parts) != 3 {
-		return errMalformedToken
+		return jwtClaims{}, errMalformedToken
 	}
 
 	signingInput := parts[0] + "." + parts[1]
 	expectedSig := sign(secret, signingInput)
 	// Constant-time comparison of the base64 signatures.
 	if !hmac.Equal([]byte(expectedSig), []byte(parts[2])) {
-		return errBadSignature
+		return jwtClaims{}, errBadSignature
 	}
 
 	headerJSON, err := base64.RawURLEncoding.DecodeString(parts[0])
 	if err != nil {
-		return errMalformedToken
+		return jwtClaims{}, errMalformedToken
 	}
 	var header jwtHeader
 	if err := json.Unmarshal(headerJSON, &header); err != nil {
-		return errMalformedToken
+		return jwtClaims{}, errMalformedToken
 	}
 	if header.Alg != "HS256" {
-		return errWrongAlg
+		return jwtClaims{}, errWrongAlg
 	}
 
 	claimsJSON, err := base64.RawURLEncoding.DecodeString(parts[1])
 	if err != nil {
-		return errMalformedToken
+		return jwtClaims{}, errMalformedToken
 	}
 	var claims jwtClaims
 	if err := json.Unmarshal(claimsJSON, &claims); err != nil {
-		return errMalformedToken
+		return jwtClaims{}, errMalformedToken
 	}
 
 	if now.Unix() >= claims.ExpiresAt {
-		return errExpiredToken
+		return jwtClaims{}, errExpiredToken
 	}
 
-	return nil
+	return claims, nil
 }
 
 func sign(secret, input string) string {

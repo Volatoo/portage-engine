@@ -46,9 +46,13 @@ const appleCSS = `:root {
      the body and callout text bound to it. .56 is Apple's own value for
      non-Apple platforms (the @supports block below) and clears it at 4.94:1. */
   --systemSecondary:  rgba(0, 0, 0, .56);
-  /* The .25 rung is 1.83:1 on #fff. It dresses placeholders and nothing else;
-     every text slot that used to bind it now binds --systemSecondary. */
-  --systemTertiary:   rgba(0, 0, 0, .25);
+  /* The ladder skips .25 here, and the gap is deliberate. That rung was the
+     placeholder ink at 1.83:1 on the control fill, and a placeholder is the one
+     piece of text in the settings form carrying state a reader cannot get
+     anywhere else — the secret fields say "Saved — leave empty to keep" and
+     "Managed by deployment environment" there and nowhere else. Placeholders
+     bind --systemSecondary now, which left the rung with no reader at all, and
+     a rung nobody reads describes a system the stylesheet does not run. */
   --systemQuaternary: rgba(0, 0, 0, .1);
   --systemQuinary:    rgba(0, 0, 0, .05);
 
@@ -60,9 +64,13 @@ const appleCSS = `:root {
   --systemGray:   #8e8e93;
   --systemGray6:  #f2f2f7;
 
-  /* Status text inks: the palette above is sized for dots and fills, where 3:1
-     as a non-text indicator is the bar. #28cd41 is 2.12:1 as 13px text on
-     white, so text carrying an outcome gets a darkened ink instead. */
+  /* Status text inks. The palette above is dot and fill hues only, and two of
+     them are quiet on white — #28cd41 measures 2.12:1 and #ff9500 2.20:1. They
+     stay quiet on purpose: a status dot is never the only channel (a status
+     word sits beside every one of them), so 1.4.11's "required to understand"
+     does not reach it, and darkening the hue would buy contrast a reader who
+     needs it already has in the word. Text carrying an outcome is a different
+     job and takes a darkened ink. */
   --successInk: #1d7d2f;
   --dangerInk:  #d70015;
 
@@ -74,6 +82,19 @@ const appleCSS = `:root {
   --keyColor-rgb: 0, 113, 227;
   --accentFill: #0071e3;
   --onAccentInk: #fff;
+  /* The third accent role, and the one that was missing. A tint wash of the key
+     colour is not a surface the key colour can then be written on: --keyColor
+     over its own 6% wash is 4.33:1 and over the 8% wash in the sidebar 3.70:1,
+     both under the 4.5 floor 14px bold text has. This is the ink for anything
+     sitting on that wash — the quiet button, the current nav item, the current
+     pipeline chip — and it clears 4.5:1 on every wash the stylesheet mixes over
+     every surface the wash lands on. */
+  --onTintInk: #005bbf;
+  /* A control's border is the only thing that says where the control is: the
+     field fill is --pageRaised and so is the card behind it, so 1.4.11's 3:1
+     for a non-text boundary binds here. --labelDivider is 1.41:1 on that fill,
+     which is right for a hairline between rows and wrong for an edge. */
+  --controlBorder: rgba(0, 0, 0, .45);
   /* 1.4.11 asks 3:1 against everything the ring abuts. outline-offset puts the
      page there, but this value also clears 3:1 against --accentFill so a
      focused primary button still reads as ringed rather than merely fatter. */
@@ -110,7 +131,6 @@ const appleCSS = `:root {
   :root {
     --systemPrimary:    hsla(0, 0%, 100%, .85);
     --systemSecondary:  hsla(0, 0%, 100%, .55);
-    --systemTertiary:   hsla(0, 0%, 100%, .25);
     --systemQuaternary: hsla(0, 0%, 100%, .1);
     --systemQuinary:    hsla(0, 0%, 100%, .05);
     --systemRed:    #ff453a;
@@ -128,6 +148,10 @@ const appleCSS = `:root {
     --keyColor-rgb: 10, 132, 255;
     --accentFill: #0a6cd8;   /* #0a84ff under white ink is 3.65:1 */
     --onAccentInk: #fff;
+    /* Same job, opposite direction: the wash lightens a dark ground, so the ink
+       on it has to be lighter than --keyColor rather than darker. */
+    --onTintInk: #4da3ff;
+    --controlBorder: hsla(0, 0%, 100%, .4);
     --focusRing: #a8ccff;
     --pageFloor: #151515;
     /* Kept dark on purpose: lifting the card toward the old white-10% repaint
@@ -177,7 +201,7 @@ a { color: var(--keyColor); text-decoration: none; }
   font: var(--body-bold-tall); word-break: keep-all;
   transition: background-color .14s ease-out;
   background: rgba(var(--keyColor-rgb), calc(var(--alpha-multiplier) * .06));
-  color: var(--keyColor);
+  color: var(--onTintInk);
 }
 .btn:hover  { background: rgba(var(--keyColor-rgb), calc(var(--alpha-multiplier) * .1)); transition: background-color .21s ease-out; }
 .btn:active { background: rgba(var(--keyColor-rgb), calc(var(--alpha-multiplier) * .07)); }
@@ -252,8 +276,13 @@ a { color: var(--keyColor); text-decoration: none; }
 .public-search .field { margin: 0; }
 .public-search input, .public-search select { min-height: 38px; }
 .package-summary { padding: 13px 20px; color: var(--systemSecondary); border-bottom: var(--keyline); }
-.package-name { font: 600 .8125rem/1.4 var(--font-mono); overflow-wrap: anywhere; }
-.package-profile { max-width: 300px; overflow-wrap: anywhere; }
+/* Identifiers, not prose. overflow-wrap: anywhere let the column offer a break
+   between every pair of glyphs, so app-misc/hello-2.12.3-1 came back cut at
+   whatever column the row happened to end on and the reader had to reassemble
+   it; break-word breaks an atom only when it genuinely cannot fit, and the
+   title carries the whole string either way. */
+.package-name { font: 600 .8125rem/1.4 var(--font-mono); overflow-wrap: break-word; }
+.package-profile { max-width: 300px; overflow-wrap: break-word; }
 .package-flags { display: block; margin-top: 3px; font: var(--footnote); color: var(--systemSecondary); overflow-wrap: anywhere; }
 .public-pagination { display: flex; justify-content: space-between; align-items: center; padding: 14px 20px; border-top: var(--keyline); }
 .status-overall { padding: 24px 20px; display: flex; align-items: center; justify-content: space-between; gap: 16px; }
@@ -308,14 +337,17 @@ a { color: var(--keyColor); text-decoration: none; }
 .field input[type=text], .field input[type=password], .field input[type=number], .field select {
   width: 100%; height: 32px; padding: 6px 8px;
   font: var(--body); font-family: var(--font-family); color: var(--systemPrimary);
-  background: var(--controlBG); border: 1px solid var(--labelDivider); border-radius: var(--buttonRadius);
+  background: var(--controlBG); border: 1px solid var(--controlBorder); border-radius: var(--buttonRadius);
 }
 .field input:focus, .field select:focus { outline: 3px solid var(--focusRing); outline-offset: 1px; }
-.field input::placeholder, .field textarea::placeholder { color: var(--systemTertiary); }
+/* A placeholder here is not decoration: it carries the format for twenty-odd
+   settings fields and, for every secret field, the only statement of whether a
+   value is already stored. */
+.field input::placeholder, .field textarea::placeholder { color: var(--systemSecondary); }
 .field textarea {
   width: 100%; min-height: 120px; padding: 8px;
   font: 400 .78125rem/1.6 var(--font-mono); color: var(--systemPrimary);
-  background: var(--controlBG); border: 1px solid var(--labelDivider); border-radius: var(--buttonRadius);
+  background: var(--controlBG); border: 1px solid var(--controlBorder); border-radius: var(--buttonRadius);
   resize: vertical;
 }
 .field textarea:focus { outline: 3px solid var(--focusRing); outline-offset: 1px; }
@@ -344,7 +376,19 @@ a { color: var(--keyColor); text-decoration: none; }
   padding: 20px 12px;
   display: flex; flex-direction: column; gap: 2px;
   position: sticky; top: 0; height: 100vh;
+  /* The rail is a fixed 100vh box holding content whose height the server does
+     not know: the quota block grows every time a project crosses a threshold.
+     Without this it overflowed visibly and 758px of it — the language toggle,
+     Sign Out, the binhost line — sat past the bottom of the viewport with no
+     way to reach any of it. Scrolling is what a rail that can grow does. */
+  overflow-y: auto;
 }
+/* And the growth must not be paid for by the items above it. .nav-item carries
+   overflow:hidden for its ellipsis, which zeroes a flex item's automatic
+   minimum size, so the eight destinations were free to be compressed to 18px
+   each with their labels cut mid-word — the same mechanism the topbar rule
+   below escapes with flex:none. */
+.sidebar .nav-item { flex-shrink: 0; }
 .sidebar .brand { font: var(--body-emphasized); padding: 4px 8px 16px; color: var(--systemPrimary); }
 .sidebar .brand span { display: block; font: var(--footnote); color: var(--systemSecondary); margin-top: 2px; }
 .nav-item {
@@ -354,7 +398,7 @@ a { color: var(--keyColor); text-decoration: none; }
   transition: background-color 175ms ease-in;
 }
 .nav-item:hover { background: var(--systemQuinary); }
-.nav-item[aria-current="page"] { background: rgba(var(--keyColor-rgb), calc(var(--alpha-multiplier) * .08)); color: var(--keyColor); font: var(--body-emphasized); }
+.nav-item[aria-current="page"] { background: rgba(var(--keyColor-rgb), calc(var(--alpha-multiplier) * .08)); color: var(--onTintInk); font: var(--body-emphasized); }
 .sidebar .spacer { flex: 1; }
 .sidebar .foot { padding: 8px; font: var(--footnote); color: var(--systemSecondary); }
 .sidebar .foot a { color: var(--systemSecondary); font: var(--callout); }
@@ -365,7 +409,7 @@ a { color: var(--keyColor); text-decoration: none; }
 .project-context label { display: block; font: var(--footnote); color: var(--systemSecondary); margin-bottom: 5px; }
 .project-context select {
   width: 100%; height: 32px; padding: 0 8px; color: var(--systemPrimary);
-  background: var(--controlBG); border: 1px solid var(--labelDivider); border-radius: var(--radius-small);
+  background: var(--controlBG); border: 1px solid var(--controlBorder); border-radius: var(--radius-small);
 }
 .project-context .identity { margin-top: 5px; font: var(--footnote); color: var(--systemSecondary); overflow-wrap: anywhere; }
 
@@ -400,7 +444,7 @@ a { color: var(--keyColor); text-decoration: none; }
   .topbar .topbar-chrome select {
     height: 28px; max-width: 132px; font: var(--callout);
     color: var(--systemPrimary); background: var(--controlBG);
-    border: 1px solid var(--labelDivider); border-radius: var(--radius-small);
+    border: 1px solid var(--controlBorder); border-radius: var(--radius-small);
   }
   .topbar .topbar-chrome .identity {
     font: var(--footnote); color: var(--systemSecondary);
@@ -452,6 +496,23 @@ table.list tbody tr { transition: background-color 175ms ease-in; }
 table.list tbody tr:hover { background: var(--systemQuinary); }
 table.list td.mono, .mono { font-family: var(--font-mono); font-size: .8125rem; }
 table.list td.sec { color: var(--systemSecondary); }
+/* A fixed layout divides the width it is handed instead of measuring what is in
+   it, so at 360px the seven columns of /builds took 39px each and every cell
+   came back as a one-glyph ladder. These floors are what each column set needs
+   to still read as a row; below them .table-scroll pans instead. The floor is
+   on the table and never on the wrapper: a block box with overflow-x:auto keeps
+   its containing block's width whatever it holds, so none of this can widen the
+   document — the full-width sweep is unchanged, and the columns are still
+   pinned before the first payload arrives. */
+table.list { min-width: 560px; }
+table.list[data-cols="6"] { min-width: 660px; }
+table.list[data-cols="7"] { min-width: 760px; }
+/* Five columns, three of them identifiers — atom, version, profile id — so this
+   set needs the six-column floor rather than the five-column one. */
+table.list.packages { min-width: 660px; }
+/* A pan region a mouse can reach and a keyboard cannot is not a scroll
+   container, it is a trap: tabindex is what puts the arrow keys on it, and the
+   role and label are what say which table is about to move. */
 .table-scroll { overflow-x: auto; }
 
 .status { display: inline-flex; align-items: center; gap: 6px; font: var(--callout-emphasized); white-space: nowrap; }
@@ -461,10 +522,30 @@ table.list td.sec { color: var(--systemSecondary); }
 .status.orange { --status-color: var(--systemOrange); }
 .status.red    { --status-color: var(--systemRed); }
 .status.gray   { --status-color: var(--systemGray); }
+/* The same vocabulary, worn by a value instead of by a badge. The token block
+   above declares --successInk and --dangerInk for exactly this and says in
+   writing that text carrying an outcome takes the deepened ink — and the SLO
+   verdict and the write-error count were arriving in --systemSecondary at 400
+   weight, byte-identical to the cost figure beside them that concludes nothing.
+   Only green and red deepen: a token that concludes nothing keeps the row's own
+   ink rather than inventing a third. font-weight, not the font shorthand, so a
+   verdict worn by a counter keeps its tabular figures. */
+.verdict { font-weight: 600; }
+.verdict[data-verdict="green"] { color: var(--successInk); }
+.verdict[data-verdict="red"]   { color: var(--dangerInk); }
 
 /* .empty is where showError renders raw Go transport strings, which arrive as
    one unbroken token and used to scroll the whole document sideways. */
 .empty { padding: 36px 20px; text-align: center; font: var(--callout); color: var(--systemSecondary); overflow-wrap: anywhere; }
+/* Five states, one box, and the state written on the box as an attribute so the
+   stylesheet and a screen reader read the same value. A failed load used to be
+   dressed exactly like an account with nothing in it — same padding, same
+   secondary ink — and the only thing telling the two apart was a sentence that
+   happened to begin "Failed to load". A surface that loaded and lost one
+   section of itself is a third thing again, and it sits tighter because the
+   rest of the surface is still there to be read. */
+.empty[data-state="error"] { color: var(--dangerInk); }
+.empty[data-state="partial"] { padding: 12px 20px; text-align: start; }
 .provider-status-list { display: grid; gap: 8px; margin-top: 12px; }
 .provider-status-row { padding: 10px 12px; border: 1px solid var(--labelDivider); border-radius: var(--radius-medium); font: var(--callout); overflow-wrap: anywhere; }
 
@@ -522,13 +603,34 @@ pre.log-view {
    stay resident as meters; the rest is one disclosure away. A folded metric
    that climbs past its warn threshold promotes itself, so nothing important
    can hide behind the summary. */
-.policy-summary { margin-top: 7px; font: var(--footnote); color: var(--systemSecondary); line-height: 1.45; overflow-wrap: anywhere; }
+/* The block is one line of "Loading project quota…" until the policy call
+   answers and four meters plus a disclosure afterwards, and the rail moved
+   99.8px under the reader at the moment it landed. Four meters is not a number
+   the payload can change — the four that actually stop a build are always
+   resident — so the height they occupy is known before the request is made and
+   is reserved here: 4 × (14.85px label + 3px gap + 6px bar + 6px margin) plus
+   the 2px and 14.85px the disclosure takes. */
+.policy-summary { margin-top: 7px; min-height: 136px; font: var(--footnote); color: var(--systemSecondary); line-height: 1.45; overflow-wrap: anywhere; }
 .policy-summary[data-state="suspended"] { color: var(--dangerInk); }
 .quota-state { font: var(--footnote); color: var(--dangerInk); margin: 0 0 6px; }
 .quota-meter { display: grid; grid-template-columns: 1fr auto; gap: 0 6px; margin-bottom: 6px; }
+/* break-word, not the anywhere these two inherit from .policy-summary. The
+   difference is not how a long word breaks — it is that anywhere also counts
+   those breaks toward min-content, so each label's contribution to the 1fr
+   track fell to a single glyph, the auto value column took the rest, and
+   "failures" came back as a six-line column 9.7px wide. break-word still breaks
+   a value that cannot fit; it just does not offer the label as one. */
+.quota-k, .quota-dl dt { overflow-wrap: break-word; }
 .quota-k { color: var(--systemSecondary); }
-.quota-v { color: var(--systemPrimary); font-variant-numeric: tabular-nums; }
-.quota-bar { grid-column: 1 / -1; height: 3px; border-radius: var(--radius-pill); background: var(--systemQuinary); overflow: hidden; }
+/* tabular-nums equalises the width of a digit, not the count of them, so
+   "9 / 10" becoming "10 / 10" still moved the value's left edge on every poll.
+   The reserve plus the right edge is what holds it: the column is auto, so the
+   right edge is already the rail's, and both ends are now fixed. */
+.quota-v { min-width: 7ch; text-align: right; color: var(--systemPrimary); font-variant-numeric: tabular-nums; }
+/* 3px reads as a rule, not as a ratio. The whole job of the bar is the
+   proportion between the fill and the track, and at three device pixels the
+   fill's own end could not be told from the track's. */
+.quota-bar { grid-column: 1 / -1; height: 6px; margin-top: 3px; border-radius: var(--radius-pill); background: var(--systemQuinary); overflow: hidden; }
 .quota-bar i { display: block; height: 100%; background: var(--systemSecondary); }
 /* Level is an attribute, not a class, and it drives a shape as well as a
    colour: a bare hue would be the only signal for a colour-blind operator. */
@@ -537,7 +639,17 @@ pre.log-view {
 .quota-meter[data-level="warn"] .quota-v::after { content: " !"; }
 .quota-meter[data-level="crit"] .quota-v::after { content: " !!"; }
 .quota-more { margin-top: 2px; }
-.quota-more > summary { cursor: pointer; color: var(--systemSecondary); }
+/* A word in the same secondary ink as the eight labels above it, sitting in a
+   stack of numbers, is not read as something that opens: the only thing saying
+   "More" was a control was the cursor, which a touch reader never sees. It
+   takes the link ink the rest of the console spends on things you can act on,
+   and a caret that turns when the disclosure does. The default marker is
+   suppressed because it is drawn outside the summary's own box and cannot be
+   aligned with the rail's 8px gutter. */
+.quota-more > summary { cursor: pointer; color: var(--keyColor); list-style: none; }
+.quota-more > summary::-webkit-details-marker { display: none; }
+.quota-more > summary::after { content: "\203a"; display: inline-block; margin-inline-start: 4px; transition: transform var(--hover-transition); }
+.quota-more[open] > summary::after { transform: rotate(90deg); }
 .quota-more > summary:focus-visible { outline: 2px solid var(--focusRing); outline-offset: 2px; }
 .quota-dl { margin: 6px 0 0; display: grid; grid-template-columns: 1fr auto; gap: 3px 6px; }
 .quota-dl dt { color: var(--systemSecondary); margin: 0; }
@@ -550,19 +662,30 @@ pre.log-view {
 .docs-body pre { font: 400 .78125rem/1.6 var(--font-mono); color: var(--systemPrimary); background: var(--systemQuinary); border-radius: var(--radius-medium); padding: 12px 14px; margin: 8px 0 14px; overflow-x: auto; }
 
 /* ---- build pipeline ---- */
-.pipeline { display: flex; align-items: center; gap: 0; overflow-x: auto; padding: 4px 0; }
+/* Nine stages held in one nowrap row is nine stages an operator cannot see: at
+   375px the row measured 1195px inside a 285px box, the failing Publish cell
+   sat 793px past the right edge, and the only thing saying so was a scrollbar.
+   Nine equal items wrap when the row runs out. overflow-x stays as the floor
+   for a reader at a large text size, and the chip may break its own label so
+   that a fold too narrow for one chip still folds instead of widening the
+   document. */
+.pipeline { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 0; overflow-x: auto; padding: 4px 0; }
 .pipe-stage { display: flex; align-items: center; flex-shrink: 0; }
 .pipe-chip {
-  display: inline-flex; align-items: center; gap: 7px;
+  display: inline-flex; align-items: center; flex-wrap: wrap; gap: 2px 7px;
   padding: 7px 14px; border-radius: var(--radius-pill);
   font: var(--callout-emphasized); color: var(--systemSecondary);
-  background: var(--systemQuinary); white-space: nowrap;
+  background: var(--systemQuinary);
   transition: background-color 210ms ease-out;
 }
+/* The chip's one word is the stage's own name, never its state, so which of
+   the nine had run, was running, had failed or had never started was carried
+   by the dot's hue and by nothing else. */
+.pipe-state { font: var(--footnote); }
 .pipe-chip .dot { width: 7px; height: 7px; border-radius: var(--radius-circle); background: var(--systemGray); }
 .pipe-stage.done .pipe-chip { color: var(--systemPrimary); }
 .pipe-stage.done .pipe-chip .dot { background: var(--systemGreen); }
-.pipe-stage.current .pipe-chip { background: rgba(var(--keyColor-rgb), calc(var(--alpha-multiplier) * .1)); color: var(--keyColor); }
+.pipe-stage.current .pipe-chip { background: rgba(var(--keyColor-rgb), calc(var(--alpha-multiplier) * .1)); color: var(--onTintInk); }
 .pipe-stage.current .pipe-chip .dot { background: var(--systemBlue); }
 /* The pulse is declared inside the query, not clamped outside it: a Gentoo
    build runs for hours, so this is the one animation on the console that never
@@ -581,20 +704,57 @@ pre.log-view {
 .log-filters { display: flex; gap: 6px; margin-bottom: 10px; flex-wrap: wrap; }
 .log-filters .btn { padding: 4px 12px; font: var(--callout-emphasized); }
 .log-filters .btn[aria-pressed="true"] { background: var(--accentFill); color: var(--onAccentInk); }
+/* These two carry formatted timestamps, and neither declared any overflow
+   behaviour at all, so a narrow column got whatever the initial value happened
+   to do with them. A timestamp is two tokens with a space already between them:
+   break-word wraps there and only splits a token that cannot fit on a line of
+   its own, which is the one thing that should never happen to a clock reading. */
+.log-meta, .milestone-meta { overflow-wrap: break-word; }
 .log-meta { display: flex; gap: 8px 18px; flex-wrap: wrap; margin: -2px 0 10px; font: var(--footnote); color: var(--systemSecondary); font-variant-numeric: tabular-nums; }
 .stage-log-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin-top: 14px; }
 .stage-log-card { min-width: 0; padding: 10px 12px; border-radius: var(--radius-medium); background: var(--systemQuaternary); }
 .stage-log-card strong { display: block; font: var(--callout-emphasized); overflow-wrap: anywhere; }
 .stage-log-card span { display: block; margin-top: 3px; font: var(--footnote); color: var(--systemSecondary); overflow-wrap: anywhere; }
+/* All nine cards were the same grey whatever had happened inside them, so the
+   stage that failed was told apart from the eight that did not by nothing at
+   all. The wash and the ink are the pair the failed chip already uses — one
+   treatment in two places rather than two treatments of one state — and the
+   state word beside them is what a reader who can use neither still gets. */
+.stage-log-card.failed { background: rgba(var(--systemRed-rgb), calc(var(--alpha-multiplier) * .1)); }
+.stage-log-card.failed strong, .stage-log-card.failed .stage-log-state { color: var(--dangerInk); }
+.stage-log-card.done .stage-log-state { color: var(--successInk); }
 @media (max-width: 900px) { .stage-log-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 520px) { .stage-log-grid { grid-template-columns: 1fr; } }
+
+/* ---- build failure report ---- */
+/* The one thing an operator opens a failed build to read used to be the last
+   card on the page, dressed exactly like the eight above it: white ground, no
+   border, --systemPrimary ink, its heading at y=937 in a 900px viewport and at
+   y=2182 of a 3335px document at 375px — below the fold at both. It leads the
+   page now. The danger ink is spent on the edge and on the sentence that says
+   a build failed, and on nothing else: the error text under it is body ink,
+   because it is the evidence and not the alarm. */
+.failure-report {
+  background: var(--pageRaised); border: 1px solid var(--dangerInk);
+  border-radius: var(--radius-large); box-shadow: var(--shadow-small);
+  padding: 16px 20px; margin-bottom: 24px;
+}
+.failure-report h2 { font: var(--title-2-emphasized); color: var(--dangerInk); overflow-wrap: anywhere; }
+.failure-report p { margin-top: 7px; font: var(--body-tall); color: var(--systemPrimary); overflow-wrap: anywhere; }
+.failure-report .failure-remedy { font: var(--callout); color: var(--systemSecondary); }
+/* A pane that rendered nothing under a chip reading "All (2628)" is a claim
+   the reader has no way to check. Chip and pane come from one fetch, so they
+   can only disagree if the render did not land, and a disagreement gets a
+   sentence and a way out of it instead of an empty box. */
+.log-fault { margin: -2px 0 10px; font: var(--callout); color: var(--dangerInk); overflow-wrap: anywhere; }
+.log-fault-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
 
 /* ---- settings sub-navigation ---- */
 .settings-layout { display: flex; gap: 28px; align-items: flex-start; }
 .subnav { width: 190px; flex-shrink: 0; display: flex; flex-direction: column; gap: 2px; position: sticky; top: 20px; }
 .subnav a { display: block; padding: 8px 10px; border-radius: var(--radius-medium); font: var(--body); color: var(--systemPrimary); cursor: pointer; transition: background-color 175ms ease-in; }
 .subnav a:hover { background: var(--systemQuinary); }
-.subnav a[aria-current="true"] { background: rgba(var(--keyColor-rgb), calc(var(--alpha-multiplier) * .08)); color: var(--keyColor); font: var(--body-emphasized); }
+.subnav a[aria-current="true"] { background: rgba(var(--keyColor-rgb), calc(var(--alpha-multiplier) * .08)); color: var(--onTintInk); font: var(--body-emphasized); }
 .subnav .subnav-label { font: var(--subhead-emphasized); text-transform: uppercase; color: var(--systemSecondary); padding: 12px 10px 4px; }
 .settings-panels { flex: 1; min-width: 0; }
 .settings-footer { position: sticky; bottom: 0; padding: 12px 0; background: var(--pageFloor); display: flex; gap: 10px; align-items: center; border-top: var(--keyline); }
@@ -655,6 +815,12 @@ pre.log-view {
 }
 
 /* ---- forced colors ---- */
+/* The status dot is deliberately not rescued below. forced-colors replaces its
+   background with the reader's own palette and every dot goes one colour, which
+   is exactly what a reader who turned the mode on asked for; the status word
+   beside it still says which state it is. forced-color-adjust: none would push
+   the hue back through and take that choice away to restore a channel nothing
+   depends on. */
 /* box-shadow is dropped in forced-colors mode; an outline is not, which is why
    the ring above is an outline. Highlight is named explicitly so the ring
    lands on the system's focus colour rather than on the text colour. */
@@ -755,8 +921,11 @@ var zhCatalogue = map[string]string{
 	"device.approved":                 "已批准。可以安全返回终端。",
 	"device.denied":                   "已拒绝。可以安全关闭此页面。",
 	"common.refresh":                  "刷新",
+	"common.retry":                    "重试",
 	"common.updated":                  "更新于 ",
 	"common.loadfail":                 "加载失败:",
+	"common.loading":                  "正在加载…",
+	"common.never":                    "从未",
 	"th.package":                      "包",
 	"th.version":                      "版本",
 	"th.arch":                         "架构",
@@ -777,6 +946,10 @@ var zhCatalogue = map[string]string{
 	"detail.h1":                       "构建详情",
 	"detail.logs":                     "查看日志",
 	"detail.error":                    "错误信息",
+	"detail.failed":                   "构建失败",
+	"detail.failed.stage":             "构建在%s阶段失败",
+	"detail.remedy.where":             "该项在本控制台设置:",
+	"detail.remedy.env":               "该项由部署环境设置,本控制台不持有:",
 	"detail.livelog":                  "实时日志",
 	"detail.duration":                 "耗时",
 	"detail.delete":                   "删除任务",
@@ -798,6 +971,12 @@ var zhCatalogue = map[string]string{
 	"pipe.sign":                       "隔离签名",
 	"pipe.publish":                    "发布",
 	"pipe.cleanup":                    "释放实例",
+	"stage.done":                      "已完成",
+	"stage.current":                   "进行中",
+	"stage.failed":                    "已失败",
+	"stage.skipped":                   "未开始",
+	"stage.stopped":                   "已取消",
+	"stage.pending":                   "等待中",
 	"filter.all":                      "全部",
 	"filter.queued":                   "排队",
 	"filter.provision":                "供给",
@@ -818,18 +997,23 @@ var zhCatalogue = map[string]string{
 	"logs.h1":                         "构建日志",
 	"logs.back":                       "返回详情",
 	"logs.none":                       "(暂无日志)",
+	"logs.none.filter":                "(该日志中没有属于此阶段的行)",
+	"logs.blank":                      "上次刷新携带了 %s,但此面板一行都没有渲染出来。",
+	"logs.open":                       "打开完整日志",
 	"logs.fail":                       "日志加载失败:",
 	"logs.loading":                    "加载中…",
 	"logs.bytes":                      "日志大小",
 	"logs.generated":                  "刷新时间",
 	"logs.truncated":                  "日志已截断",
 	"logs.last":                       "最后事件",
+	"logs.fault":                      "失败事件",
 	"mon.h1":                          "构建节点",
 	"mon.sub":                         "静态 builder 与云实例",
 	"mon.ledger":                      "任务账本",
 	"mon.ledger.shadow":               "PostgreSQL 任务真源",
 	"mon.ledger.ok":                   "一致",
 	"mon.ledger.degraded":             "异常",
+	"mon.ledger.unreconciled":         "尚未核对",
 	"mon.ledger.legacy":               "进程投影视图 ",
 	"mon.ledger.rows":                 "数据库任务 ",
 	"mon.ledger.repaired":             "最近修复 ",
@@ -870,6 +1054,8 @@ var zhCatalogue = map[string]string{
 	"mon.targets.empty":               "最近 30 天没有终态样本",
 	"mon.targets.samples":             "样本 成功/失败/取消 ",
 	"mon.targets.slo":                 "成功率 / SLO ",
+	"mon.targets.slo.met":             "SLO 达标",
+	"mon.targets.slo.breach":          "SLO 未达标",
 	"mon.targets.latency":             "P50/P95 排队·运行 ",
 	"mon.targets.cost":                "预留/结算成本 ",
 	"mon.targets.failure":             "主要失败分类 ",
@@ -1026,6 +1212,7 @@ var zhCatalogue = map[string]string{
 	"set.testbuild.pkg":               "包名(atom)",
 	"set.testbuild.go":                "发起测试构建",
 	"set.testbuild.saving":            "正在保存设置…",
+	"set.testbuild.busy":              "设置正在保存中,请等其完成后再发起测试构建。",
 	"set.testbuild.submitting":        "正在提交构建…",
 	"set.testbuild.submitted":         "已提交,任务 ",
 	"set.testbuild.view":              "查看构建详情",
@@ -1104,7 +1291,8 @@ var zhCatalogue = map[string]string{
 	"packages.all":                    "全部 Profile",
 	"packages.default":                "默认",
 	"packages.download":               "下载",
-	"packages.none":                   "没有找到匹配的软件包。",
+	"packages.none":                   "没有找到匹配的软件包。请清除搜索词或换一个 Profile。",
+	"packages.empty":                  "公开 Binhost 上还没有已发布的软件包。",
 	"packages.prev":                   "上一页",
 	"packages.next":                   "下一页",
 	"packages.page":                   "第 %d–%d 项",
@@ -1126,12 +1314,15 @@ var zhCatalogue = map[string]string{
 	"docs.verify.note":                "网页中的“已发布”只表示制品进入公开仓库，不能替代客户端签名校验。",
 	"status.h1":                       "服务状态",
 	"status.sub":                      "公开、脱敏的 Portage Engine 服务可用性。",
+	"status.loading":                  "正在读取服务状态…",
 	"status.operational":              "服务运行正常",
 	"status.degraded":                 "部分服务异常",
 	"status.unavailable":              "状态服务不可用",
+	"status.components.empty":         "本次状态快照没有报告任何组件。",
 	"status.updated":                  "更新时间 ",
 	"status.refresh":                  "自动每 30 秒刷新",
 	"status.version":                  "版本 ",
+	"status.version.dev":              "开发构建",
 	"status.component.api":            "Web 与 API",
 	"status.component.repository":     "软件包仓库",
 	"status.component.build":          "构建服务",
@@ -1154,7 +1345,7 @@ var zhCatalogue = map[string]string{
 	"mon.gateway.inventory":           "签发者与证书清单",
 	"mon.gateway.inventory.empty":     "尚未签发任何证书。",
 	"mon.gateway.inventory.recent":    "最近证书 ",
-	"mon.gateway.inventory.error":     "身份清单不可用",
+	"mon.gateway.inventory.error":     "签发者与证书清单不可用;上方的网关数据仍为最新。",
 	"set.sec.security":                "会话与安全",
 	"sec.idp":                         "身份提供商",
 	"sec.idp.hint":                    "上游凭证只交换一次。日常 API 请求只使用短期的 Portage Engine 会话。",
@@ -1195,7 +1386,7 @@ var zhCatalogue = map[string]string{
 	"quota.perjob":                    "/任务",
 	"quota.build":                     "构建时长 ",
 	"quota.minutes":                   " 分钟 UTC",
-	"quota.cloud":                     "云成本 μ ",
+	"quota.cloud":                     "云成本 ",
 	"quota.runtime":                   "个运行中预算",
 	"quota.failures":                  "失败 ",
 	"quota.hour":                      " 每小时",
@@ -1362,6 +1553,49 @@ function peLang() {
 // the OS locale, so a reader who picked English on a zh-CN machine used to get
 // 2026/8/1 in the console and 8/1/2026 on the public pages.
 function peLocaleTag() { return peLang() === 'zh' ? 'zh-CN' : 'en'; }
+// Go's zero time.Time is not a moment, and it is on the wire: a time.Time field
+// serialises as 0001-01-01T00:00:00Z whether or not the event it names has ever
+// happened, and omitempty does not suppress it because a struct is never empty.
+// Put through a locale formatter it came back as 1/1/1, 8:05:43 AM — a
+// plausible clock reading standing in for "never", printed beside the ledger's
+// write-error count, which are exactly the two numbers a reader uses to decide
+// whether the ledger can be trusted. Every formatter on both bundles resolves
+// its value here first, so "this is not an instant" is one state decided in one
+// place rather than a special case pattern-matched inside each formatter. The
+// floor is a year, not that one literal: nothing this product can produce
+// predates the epoch it computes in, and a second zero value would otherwise
+// need a second special case.
+function peInstant(value) {
+  if (value === null || value === undefined || value === '') return null;
+  var moment = new Date(value);
+  if (isNaN(moment)) return null;
+  return moment.getUTCFullYear() < 1900 ? null : moment;
+}
+// loading, empty, filtered-empty, error and partial are one vocabulary, not a
+// judgement each surface makes for itself. Six of them re-derived it and each
+// lost a different member: a filtered result showed the copy that invites you to
+// publish your first package, a failed load rendered into the same box as an
+// account with nothing in it, and a surface with no loading state moved the page
+// when its payload landed. The box is a live region because the swap is the only
+// thing that happens on these routes — a reader who cannot see it is otherwise
+// never told the content changed. 'ok' is the sixth member and the reason the
+// happy path costs nothing: it empties the box and writes no node, so a polling
+// surface holds exactly the geometry it held on the previous poll.
+function pageState(box, state, text) {
+  if (!box) return null;
+  if (box.getAttribute('role') !== 'status') {
+    box.setAttribute('role', 'status');
+    box.setAttribute('aria-live', 'polite');
+  }
+  while (box.firstChild) box.removeChild(box.firstChild);
+  if (state === 'ok') return null;
+  var node = document.createElement('div');
+  node.className = 'empty';
+  node.setAttribute('data-state', state);
+  node.textContent = text;
+  box.appendChild(node);
+  return node;
+}
 function t(key, fallback) {
   var lang = peLang();
   if (lang !== 'en' && I18N[lang] && Object.prototype.hasOwnProperty.call(I18N[lang], key)) return I18N[lang][key];
@@ -1589,10 +1823,23 @@ async function loadProjectPolicySummary(projectID) {
     // The limits that actually stop a build stay resident as meters; the rest
     // sits behind a disclosure, and any folded metric that crosses its warn
     // threshold promotes itself so a near-limit number cannot hide.
-    var mib = function (v) { return (v || 0) + ' MiB'; };
-    var gib = function (v) { return (v || 0) + ' GiB'; };
-    var minutes = Math.ceil((policy.build_seconds_today || 0) / 60);
-    var maxMinutes = Math.ceil((policy.max_daily_build_seconds || 0) / 60);
+    // Every one of these is a plain integer the policy endpoint may not carry \u2014
+    // the phase counters arrive only once the phase executor is out of shadow \u2014
+    // and concatenating a missing one put "cundefined/undefined" in the rail,
+    // which a reader takes for a value rather than for an absent field.
+    var num = function (v) { return Number(v) || 0; };
+    // 131072 MiB is a number an operator has to divide before it means
+    // anything. The reserves arrive in MiB and GiB rather than bytes, so both
+    // go through the one byte formatter and the rail scales its unit the way
+    // the rest of the console already does.
+    var mib = function (v) { return fmtBytes(num(v) * 1024 * 1024); };
+    var gib = function (v) { return fmtBytes(num(v) * 1024 * 1024 * 1024); };
+    // Cloud spend is metered in millionths. "cloud \u03bc 420000 / 1000000" names a
+    // unit nobody operates in; the target cards already publish this same
+    // figure divided down and call it a cost, and this is that figure.
+    var cost = function (v) { return (num(v) / 1000000).toFixed(3); };
+    var minutes = Math.ceil(num(policy.build_seconds_today) / 60);
+    var maxMinutes = Math.ceil(num(policy.max_daily_build_seconds) / 60);
     var meters = [
       { k: t('quota.queued', 'queued '), used: policy.queued_jobs, max: policy.max_queued_jobs, primary: true },
       { k: t('quota.active', 'active '), used: policy.active_jobs, max: policy.max_active_jobs, primary: true },
@@ -1601,24 +1848,24 @@ async function loadProjectPolicySummary(projectID) {
       { k: t('quota.cpu', 'CPU '), used: policy.reserved_vcpus, max: policy.max_active_vcpus },
       { k: t('quota.ram', 'RAM '), used: policy.reserved_memory_mib, max: policy.max_active_memory_mib, fmt: mib },
       { k: t('quota.disk', 'disk '), used: policy.reserved_disk_gib, max: policy.max_active_disk_gib, fmt: gib },
-      { k: t('quota.cloud', 'cloud \u03bc '), used: policy.cloud_cost_microunits_today || 0, max: policy.max_daily_cloud_cost_microunits || 0 },
-      { k: t('quota.failures', 'failures '), used: policy.failures_last_hour || 0, max: policy.max_failures_per_hour || 0 }
+      { k: t('quota.cloud', 'cloud cost '), used: policy.cloud_cost_microunits_today, max: policy.max_daily_cloud_cost_microunits, fmt: cost },
+      { k: t('quota.failures', 'failures '), used: policy.failures_last_hour, max: policy.max_failures_per_hour }
     ];
     var details = [
-      [t('quota.weight', 'weight '), String(policy.priority_weight || 100)],
-      [t('quota.starvation', 'starvation '), (policy.starvation_threshold_seconds || 300) + 's'],
+      [t('quota.weight', 'weight '), String(num(policy.priority_weight) || 100)],
+      [t('quota.starvation', 'starvation '), (num(policy.starvation_threshold_seconds) || 300) + 's'],
       [t('quota.quarantine', 'quarantine '), fmtBytes(policy.quarantine_bytes) + ' (' +
-        policy.active_artifact_budgets + ' ' + t('quota.jobs', 'jobs') + ')'],
-      [t('quota.phases', 'phases '), 'c' + policy.phase_collect_active + '/' + policy.max_phase_collect +
-        ' p' + policy.phase_provision_active + '/' + policy.max_phase_provision +
-        ' b' + policy.phase_build_active + '/' + policy.max_phase_build +
-        ' v' + policy.phase_verify_active + '/' + policy.max_phase_verify +
-        ' pub' + policy.phase_publish_active + '/' + policy.max_phase_publish],
-      [t('quota.plans', 'plans active '), policy.phase_work_active + t('quota.shadow', ' shadow ') + policy.phase_work_shadow],
-      [t('quota.work', 'work ready '), policy.phase_work_ready +
-        t('quota.unschedulable', ' unschedulable ') + (policy.phase_work_unschedulable || 0) +
-        t('quota.claimed', ' claimed ') + policy.phase_work_claimed +
-        t('quota.blocked', ' blocked ') + policy.phase_work_blocked]
+        num(policy.active_artifact_budgets) + ' ' + t('quota.jobs', 'jobs') + ')'],
+      [t('quota.phases', 'phases '), 'c' + num(policy.phase_collect_active) + '/' + num(policy.max_phase_collect) +
+        ' p' + num(policy.phase_provision_active) + '/' + num(policy.max_phase_provision) +
+        ' b' + num(policy.phase_build_active) + '/' + num(policy.max_phase_build) +
+        ' v' + num(policy.phase_verify_active) + '/' + num(policy.max_phase_verify) +
+        ' pub' + num(policy.phase_publish_active) + '/' + num(policy.max_phase_publish)],
+      [t('quota.plans', 'plans active '), num(policy.phase_work_active) + t('quota.shadow', ' shadow ') + num(policy.phase_work_shadow)],
+      [t('quota.work', 'work ready '), num(policy.phase_work_ready) +
+        t('quota.unschedulable', ' unschedulable ') + num(policy.phase_work_unschedulable) +
+        t('quota.claimed', ' claimed ') + num(policy.phase_work_claimed) +
+        t('quota.blocked', ' blocked ') + num(policy.phase_work_blocked)]
     ];
 
     summary.removeAttribute('data-i18n');
@@ -1653,7 +1900,12 @@ async function loadProjectPolicySummary(projectID) {
       var bar = document.createElement('span');
       bar.className = 'quota-bar';
       var fill = document.createElement('i');
-      fill.style.width = Math.min(100, Math.round(ratio * 100)) + '%';
+      // A reservation that exists reads as a bar that exists. Rounding alone
+      // sent everything under half a percent to 0% — one vCPU against a
+      // 512-vCPU ceiling drew the same empty track as no reservation at all.
+      fill.style.width = used > 0
+        ? Math.max(2, Math.min(100, Math.round(ratio * 100))) + '%'
+        : '0';
       bar.appendChild(fill);
       row.appendChild(k); row.appendChild(v); row.appendChild(bar);
       summary.appendChild(row);
@@ -1692,12 +1944,16 @@ function hasProjectRole(required) {
   return false;
 }
 var iamReady = initIAMContext();
-function fmtTime(s) {
-  if (!s) return '-';
-  var d = new Date(s);
+// absent is what a caller whose field names an event ("last checked", "last
+// reconciled") passes so the answer is the word "never" rather than a dash: a
+// dash says the cell is blank, which is a different fact. Everything else keeps
+// the dash, and nothing keeps the fabricated date peInstant now refuses.
+function fmtTime(s, absent) {
+  var moment = peInstant(s);
   // The app locale, never the browser default: a reader who picked English on
   // a zh-CN machine used to get 2026/8/1 here and 8/1/2026 on the public pages.
-  return isNaN(d) ? String(s) : d.toLocaleString(peLocaleTag());
+  if (moment) return moment.toLocaleString(peLocaleTag());
+  return absent !== undefined ? absent : '-';
 }
 function fmtBytes(n) {
   n = Number(n || 0);
@@ -1708,8 +1964,11 @@ function fmtBytes(n) {
   return (i === 0 ? String(Math.round(n)) : n.toFixed(n >= 10 ? 1 : 2)) + ' ' + units[i];
 }
 function fmtTimeRange(start, end) {
-  if (!start || !end) return '-';
-  var ms = new Date(end) - new Date(start);
+  // Both ends through the same guard: a zero time.Time at one of them measured
+  // a step that has not run yet as two thousand years long.
+  var from = peInstant(start), to = peInstant(end);
+  if (!from || !to) return '-';
+  var ms = to - from;
   if (!isFinite(ms) || ms < 0) return '-';
   var sec = Math.floor(ms / 1000);
   var h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
@@ -1734,11 +1993,23 @@ function statusLabel(s) {
   if (entry && peLang() === 'zh' && entry.zh) return entry.zh;
   return s || '-';
 }
+// The third reader of the same table, for a value that carries an outcome
+// rather than a badge that does. The token block declares --successInk and
+// --dangerInk for exactly this; the SLO verdict and the write-error count were
+// arriving in --systemSecondary at 400 weight, byte-identical to the cost
+// figure beside them that concludes nothing. Taking the ink from the status
+// token rather than from a comparison written at the call site is also what
+// stops a card headlining "consistent" two lines above "write errors 19": one
+// judgement, read by the badge and by the number under it.
+function verdictInk(node, token) {
+  var entry = STATUS_VOCABULARY[token];
+  node.classList.add('verdict');
+  node.setAttribute('data-verdict', entry ? entry.color : 'gray');
+  return node;
+}
 function showError(containerId, err) {
-  var c = document.getElementById(containerId);
-  if (!c) return;
-  clear(c);
-  c.appendChild(el('div', 'empty', t('common.loadfail', 'Failed to load: ') + err.message));
+  pageState(document.getElementById(containerId), 'error',
+    t('common.loadfail', 'Failed to load: ') + err.message);
 }
 // An action control is idempotent from the user's side. aria-disabled plus a
 // handler guard, never plain disabled: disabled drops the control out of the
@@ -1874,9 +2145,18 @@ async function publicJSON(path) {
   if (!response.ok) throw new Error('HTTP ' + response.status);
   return response.json();
 }
+// The same instant guard the console uses, plus the zone. A public status page
+// is read by people in other timezones than the server's, and a bare clock
+// reading with nothing naming the zone is a reading they cannot compare against
+// their own outage. dateStyle/timeStyle cannot be combined with timeZoneName,
+// so the components are spelled out.
 function fmtPublicTime(value) {
-  var date = new Date(value);
-  return isNaN(date) ? '-' : date.toLocaleString(peLocaleTag());
+  var moment = peInstant(value);
+  if (!moment) return t('common.never', 'never');
+  return moment.toLocaleString(peLocaleTag(), {
+    year: 'numeric', month: 'short', day: 'numeric',
+    hour: '2-digit', minute: '2-digit', timeZoneName: 'short'
+  });
 }
 function fmtPublicText(key, fallback) {
   var text = t(key, fallback);
@@ -2028,12 +2308,16 @@ var loginHTML = localize(`<!DOCTYPE html>
     <form id="login-form" data-return-to="{{.ReturnTo}}">
     <div class="field">
       <label for="u" data-i18n="login.user">Username</label>
-      <input type="text" id="u" autocomplete="username" autocapitalize="off" autocorrect="off" spellcheck="false">
+      <input type="text" id="u" autocomplete="username" autocapitalize="off" autocorrect="off" spellcheck="false" aria-describedby="err">
     </div>
     <div class="field">
       <label for="p" data-i18n="login.pass">Password</label>
-      <input type="password" id="p" autocomplete="current-password">
+      <input type="password" id="p" autocomplete="current-password" aria-describedby="err">
     </div>
+    <!-- The rejection is about the pair, not about one box, so both inputs
+         describe themselves with it; without the association it was a
+         sentence sitting under a form rather than an answer to the field the
+         reader is standing in. -->
     <p class="auth-err" id="err" role="status"></p>
     <button class="btn blue" type="submit" data-i18n="login.submit">Sign In</button>
     </form>
@@ -2056,7 +2340,17 @@ document.getElementById('login-form').addEventListener('submit', async function 
   var submit = document.querySelector('#login-form button[type=submit]');
   submit.setAttribute('aria-disabled', 'true');
   var err = document.getElementById('err');
+  var credentials = [document.getElementById('u'), document.getElementById('p')];
+  // aria-invalid is the half of the association the markup cannot carry: the
+  // describedby link is static, whether the pair is currently rejected is not.
+  function markCredentials(invalid) {
+    credentials.forEach(function (input) {
+      if (invalid) input.setAttribute('aria-invalid', 'true');
+      else input.removeAttribute('aria-invalid');
+    });
+  }
   err.textContent = '';
+  markCredentials(false);
   try {
 	var returnTo = document.getElementById('login-form').getAttribute('data-return-to') || '';
 	var loginURL = '/login' + (returnTo ? '?return_to=' + encodeURIComponent(returnTo) : '');
@@ -2071,11 +2365,17 @@ document.getElementById('login-form').addEventListener('submit', async function 
     if (!r.ok) {
       err.textContent = r.status === 401 ? t('login.badcreds', 'Wrong username or password')
                                          : t('login.fail', 'Sign-in failed') + ' (HTTP ' + r.status + ')';
+      markCredentials(true);
+      credentials[0].focus();
       return;
     }
 	var result = await r.json();
     location.href = result.redirect_to || '/overview';
-  } catch (ex) { err.textContent = t('login.neterr', 'Network error: ') + ex.message; }
+  } catch (ex) {
+    err.textContent = t('login.neterr', 'Network error: ') + ex.message;
+    markCredentials(true);
+    credentials[0].focus();
+  }
   finally { loginPending = false; submit.setAttribute('aria-disabled', 'false'); }
 });
 {{end}}
@@ -2277,7 +2577,7 @@ const overviewContent = `
 <div class="stat-grid" id="stats"></div>
 <h2 class="section-title" data-i18n="ov.recent">Recent Builds</h2>
 <div class="card">
-  <div class="table-scroll"><table class="list" aria-label="Recent builds">
+  <div class="table-scroll" tabindex="0" role="region" aria-label="Recent builds"><table class="list" data-cols="5" aria-label="Recent builds">
     <thead><tr>
       <th data-i18n="th.package">Package</th><th data-i18n="th.version">Version</th>
       <th data-i18n="th.arch">Arch</th><th data-i18n="th.status">Status</th>
@@ -2314,8 +2614,10 @@ async function load() {
     if (!Array.isArray(builds)) builds = builds.builds || [];
     var tb = document.getElementById('recent');
     var emptyBox = document.getElementById('recent-empty');
-    clear(tb); clear(emptyBox);
-    if (!builds.length) { emptyBox.appendChild(el('div', 'empty', t('ov.empty', 'No builds yet. Submit one with portage-client build.'))); return; }
+    clear(tb);
+    pageState(emptyBox, builds.length ? 'ok' : 'empty',
+      t('ov.empty', 'No builds yet. Submit one with portage-client build.'));
+    if (!builds.length) return;
     builds.forEach(function (b) {
       var tr = el('tr');
       var pkg = el('td');
@@ -2350,7 +2652,7 @@ const buildsContent = `
   </div>
 </div>
 <div class="card">
-  <div class="table-scroll"><table class="list" aria-label="Builds">
+  <div class="table-scroll" tabindex="0" role="region" aria-label="Builds"><table class="list" data-cols="7" aria-label="Builds">
     <thead><tr>
       <th data-i18n="th.package">Package</th><th data-i18n="th.version">Version</th>
       <th data-i18n="th.arch">Arch</th><th data-i18n="th.status">Status</th>
@@ -2371,8 +2673,10 @@ async function load() {
       plural('builds.count', builds.length, {one: '%d job total', other: '%d jobs total'});
     var tb = document.getElementById('rows');
     var emptyBox = document.getElementById('empty');
-    clear(tb); clear(emptyBox);
-    if (!builds.length) { emptyBox.appendChild(el('div', 'empty', t('builds.empty', 'No builds yet.'))); return; }
+    clear(tb);
+    pageState(emptyBox, builds.length ? 'ok' : 'empty',
+      t('builds.empty', 'No builds yet.'));
+    if (!builds.length) return;
     builds.forEach(function (b) {
       var tr = el('tr');
       var pkg = el('td');
@@ -2420,20 +2724,27 @@ const buildDetailContent = `
     <button class="btn" id="refresh" data-i18n="common.refresh">Refresh</button>
   </div>
 </div>
+<!-- The failure report is markup and not a node the script appends, so its
+     place in the reading order is fixed at first paint: whatever else the page
+     is still fetching, the sentence a failed build was opened to read is the
+     first thing under the title. Its own text is written from the payload,
+     which is why it carries no data-i18n slot. -->
+<section class="failure-report" id="failure" hidden aria-labelledby="failure-title">
+  <h2 id="failure-title"></h2>
+  <p id="failure-text"></p>
+  <p class="failure-remedy" id="failure-remedy" hidden></p>
+</section>
 <div class="card"><div class="card-pad">
-  <div class="pipeline" id="pipeline" aria-label="Build pipeline"></div>
+  <div class="pipeline" id="pipeline" role="group" aria-label="Build pipeline"></div>
   <div class="stage-log-grid" id="stage-log-summary"></div>
 </div></div>
 <div class="stat-grid" id="meta"></div>
-<div class="card" id="err-card" style="display:none">
-  <h3 class="card-title" data-i18n="detail.error">Error</h3>
-  <div class="card-pad"><pre class="log-view" id="err-text"></pre></div>
-</div>
 <div class="card">
   <h3 class="card-title" data-i18n="detail.livelog">Live Log</h3>
   <div class="card-pad">
     <div class="log-filters" id="log-filters"></div>
     <div class="log-meta" id="live-log-meta"></div>
+    <div class="log-fault" id="live-log-fault" hidden></div>
     <pre class="log-view" id="live-log">…</pre>
   </div>
 </div>`
@@ -2451,10 +2762,14 @@ function fmtDuration(ms) {
 }
 function durationTile(b) {
   var terminal = b.status === 'failed' || b.status === 'completed' || b.status === 'success' || b.status === 'canceled';
-  var end = terminal ? new Date(b.updated_at) : new Date();
+  // A duration is a subtraction, which is the one place an unresolvable
+  // timestamp does not announce itself: a zero created_at read as a job that
+  // had been running since the year one, and the tile said so to three digits.
+  var started = peInstant(b.created_at);
+  var end = terminal ? peInstant(b.updated_at) : new Date();
   var tle = el('div', 'stat-tile');
   tle.appendChild(el('h4', null, t('detail.duration', 'Duration')));
-  var v = el('div', 'num', fmtDuration(end - new Date(b.created_at)));
+  var v = el('div', 'num', (started && end) ? fmtDuration(end - started) : '-');
   v.id = 'duration-num';
   v.style.font = 'var(--title-3-emphasized)';
   v.style.fontVariantNumeric = 'tabular-nums';
@@ -2466,7 +2781,8 @@ setInterval(function () {
   if (!n || !lastDetail) return;
   var b = lastDetail;
   var terminal = b.status === 'failed' || b.status === 'completed' || b.status === 'success' || b.status === 'canceled';
-  if (!terminal) n.textContent = fmtDuration(new Date() - new Date(b.created_at));
+  var started = peInstant(b.created_at);
+  if (!terminal && started) n.textContent = fmtDuration(new Date() - started);
 }, 1000);
 function metaTile(labelKey, labelEN, node, wrap) {
   var tle = el('div', 'stat-tile');
@@ -2486,6 +2802,7 @@ function basename(p) { var i = (p || '').lastIndexOf('/'); return i >= 0 ? p.sli
 async function load() {
   try {
     var b = await api('/api/builds/detail?job_id=' + encodeURIComponent(jobID));
+    lastDetail = b;
     if (b.package_name) document.getElementById('title').textContent = b.package_name + (b.version ? ' ' + b.version : '');
     var g = document.getElementById('meta');
     clear(g);
@@ -2493,7 +2810,6 @@ async function load() {
     g.appendChild(metaTile('detail.arch', 'Arch', b.arch || '-'));
     g.appendChild(metaTile('detail.created', 'Created', fmtTime(b.created_at)));
     g.appendChild(metaTile('detail.updated', 'Updated', fmtTime(b.updated_at)));
-    lastDetail = b;
     g.appendChild(durationTile(b));
     if (b.instance_id) g.appendChild(metaTile('detail.instance', 'Instance', b.instance_id, true));
     var resolved = b.resolved_context || {};
@@ -2535,12 +2851,14 @@ async function load() {
     delBtn.style.display = terminal && canMaintain ? '' : 'none';
     retryBtn.style.display = canMaintain && (b.status === 'failed' || b.status === 'canceled') ? '' : 'none';
     cancelBtn.style.display = !terminal && canMaintain ? '' : 'none';
-    var errCard = document.getElementById('err-card');
-    if (b.error) { errCard.style.display = ''; document.getElementById('err-text').textContent = b.error; }
-    else errCard.style.display = 'none';
+    renderJobState();
   } catch (e) { showError('meta', e); }
 }
-function onLangChange() { load(); renderLogs(); }
+function onLangChange() {
+  lastFailureSignature = null;
+  lastLogFaultReason = null;
+  load(); renderFilters(); renderLogs(); renderJobState();
+}
 
 var STAGES = [
   { key: 'queued',    en: 'Queued' },
@@ -2570,58 +2888,123 @@ var activeFilter = 'all';
 var lastLogText = '';
 var lastLogStages = [];
 var lastLogMetadata = {};
+var lastLogLoadError = null;
+var lastLogFaultReason = null;
+var lastFailureSignature = null;
+var lastRevealedStage = -1;
 
+// One table for the six things a stage can be, for the same reason the status
+// vocabulary is one table: the chip and the card below it used to be two
+// independent readings of the same log, and an unrecognised state falls to its
+// own raw name rather than to whichever branch happened to be last.
+var STAGE_STATE_WORDS = {
+  done:    { key: 'stage.done',    en: 'completed' },
+  current: { key: 'stage.current', en: 'running' },
+  failed:  { key: 'stage.failed',  en: 'failed' },
+  skipped: { key: 'stage.skipped', en: 'never started' },
+  stopped: { key: 'stage.stopped', en: 'canceled' },
+  pending: { key: 'stage.pending', en: 'pending' }
+};
+function stageStateWord(state) {
+  var entry = STAGE_STATE_WORDS[state];
+  return entry ? t(entry.key, entry.en) : state;
+}
 function stageState(idx, reachedIdx, status, failedIdx, cleanupDone) {
   var terminal = status === 'completed' || status === 'success';
   if (terminal) return 'done';
-  if (status === 'failed') {
-    if (failedIdx >= 0) {
-      if (idx === failedIdx) return 'failed';
-      if (idx < failedIdx) return 'done';
-      // The release stage still runs after a failure.
-      if (STAGES[idx].key === 'cleanup' && cleanupDone) return 'done';
-      return 'pending';
-    }
-    return idx === reachedIdx ? 'failed' : (idx < reachedIdx ? 'done' : 'pending');
+  // Nothing is queued behind a job that stopped. Everything past the stopping
+  // point read "pending" before, which is the word for a stage still waiting
+  // its turn on a job that is still running — it said the pipeline was about
+  // to carry on from the stage it had just failed in. Release is the one
+  // exception: it runs whatever happened, so it is read from the log rather
+  // than from its position in the row.
+  if (status === 'failed' || status === 'canceled') {
+    var stopIdx = status === 'failed' && failedIdx >= 0 ? failedIdx : reachedIdx;
+    if (STAGES[idx].key === 'cleanup') return cleanupDone ? 'done' : 'skipped';
+    if (idx === stopIdx) return status === 'failed' ? 'failed' : 'stopped';
+    // A failure can be recorded against a stage whose marker never reached the
+    // log, so position alone cannot say a stage ran: the markers do.
+    if (idx < stopIdx) return idx <= reachedIdx ? 'done' : 'skipped';
+    return 'skipped';
   }
   if (idx < reachedIdx) return 'done';
   if (idx === reachedIdx) return 'current';
   return 'pending';
 }
 var STATUS_STAGE = { queued: 0, claimed: 0, provisioning: 1, deploying: 2, forwarding: 3, building: 3, collecting: 4, verifying: 5, signing: 6, publishing: 7 };
-function renderPipeline(logText, status, failedStage) {
+// One reading of what each of the nine stages is, taken from the job detail and
+// the log together and handed to everything that draws them.
+function stageStates() {
+  var b = lastDetail || {};
+  var status = b.status || '';
   var reached = 0;
   for (var i = 0; i < STAGES.length; i++) {
-    if (STAGES[i].marker && logText.indexOf(STAGES[i].marker) !== -1) reached = i;
+    if (STAGES[i].marker && lastLogText.indexOf(STAGES[i].marker) !== -1) reached = i;
   }
   // Status is authoritative when it maps further than the (possibly truncated)
   // log markers.
   if (STATUS_STAGE[status] !== undefined && STATUS_STAGE[status] > reached) reached = STATUS_STAGE[status];
   if (status === 'completed' || status === 'success') reached = STAGES.length - 1;
   var failedIdx = -1;
-  if (failedStage) {
-    for (var j = 0; j < STAGES.length; j++) if (STAGES[j].key === failedStage) failedIdx = j;
+  if (b.failed_stage) {
+    for (var j = 0; j < STAGES.length; j++) if (STAGES[j].key === b.failed_stage) failedIdx = j;
   }
-  var cleanupDone = logText.indexOf('[cleanup]') !== -1;
+  var cleanupDone = lastLogText.indexOf('[cleanup]') !== -1;
+  var states = [];
+  for (var k = 0; k < STAGES.length; k++) {
+    states.push(stageState(k, reached, status, failedIdx, cleanupDone));
+  }
+  return states;
+}
+// Pan the pipeline's own box, never the page: scrollIntoView() would also move
+// the document, and the thing an operator must not lose sight of on a failed
+// build is the report above this row. A wrapped row does not scroll at all, so
+// this is the floor for the widths where it still does.
+function revealStage(wrap, node) {
+  if (!node || wrap.scrollWidth <= wrap.clientWidth) return;
+  var target = node.offsetLeft - (wrap.clientWidth - node.offsetWidth) / 2;
+  wrap.scrollLeft = Math.max(0, Math.min(target, wrap.scrollWidth - wrap.clientWidth));
+}
+function renderPipeline() {
+  var states = stageStates();
   var wrap = document.getElementById('pipeline');
   clear(wrap);
   STAGES.forEach(function (s, i) {
-    var stage = el('span', 'pipe-stage ' + stageState(i, reached, status, failedIdx, cleanupDone));
+    var stage = el('span', 'pipe-stage ' + states[i]);
     var chip = el('span', 'pipe-chip');
     chip.appendChild(el('span', 'dot'));
     chip.appendChild(el('span', null, t('pipe.' + s.key, s.en)));
+    chip.appendChild(el('span', 'pipe-state', stageStateWord(states[i])));
     stage.appendChild(chip);
+    // The connector belongs to the stage it leaves, so a wrapped row can never
+    // open with an arrow pointing at nothing.
+    if (i < STAGES.length - 1) stage.appendChild(el('span', 'pipe-arrow'));
     wrap.appendChild(stage);
-    if (i < STAGES.length - 1) wrap.appendChild(el('span', 'pipe-arrow'));
   });
+  var focus = states.indexOf('failed');
+  if (focus < 0) focus = states.indexOf('current');
+  // Only when it changes: this repaints every five seconds and a row that
+  // re-pans itself on every poll moves under the reader.
+  if (focus >= 0 && focus !== lastRevealedStage) {
+    lastRevealedStage = focus;
+    revealStage(wrap, wrap.children[focus]);
+  }
+}
+function countLogLines(text) {
+  return text.split('\n').filter(function (line) { return line.trim(); }).length;
+}
+// The number on a filter chip, and the number the pane is held to.
+function filterLineCount(f) {
+  if (!f) return 0;
+  if (f.key === 'all') return countLogLines(lastLogText);
+  var stage = lastLogStages.filter(function (item) { return item.id === (f.stage || f.key); })[0];
+  return (stage || {}).line_count || 0;
 }
 function renderFilters() {
   var box = document.getElementById('log-filters');
   clear(box);
   FILTERS.forEach(function (f) {
-    var count = f.key === 'all'
-      ? lastLogText.split('\n').filter(function (line) { return line.trim(); }).length
-      : ((lastLogStages.filter(function (stage) { return stage.id === (f.stage || f.key); })[0] || {}).line_count || 0);
+    var count = filterLineCount(f);
     var b = el('button', 'btn', t('filter.' + f.key, f.en) + ' (' + count + ')');
     b.type = 'button';
     b.setAttribute('aria-pressed', activeFilter === f.key ? 'true' : 'false');
@@ -2629,19 +3012,128 @@ function renderFilters() {
     box.appendChild(b);
   });
 }
+// The builder writes every event through one appender, so a log line carries
+// no level to read: "[publish] artifact promotion failed: …" and "[publish]
+// artifact byte gate passed: …" are the same shape, and taking the last line
+// of a stage put a PASSING message on the card of the stage that failed. These
+// are the words the control plane writes when a step reports a failure, in one
+// table so the next word is added here rather than branched around.
+var FAILURE_WORDS = ['failed', 'failure', 'error', 'rejected', 'denied', 'refused',
+  'aborted', 'timed out', 'unavailable', 'not configured', 'is disabled'];
+function lastFailureLine(stageID) {
+  var marker = '[' + stageID + ']';
+  var lines = lastLogText.split('\n');
+  var warning = '';
+  for (var i = lines.length - 1; i >= 0; i--) {
+    if (lines[i].indexOf(marker) === -1) continue;
+    var lower = lines[i].toLowerCase();
+    var carries = FAILURE_WORDS.some(function (word) { return lower.indexOf(word) !== -1; });
+    if (!carries) continue;
+    // A warning is a step that carried on regardless; it is the answer only
+    // when the stage reported nothing worse than itself.
+    if (lower.indexOf('warning:') !== -1) { if (!warning) warning = lines[i]; continue; }
+    return lines[i];
+  }
+  return warning;
+}
 function renderStageLogSummary() {
   var box = document.getElementById('stage-log-summary');
+  var states = stageStates();
   clear(box);
   lastLogStages.forEach(function (stage) {
-    var def = STAGES.filter(function (item) { return item.key === stage.id; })[0];
-    var card = el('div', 'stage-log-card');
+    var index = -1;
+    for (var i = 0; i < STAGES.length; i++) if (STAGES[i].key === stage.id) index = i;
+    var state = index >= 0 ? states[index] : 'pending';
+    var def = STAGES[index];
+    var card = el('div', 'stage-log-card ' + state);
     card.appendChild(el('strong', null, t('pipe.' + stage.id, def ? def.en : stage.id)));
+    card.appendChild(el('span', 'stage-log-state', stageStateWord(state)));
     var timing = plural('logs.lines', stage.line_count || 0, {one: '%d line', other: '%d lines'});
     if (stage.started_at && stage.updated_at) timing += ' · ' + fmtTimeRange(stage.started_at, stage.updated_at);
     card.appendChild(el('span', null, timing));
-    if (stage.last_message) card.appendChild(el('span', null, t('logs.last', 'Last event') + ': ' + stage.last_message.slice(0, 180)));
+    // On the stage that failed, the failure is the event worth carrying; the
+    // job's own error stands in when the stage logged nothing that says so.
+    var message = stage.last_message;
+    var label = t('logs.last', 'Last event');
+    if (state === 'failed') {
+      message = lastFailureLine(stage.id) || (lastDetail || {}).error || stage.last_message;
+      label = t('logs.fault', 'Failure');
+    }
+    if (message) card.appendChild(el('span', null, label + ': ' + message.slice(0, 180)));
     box.appendChild(card);
   });
+}
+// An error string is the only machine-readable thing a failure hands the
+// console, so each entry matches the token inside it that names the value —
+// the deployment key the control plane refused on, or the sentence the storage
+// layer answers with — and then says where that value is written. Two shapes,
+// because the console owns some of these settings and not others: a panel it
+// can link to, or a deployment key it can only name. Linking to a field that is
+// not there would send the reader somewhere the value is not.
+var ERROR_REMEDIES = [
+  { match: 'SERVER_CALLBACK_URL', panel: 'net', field: 'set.callback', fieldEN: 'Callback URL',
+    section: 'set.sec.net', sectionEN: 'Network & Delivery' },
+  { match: 'CLOUD_BUILDER_BINARY_URL', panel: 'net', field: 'set.binurl', fieldEN: 'Builder binary URL (optional)',
+    section: 'set.sec.net', sectionEN: 'Network & Delivery' },
+  { match: 'CLOUD_SSH_KEY_PATH', panel: 'ssh', field: 'set.keypath', fieldEN: 'Private key path',
+    section: 'set.sec.ssh', sectionEN: 'SSH Keys' },
+  { match: 'S3 object deletion is disabled', env: 'STORAGE_S3_ALLOW_DELETE' }
+];
+function renderRemedy(box, message) {
+  clear(box);
+  var remedy = null;
+  for (var i = 0; i < ERROR_REMEDIES.length && !remedy; i++) {
+    if (message.indexOf(ERROR_REMEDIES[i].match) !== -1) remedy = ERROR_REMEDIES[i];
+  }
+  if (!remedy) { box.hidden = true; return; }
+  if (remedy.env) {
+    box.appendChild(el('span', null, t('detail.remedy.env',
+      'Set by the deployment and not by this console: ')));
+    box.appendChild(el('span', 'mono', remedy.env));
+    box.hidden = false;
+    return;
+  }
+  var label = t(remedy.field, remedy.fieldEN) + ' · ' + t(remedy.section, remedy.sectionEN);
+  box.appendChild(el('span', null, t('detail.remedy.where', 'Set in this console: ')));
+  // Settings is a system-admin route, so a reader without that capability gets
+  // the name of the field and no link — the same fail-closed rule the nav runs.
+  if (window.peIAM && window.peIAM.principal && window.peIAM.principal.system_admin) {
+    var link = el('a', null, label);
+    link.href = '/settings#' + remedy.panel;
+    box.appendChild(link);
+  } else {
+    box.appendChild(el('span', null, label));
+  }
+  box.hidden = false;
+}
+function renderFailure() {
+  var box = document.getElementById('failure');
+  var b = lastDetail || {};
+  var message = b.error || '';
+  // Written only when the failure itself changed. This page repaints every five
+  // seconds, and a block that rewrites its own text on every poll moves the
+  // reading position of anyone standing in it.
+  var signature = JSON.stringify([b.status || '', b.failed_stage || '', message, peLang()]);
+  if (signature === lastFailureSignature) return;
+  lastFailureSignature = signature;
+  if (!message) { box.hidden = true; return; }
+  var def = STAGES.filter(function (s) { return s.key === b.failed_stage; })[0];
+  var title = document.getElementById('failure-title');
+  if (b.status !== 'failed') title.textContent = t('detail.error', 'Error');
+  else if (def) title.textContent = t('detail.failed.stage', 'Build failed during %s')
+    .replace('%s', t('pipe.' + def.key, def.en));
+  else title.textContent = t('detail.failed', 'Build failed');
+  document.getElementById('failure-text').textContent = message;
+  renderRemedy(document.getElementById('failure-remedy'), message);
+  box.hidden = false;
+}
+// The pipeline, the nine cards under it and the failure report read the same
+// two payloads, so they are painted together rather than by whichever fetch
+// answered last.
+function renderJobState() {
+  renderPipeline();
+  renderStageLogSummary();
+  renderFailure();
 }
 function renderLogMetadata() {
   var box = document.getElementById('live-log-meta');
@@ -2649,6 +3141,38 @@ function renderLogMetadata() {
   box.appendChild(el('span', null, t('logs.bytes', 'Log size') + ': ' + fmtBytes(lastLogMetadata.bytes)));
   if (lastLogMetadata.generated_at) box.appendChild(el('span', null, t('logs.generated', 'Refreshed') + ': ' + fmtTime(lastLogMetadata.generated_at)));
   if (lastLogMetadata.truncated) box.appendChild(el('span', null, t('logs.truncated', 'Log truncated')));
+}
+// The chip above this pane and the pane itself are drawn from one payload, so
+// they cannot disagree unless the render did not land — and an empty box under
+// a chip reading "All (2628)" is a claim the reader has no way to check. This
+// is the floor: the two are compared after every render, and a disagreement,
+// like a fetch that never answered, is an error with a way out of it.
+function reportLogFault(renderedLength) {
+  var box = document.getElementById('live-log-fault');
+  var counted = filterLineCount(FILTERS.filter(function (x) { return x.key === activeFilter; })[0]);
+  var reason = '';
+  if (lastLogLoadError) reason = t('logs.fail', 'Failed to load logs: ') + lastLogLoadError;
+  else if (counted > 0 && renderedLength === 0) {
+    reason = t('logs.blank', 'The last refresh carried %s and this pane rendered none of them.')
+      .replace('%s', plural('logs.lines', counted, {one: '%d line', other: '%d lines'}));
+  }
+  // Rebuilt only when the sentence changes: the retry below is a control, and a
+  // control replaced every five seconds is a control nobody can press.
+  if (reason === lastLogFaultReason) return;
+  lastLogFaultReason = reason;
+  clear(box);
+  if (!reason) { box.hidden = true; return; }
+  box.appendChild(el('p', null, reason));
+  var actions = el('div', 'log-fault-actions');
+  var retry = el('button', 'btn', t('common.retry', 'Retry'));
+  retry.type = 'button';
+  guardAction(retry, async function () { await loadLogs(); });
+  actions.appendChild(retry);
+  var full = el('a', 'btn', t('logs.open', 'Open the full log'));
+  full.href = '/logs/' + encodeURIComponent(jobID);
+  actions.appendChild(full);
+  box.appendChild(actions);
+  box.hidden = false;
 }
 function renderLogs() {
   var pre = document.getElementById('live-log');
@@ -2661,22 +3185,37 @@ function renderLogs() {
     });
   }
   var atBottom = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 40;
-  pre.textContent = lines.join('\n') || t('logs.none', '(no logs yet)');
+  var text = lines.join('\n');
+  // A filter that selects nothing out of a log that exists is a different
+  // sentence from a job that has not logged anything yet.
+  pre.textContent = text || (lastLogText
+    ? t('logs.none.filter', '(no line in this log belongs to this stage)')
+    : t('logs.none', '(no logs yet)'));
   if (atBottom) pre.scrollTop = pre.scrollHeight;
+  // Measured off the node and not off the string handed to it: the case the
+  // floor exists for is the one where those two are not the same thing.
+  reportLogFault(text ? pre.textContent.length : 0);
 }
 async function loadLogs() {
   try {
     var r = await api('/api/builds/logs?job_id=' + encodeURIComponent(jobID));
+    lastLogLoadError = null;
     lastLogText = r.logs || '';
     lastLogStages = r.stages || [];
     lastLogMetadata = r;
-    renderFilters();
-    renderLogs();
-    renderStageLogSummary();
-    renderLogMetadata();
-    var d = await api('/api/builds/detail?job_id=' + encodeURIComponent(jobID));
-    renderPipeline(lastLogText, d.status, d.failed_stage);
-  } catch (e) { /* next tick */ }
+  } catch (e) {
+    // Never silent. The poll retries on its own either way; what changed is
+    // that the reader is told it is retrying instead of being left watching a
+    // box that renders nothing and explains nothing.
+    lastLogLoadError = e.message;
+  }
+  renderFilters();
+  renderLogs();
+  renderLogMetadata();
+  try {
+    lastDetail = await api('/api/builds/detail?job_id=' + encodeURIComponent(jobID));
+  } catch (e) { /* the detail poll owns that surface and reports it there */ }
+  renderJobState();
 }
 renderFilters();
 guardAction(document.getElementById('delete-job'), async function () {
@@ -2848,7 +3387,7 @@ const monitorContent = `
 <div id="builders-empty"></div>
 <h2 class="section-title" data-i18n="mon.instances">Cloud Instances</h2>
 <div class="card">
-  <div class="table-scroll"><table class="list" aria-label="Cloud instances">
+  <div class="table-scroll" tabindex="0" role="region" aria-label="Cloud instances"><table class="list" data-cols="6" aria-label="Cloud instances">
     <thead><tr>
       <th data-i18n="th.instance">Instance</th><th data-i18n="th.provider">Provider</th>
       <th data-i18n="th.status">Status</th><th data-i18n="th.ip">IP</th>
@@ -2862,10 +3401,16 @@ const monitorContent = `
 const monitorJS = `
 // A counter whose digit count changes moves everything after it: tabular-nums
 // equalises digit WIDTH only, so the reserve has to be an element with a
-// minimum width of its own. That is all this wrapper exists for.
-function metaCount(box, key, en, value) {
+// minimum width of its own. token is the second thing this wrapper carries: a
+// count that answers a question ("did any write fail?") is a conclusion, and
+// its ink comes from the status vocabulary rather than from the meta row's
+// default — which is the ink the cost figure beside it keeps, because a cost
+// concludes nothing.
+function metaCount(box, key, en, value, token) {
   var span = el('span', null, t(key, en));
-  span.appendChild(el('span', 'counter', value));
+  var counter = el('span', 'counter', value);
+  if (token) verdictInk(counter, token);
+  span.appendChild(counter);
   box.appendChild(span);
 }
 async function load() {
@@ -2877,23 +3422,38 @@ async function load() {
       throw new Error(ledger.details || ledger.error || ('HTTP ' + ledgerResponse.status));
     }
     var reconcile = ledger.last_reconcile || {};
+    // checked_at is a bare time.Time on the wire, so a reconciler that has never
+    // run still sends a full timestamp. Resolving it to an instant up front is
+    // what turns "never" from a date into a state the verdict below can read.
+    var reconciledAt = peInstant(reconcile.checked_at);
+    var writeErrors = ledger.write_errors || 0;
     var ledgerGrid = document.getElementById('ledger');
-    clear(ledgerGrid); clear(document.getElementById('ledger-error'));
+    clear(ledgerGrid); pageState(document.getElementById('ledger-error'), 'ok');
     var ledgerCard = el('article', 'builder-card');
     ledgerCard.appendChild(el('h3', null, t('mon.ledger.shadow', 'PostgreSQL job authority')));
-    var ledgerBadge = statusBadge(ledger.ok ? 'passed' : 'failed');
-    ledgerBadge.lastChild.textContent = ledger.ok
-      ? t('mon.ledger.ok', 'consistent')
-      : t('mon.ledger.degraded', 'degraded');
+    // One judgement, read by the badge and by the numbers under it. The card
+    // used to badge on ledger.ok alone, so "consistent" stood two lines above a
+    // non-zero write-error count and beside a reconcile that had never happened
+    // — and both of those are what a reader consults the card to decide.
+    var ledgerToken = (!ledger.ok || writeErrors > 0) ? 'failed'
+      : (reconciledAt ? 'passed' : 'pending');
+    var ledgerBadge = statusBadge(ledgerToken);
+    ledgerBadge.lastChild.textContent =
+      ledgerToken === 'passed' ? t('mon.ledger.ok', 'consistent') :
+      ledgerToken === 'pending' ? t('mon.ledger.unreconciled', 'never reconciled') :
+      t('mon.ledger.degraded', 'degraded');
     ledgerCard.appendChild(ledgerBadge);
     var ledgerMeta = el('div', 'meta');
     metaCount(ledgerMeta, 'mon.ledger.legacy', 'memory jobs ', reconcile.legacy_count || 0);
     metaCount(ledgerMeta, 'mon.ledger.rows', 'ledger jobs ', reconcile.ledger_count || 0);
     metaCount(ledgerMeta, 'mon.ledger.repaired', 'last repaired ', reconcile.repaired || 0);
-    metaCount(ledgerMeta, 'mon.ledger.errors', 'write errors ', ledger.write_errors || 0);
-    if (reconcile.checked_at) {
-      ledgerMeta.appendChild(el('span', null, t('mon.ledger.checked', 'last checked ') + fmtTime(reconcile.checked_at)));
-    }
+    var writeErrorToken = writeErrors > 0 ? 'failed' : 'passed';
+    metaCount(ledgerMeta, 'mon.ledger.errors', 'write errors ', writeErrors, writeErrorToken);
+    // Always rendered, because a reconcile that has never run is the fact this
+    // line exists to report; it used to be suppressed by a truthiness test the
+    // zero timestamp passed.
+    ledgerMeta.appendChild(el('span', null, t('mon.ledger.checked', 'last checked ') +
+      fmtTime(reconcile.checked_at, t('common.never', 'never'))));
     ledgerCard.appendChild(ledgerMeta);
     ledgerGrid.appendChild(ledgerCard);
   } catch (e) { showError('ledger-error', e); }
@@ -2911,7 +3471,7 @@ async function load() {
       ? projection.alert_threshold_seconds : null;
     var projectionBad = projection.valid === false;
     var schedulerGrid = document.getElementById('scheduler');
-    clear(schedulerGrid); clear(document.getElementById('scheduler-error'));
+    clear(schedulerGrid); pageState(document.getElementById('scheduler-error'), 'ok');
     var schedulerCard = el('article', 'builder-card');
     schedulerCard.appendChild(el('h3', null, t('mon.scheduler.pg', 'PostgreSQL queue and leases')));
     var schedulerDegraded =
@@ -3078,11 +3638,9 @@ async function load() {
     var targets = Array.isArray(history.targets) ? history.targets : [];
     var historyGrid = document.getElementById('target-history');
     var historyEmpty = document.getElementById('target-history-empty');
-    clear(historyGrid); clear(historyEmpty);
-    if (!targets.length) {
-      historyEmpty.appendChild(el('div', 'empty', t('mon.targets.empty',
-        'No terminal samples in the last 30 days')));
-    }
+    clear(historyGrid);
+    pageState(historyEmpty, targets.length ? 'ok' : 'empty',
+      t('mon.targets.empty', 'No terminal samples in the last 30 days'));
     targets.forEach(function(target) {
       var card = el('article', 'builder-card target-card');
       card.appendChild(el('h3', null,
@@ -3102,17 +3660,27 @@ async function load() {
           var rate = denominator
             ? Number(window.success_rate_percent || 0).toFixed(1) + '%'
             : '—';
+          // The SLO outcome is the one conclusion on this card, and it was the
+          // same 400-weight secondary ink as the cost figure three lines below
+          // it — and the two English words were never in the catalogue at all,
+          // so a Chinese reader got "SLO breach" verbatim.
+          var sloToken = window.insufficient_data ? 'pending'
+            : (window.slo_met ? 'passed' : 'failed');
           var slo = window.insufficient_data
             ? t('mon.targets.insufficient', 'insufficient samples')
-            : (window.slo_met ? 'SLO met' : 'SLO breach');
+            : (window.slo_met
+              ? t('mon.targets.slo.met', 'SLO met')
+              : t('mon.targets.slo.breach', 'SLO breach'));
           meta.appendChild(el('span', null,
             (window.name || (window.hours + 'h')) + ' · ' +
             t('mon.targets.samples', 'samples success/failure/canceled ') +
             (window.samples || 0) + ' ' + (window.successes || 0) + '/' +
             (window.failures || 0) + '/' + (window.canceled || 0)));
-          meta.appendChild(el('span', null,
+          var sloLine = el('span', null,
             (window.name || '') + ' · ' +
-            t('mon.targets.slo', 'success / SLO ') + rate + ' · ' + slo));
+            t('mon.targets.slo', 'success / SLO ') + rate + ' · ');
+          sloLine.appendChild(verdictInk(el('span', null, slo), sloToken));
+          meta.appendChild(sloLine);
           meta.appendChild(el('span', null,
             (window.name || '') + ' · ' +
             t('mon.targets.latency', 'P50/P95 queue·run ') +
@@ -3141,7 +3709,7 @@ async function load() {
   try {
     var gateway = await api('/api/worker-gateway/status');
     var gatewayGrid = document.getElementById('worker-gateway');
-    clear(gatewayGrid); clear(document.getElementById('worker-gateway-error'));
+    clear(gatewayGrid); pageState(document.getElementById('worker-gateway-error'), 'ok');
     var gatewayCard = el('article', 'builder-card');
     gatewayCard.appendChild(el('h3', null, t('mon.gateway.mtls', 'Outbound pull and short-lived mTLS identity')));
     var gatewayBadge = statusBadge(
@@ -3227,15 +3795,21 @@ async function load() {
       issuerDetails.appendChild(inventoryBody);
       gatewayCard.appendChild(issuerDetails);
     } catch (inventoryError) {
-      gatewayMeta.appendChild(el('span', null,
-        t('mon.gateway.inventory.error', 'identity inventory unavailable')));
+      // The card loaded and one section of it did not, which is neither a
+      // failed card nor an empty one. Naming it as its own state — and saying
+      // which half of the card is still trustworthy — is the difference between
+      // a missing inventory and an inventory that is missing because the
+      // gateway is down.
+      pageState(document.getElementById('worker-gateway-error'), 'partial',
+        t('mon.gateway.inventory.error',
+          'Issuer and certificate inventory is unavailable; the gateway figures above are current.'));
     }
   } catch (e) { showError('worker-gateway-error', e); }
   try {
     var metadataResponse = await api('/api/runtime-metadata/status');
     var metadata = metadataResponse.status || {};
     var metadataGrid = document.getElementById('runtime-metadata');
-    clear(metadataGrid); clear(document.getElementById('runtime-metadata-error'));
+    clear(metadataGrid); pageState(document.getElementById('runtime-metadata-error'), 'ok');
     var metadataCard = el('article', 'builder-card');
     metadataCard.appendChild(el('h3', null, t('mon.metadata.db', 'Infra, artifacts and image factory')));
     var artifactIntegrityOK = (metadata.missing_artifacts || 0) === 0 && (metadata.corrupt_artifacts || 0) === 0;
@@ -3256,7 +3830,7 @@ async function load() {
   try {
     var cacheStatus = await api('/api/cache/status');
     var cacheGrid = document.getElementById('cache-status');
-    clear(cacheGrid); clear(document.getElementById('cache-status-error'));
+    clear(cacheGrid); pageState(document.getElementById('cache-status-error'), 'ok');
     var cacheCard = el('article', 'builder-card');
     cacheCard.appendChild(el('h3', null, t('mon.cache.redis', 'Redis presence, rate limits and events')));
     cacheCard.appendChild(statusBadge(cacheStatus.ok ? 'passed' : 'failed'));
@@ -3272,10 +3846,9 @@ async function load() {
     var builders = (data && data.builders) || [];
     var grid = document.getElementById('builders');
     var emptyBox = document.getElementById('builders-empty');
-    clear(grid); clear(emptyBox);
-    if (!builders.length) {
-      emptyBox.appendChild(el('div', 'empty', t('mon.noBuilders', 'No registered builders. Static builders register automatically once SERVER_URL is set; ephemeral cloud instances are not listed here.')));
-    }
+    clear(grid);
+    pageState(emptyBox, builders.length ? 'ok' : 'empty',
+      t('mon.noBuilders', 'No registered builders. Static builders register automatically once SERVER_URL is set; ephemeral cloud instances are not listed here.'));
     builders.forEach(function (b) {
       var c = el('article', 'builder-card');
       c.appendChild(el('h3', null, b.id || '-'));
@@ -3299,8 +3872,10 @@ async function load() {
     var list = Array.isArray(r) ? r : (r.instances || []);
     var tb = document.getElementById('instances');
     var emptyBox = document.getElementById('instances-empty');
-    clear(tb); clear(emptyBox);
-    if (!list.length) { emptyBox.appendChild(el('div', 'empty', t('mon.noInstances', 'No cloud instances running.'))); return; }
+    clear(tb);
+    pageState(emptyBox, list.length ? 'ok' : 'empty',
+      t('mon.noInstances', 'No cloud instances running.'));
+    if (!list.length) return;
     list.forEach(function (i) {
       var tr = el('tr');
       tr.appendChild(el('td', 'mono', i.id || '-'));
@@ -3351,14 +3926,14 @@ const settingsContent = `
 <div class="settings-panels">
 <form id="settings-form">
 
-<section class="panel" data-panel="security" hidden>
+<section class="panel" id="security" data-panel="security" hidden>
   <div class="card"><h3 class="card-title" data-i18n="sec.idp">Identity providers</h3><div class="card-pad">
     <p class="hint" data-i18n="sec.idp.hint">Upstream credentials are exchanged once. Ordinary API requests use only a short-lived Portage Engine session.</p>
     <div id="identity-provider-status" class="provider-status-list"></div>
   </div></div>
   <div class="card"><h3 class="card-title" data-i18n="sec.sessions">Federated sessions</h3><div class="card-pad">
     <p class="hint" data-i18n="sec.sessions.hint">Only token hashes and lifecycle metadata are retained. Revocation is enforced by PostgreSQL across all control-plane replicas.</p>
-    <div class="table-scroll"><table class="list" aria-label="Federated sessions">
+    <div class="table-scroll" tabindex="0" role="region" aria-label="Federated sessions"><table class="list" data-cols="7" aria-label="Federated sessions">
       <thead><tr>
         <th data-i18n="th.session">Session</th><th data-i18n="th.issued">Issued</th>
         <th data-i18n="th.lastseen">Last seen</th><th data-i18n="th.expires">Expires</th>
@@ -3375,7 +3950,7 @@ const settingsContent = `
   </div></div>
 </section>
 
-<section class="panel" data-panel="general">
+<section class="panel" id="general" data-panel="general">
   <div class="card"><h3 class="card-title" data-i18n="set.backend">Build Backend</h3><div class="card-pad form-grid">
     <div class="field">
       <label for="provider" data-i18n="set.provider">Default provider</label>
@@ -3409,13 +3984,13 @@ const settingsContent = `
     </div>
     <div class="form-actions">
       <button class="btn blue" type="button" id="test-build" data-i18n="set.testbuild.go">Start Test Build</button>
-      <span class="save-msg" id="test-build-msg" role="status"></span>
+      <span class="save-msg" id="test-build-msg" role="status" tabindex="-1"></span>
     </div>
     <div id="test-build-result" style="margin-top:10px"></div>
   </div></div>
 </section>
 
-<section class="panel" data-panel="pve" hidden>
+<section class="panel" id="pve" data-panel="pve" hidden>
   <div class="card"><h3 class="card-title" data-i18n="set.conn">Connection</h3><div class="card-pad">
     <div class="form-grid">
       <div class="field">
@@ -3454,7 +4029,7 @@ const settingsContent = `
 
   <div class="card" id="test-card" style="display:none">
     <h3 class="card-title" data-i18n="set.clusternodes">Cluster Nodes</h3>
-    <div class="table-scroll"><table class="list" aria-label="Cluster nodes">
+    <div class="table-scroll" tabindex="0" role="region" aria-label="Cluster nodes"><table class="list" data-cols="5" aria-label="Cluster nodes">
       <thead><tr>
         <th data-i18n="th.node">Node</th><th data-i18n="th.status">Status</th>
         <th data-i18n="th.freemem">Free Memory</th><th data-i18n="th.cpu">CPU Load</th>
@@ -3512,7 +4087,7 @@ const settingsContent = `
   </div></div>
 </section>
 
-<section class="panel" data-panel="gcp" hidden>
+<section class="panel" id="gcp" data-panel="gcp" hidden>
   <div class="card"><h3 class="card-title">Google Cloud</h3><div class="card-pad form-grid">
     <div class="field">
       <label for="gcp_project" data-i18n="set.gcp.project">Project</label>
@@ -3533,7 +4108,7 @@ const settingsContent = `
   </div></div>
 </section>
 
-<section class="panel" data-panel="aws" hidden>
+<section class="panel" id="aws" data-panel="aws" hidden>
   <div class="card"><h3 class="card-title">AWS</h3><div class="card-pad form-grid">
     <div class="field">
       <label for="aws_region" data-i18n="set.gcp.region">Region</label>
@@ -3555,7 +4130,7 @@ const settingsContent = `
   </div></div>
 </section>
 
-<section class="panel" data-panel="builders" hidden>
+<section class="panel" id="builders" data-panel="builders" hidden>
   <div class="card"><h3 class="card-title" data-i18n="set.sec.builders">Static Builders</h3><div class="card-pad">
     <div class="field">
       <label for="remote_builders" data-i18n="set.builders">Builder URLs (comma-separated)</label>
@@ -3565,7 +4140,7 @@ const settingsContent = `
   </div></div>
 </section>
 
-<section class="panel" data-panel="mirrors" hidden>
+<section class="panel" id="mirrors" data-panel="mirrors" hidden>
   <div class="card"><h3 class="card-title" data-i18n="set.sec.mirrors">Mirrors</h3><div class="card-pad">
     <p class="hint" style="margin-bottom:10px" data-i18n="set.mirrors.hint">Internal mirrors used when bootstrapping build instances — dramatically faster deploys on a LAN. All optional.</p>
     <div class="form-grid">
@@ -3615,7 +4190,7 @@ const settingsContent = `
   </div></div>
 </section>
 
-<section class="panel" data-panel="buildconf" hidden>
+<section class="panel" id="buildconf" data-panel="buildconf" hidden>
   <div class="card"><h3 class="card-title" data-i18n="set.sec.buildconf">Build Config</h3><div class="card-pad">
     <div class="field">
       <label for="make_conf_extra" data-i18n="set.makeconf">Extra make.conf content</label>
@@ -3635,7 +4210,7 @@ const settingsContent = `
   </div></div>
 </section>
 
-<section class="panel" data-panel="ssh" hidden>
+<section class="panel" id="ssh" data-panel="ssh" hidden>
   <div class="card"><h3 class="card-title" data-i18n="set.sec.ssh">SSH Keys</h3><div class="card-pad">
     <div class="form-grid">
       <div class="field">
@@ -3660,7 +4235,7 @@ const settingsContent = `
   </div></div>
 </section>
 
-<section class="panel" data-panel="gpg" hidden>
+<section class="panel" id="gpg" data-panel="gpg" hidden>
   <div class="card"><h3 class="card-title" data-i18n="set.sec.gpg">GPG Signing</h3><div class="card-pad">
     <div class="stat-grid" style="margin-bottom:16px">
       <div class="stat-tile">
@@ -3690,7 +4265,7 @@ const settingsContent = `
   </div></div>
 </section>
 
-<section class="panel" data-panel="net" hidden>
+<section class="panel" id="net" data-panel="net" hidden>
   <div class="card"><h3 class="card-title" data-i18n="set.sec.net">Network &amp; Delivery</h3><div class="card-pad form-grid">
     <div class="field">
       <label for="callback" data-i18n="set.callback">Callback URL</label>
@@ -3717,7 +4292,10 @@ const settingsContent = `
 
 <div class="settings-footer">
   <button class="btn blue" type="submit" id="save" data-i18n="set.save">Save</button>
-  <span class="save-msg" id="msg" role="status"></span>
+  <!-- tabindex="-1" adds no tab stop; it is what lets a rejection nobody
+       could attribute to a field still receive focus, so the reader is put on
+       the sentence that says the save failed instead of on an unchanged form. -->
+  <span class="save-msg" id="msg" role="status" tabindex="-1"></span>
 </div>
 </form>
 </div>
@@ -3732,14 +4310,19 @@ async function loadSessions() {
   var rows = document.getElementById('session-rows');
   var empty = document.getElementById('session-empty');
   if (!rows || !empty) return;
-  clear(rows); clear(empty);
+  clear(rows);
+  // The table used to stand headed and empty for the whole round-trip, which
+  // reads as "no sessions" and is the one answer this panel must not give by
+  // accident; and the box below it was written by three different branches that
+  // all produced the same node, so a revocation list that failed to load was
+  // indistinguishable from an account with nothing to revoke.
+  pageState(empty, 'loading', t('common.loading', 'Loading…'));
   try {
     var result = await api('/api/iam/sessions');
     var sessions = Array.isArray(result.sessions) ? result.sessions : [];
-    if (!sessions.length) {
-      empty.appendChild(el('div', 'empty', t('sec.none', 'No OIDC sessions are registered.')));
-      return;
-    }
+    pageState(empty, sessions.length ? 'ok' : 'empty',
+      t('sec.none', 'No OIDC sessions are registered.'));
+    if (!sessions.length) return;
     sessions.forEach(function (session) {
       var tr = el('tr');
       tr.appendChild(el('td', 'mono sec', session.id.slice(0, 8) +
@@ -3768,19 +4351,17 @@ async function loadSessions() {
       rows.appendChild(tr);
     });
   } catch (error) {
-    empty.appendChild(el('div', 'empty', t('sec.unavailable', 'Sessions unavailable: ') + error.message));
+    pageState(empty, 'error', t('sec.unavailable', 'Sessions unavailable: ') + error.message);
   }
 }
 function renderIdentityProviders() {
   var target = document.getElementById('identity-provider-status');
   if (!target) return;
-  clear(target);
   var providers = window.peIAM && Array.isArray(window.peIAM.identityProviders)
     ? window.peIAM.identityProviders : [];
-  if (!providers.length) {
-    target.appendChild(el('div', 'empty', t('sec.idp.none', 'No federated provider is active in the current authentication mode.')));
-    return;
-  }
+  pageState(target, providers.length ? 'ok' : 'empty',
+    t('sec.idp.none', 'No federated provider is active in the current authentication mode.'));
+  if (!providers.length) return;
   for (var i = 0; i < providers.length; i++) {
     var provider = providers[i];
     var text = provider.display_name + ' · ' + provider.type;
@@ -3792,8 +4373,11 @@ function renderIdentityProviders() {
 /* --- sub-navigation --- */
 // The section links carry href="#<section>" so they are in the tab order and
 // operable with Enter without any JS; the hash branch below is what makes a
-// deep link work. Which one is showing lives on the elements as aria-current
-// and hidden, never as a styling class.
+// deep link work. Each panel carries that same string as its id as well as its
+// data-panel, so the fragment resolves to a real element: pointing at nothing
+// left the browser with no target to move reading position to, and the link
+// worked only for as long as the script did. Which panel is showing lives on
+// the elements as aria-current and hidden, never as a styling class.
 function showSection(sec) {
   var links = document.querySelectorAll('#subnav a[data-sec]');
   var panels = document.querySelectorAll('.panel');
@@ -4019,7 +4603,13 @@ function showFieldError(message) {
     if (!Object.prototype.hasOwnProperty.call(FIELD_CONTROLS, wire)) continue;
     if (message.indexOf(wire) < 0) continue;
     var control = document.getElementById(FIELD_CONTROLS[wire]);
-    if (!control) continue;
+    // A disabled control takes no focus and carries no aria-invalid a reader
+    // will ever reach, so attributing to it is indistinguishable from
+    // attributing to nothing — two of these are real (the mandatory
+    // verification checkbox, and the secret inputs when the deployment owns
+    // the values). Fall through and let the caller surface the rejection at
+    // form level instead.
+    if (!control || control.disabled) continue;
     var field = control.closest('.field');
     var panel = control.closest('.panel');
     if (panel) showSection(panel.getAttribute('data-panel'));
@@ -4035,31 +4625,70 @@ function showFieldError(message) {
   return false;
 }
 
-async function saveSettings() {
-  clearFieldErrors();
-  var saved = await api('/api/settings/cloud', {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(collect())
-  });
-  fill(saved);
+var saveButton = document.getElementById('save');
+// The settings resource has exactly one writer, and the in-flight flag belongs
+// to the resource rather than to a button: Save and Start Test Build both PUT
+// /api/settings/cloud. An activation that arrives during a write is discarded
+// and answered with null — never awaited and replayed. The replay is the whole
+// harm: it would collect() the secret inputs a completed write has already
+// emptied, and an empty secret is the wire spelling of "keep the stored one",
+// so the reader could not tell a kept credential from a lost one.
+var savePending = false;
+// aria-disabled, never disabled: disabled drops the button out of the tab
+// order mid-write and a keyboard reader loses the control it just used.
+// aria-busy says the control is mid-operation; the progress itself is spoken
+// by the footer live region, because a control that narrates its own state is
+// re-read in full on every focus.
+function setSaveBusy(busy) {
+  saveButton.setAttribute('aria-disabled', busy ? 'true' : 'false');
+  if (busy) saveButton.setAttribute('aria-busy', 'true');
+  else saveButton.removeAttribute('aria-busy');
+}
+// Emptying the secret inputs is the last thing a successful write does, and
+// only once nothing is in flight. Cleared any earlier, the very next collect()
+// sends blanks for credentials the operator typed seconds ago.
+function clearSubmittedSecrets() {
+  if (savePending) return;
   setVal('pve_token_secret', '');
   setVal('aws_secret_key', '');
+  setVal('pve_password', '');
+}
+async function saveSettings() {
+  if (savePending) return null;
+  savePending = true;
+  setSaveBusy(true);
+  var saved;
+  try {
+    clearFieldErrors();
+    saved = await api('/api/settings/cloud', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(collect())
+    });
+    fill(saved);
+  } finally {
+    savePending = false;
+    setSaveBusy(false);
+  }
+  // Only reached when the write succeeded: a rejected write leaves the typed
+  // secrets in place so the reader can correct one field and submit again.
+  clearSubmittedSecrets();
   return saved;
 }
+// A rejection the reader cannot see is a rejection they cannot act on. When
+// the server's prose names a control, showFieldError opens the panel holding
+// it and moves focus there. When it names none — or names one the reader
+// cannot reach — the footer live region is the only place the failure exists,
+// so focus moves to it: a form that stays put reads as a form that did
+// nothing at all.
 function reportSaveFailure(message) {
-  showFieldError(message);
   note(t('set.savefail', 'Save failed: ') + message, false);
+  if (!showFieldError(message)) msg.focus();
 }
 async function load() {
   try { fill(await api('/api/settings/cloud')); }
   catch (e) { note(t('set.loadfail', 'Failed to load settings: ') + e.message, false); }
 }
-var saveButton = document.getElementById('save');
-// Idempotent from the user's side: aria-disabled keeps the button in the tab
-// order while the PUT is in flight, and the flag is what actually refuses the
-// second activation — a double-click used to send two PUTs.
-var savePending = false;
 // An Enter that only confirmed an IME candidate is not a submission.
 form.addEventListener('keydown', function (e) {
   if (e.key === 'Enter' && e.isComposing) e.preventDefault();
@@ -4067,18 +4696,11 @@ form.addEventListener('keydown', function (e) {
 form.addEventListener('submit', async function (e) {
   e.preventDefault();
   if (savePending) return;
-  savePending = true;
-  saveButton.setAttribute('aria-disabled', 'true');
   note(t('set.saving', 'Saving…'), true);
   try {
     await saveSettings();
-    setVal('pve_password', '');
     note(t('set.saved', 'Saved — in effect immediately'), true);
   } catch (ex) { reportSaveFailure(ex.message); }
-  finally {
-    savePending = false;
-    saveButton.setAttribute('aria-disabled', 'false');
-  }
 });
 
 /* --- PVE connection test --- */
@@ -4120,7 +4742,13 @@ guardAction(document.getElementById('test-build'), async function () {
   var pkg = val('test_pkg') || 'app-misc/jq';
   try {
     noteAt(tmsg, t('set.testbuild.saving', 'Saving settings…'), true);
-    await saveSettings();
+    // This button is the settings form's second writer. It stands down rather
+    // than racing the first: a build submitted against half-written settings
+    // is a machine provisioned from a configuration nobody chose.
+    if (await saveSettings() === null) {
+      noteAt(tmsg, t('set.testbuild.busy', 'A settings save is already in flight; start the test build once it finishes.'), false);
+      return;
+    }
     noteAt(tmsg, t('set.testbuild.submitting', 'Submitting build…'), true);
     var r = await api('/api/builds/submit', {
       method: 'POST',
@@ -4152,8 +4780,10 @@ guardAction(document.getElementById('test-build'), async function () {
       } catch (e) { /* keep polling */ }
     }, 5000);
   } catch (ex) {
-    if (!showFieldError(ex.message)) { /* not attributable to one control */ }
     noteAt(tmsg, t('set.testbuild.fail', 'Test build failed: ') + ex.message, false);
+    // Same contract as the footer: attributed to a control when the prose
+    // names one, otherwise focus lands on the message that says it failed.
+    if (!showFieldError(ex.message)) tmsg.focus();
   }
 });
 
@@ -4196,7 +4826,7 @@ const imageFactoryContent = `
 <div id="factory-message"></div>
 <h2 class="section-title" data-i18n="factory.catalog">Active Catalog</h2>
 <div class="card">
-  <div class="table-scroll"><table class="list" aria-label="Image factory profiles">
+  <div class="table-scroll" tabindex="0" role="region" aria-label="Image factory profiles"><table class="list" data-cols="7" aria-label="Image factory profiles">
     <thead><tr><th>Profile</th><th data-i18n="th.arch">Arch</th><th data-i18n="factory.image">Image</th><th>Egress policy</th><th data-i18n="factory.displayModel">Display</th><th data-i18n="factory.sets">Package sets</th><th data-i18n="factory.channel">Channel</th></tr></thead>
     <tbody id="factory-profiles"></tbody>
   </table></div>
@@ -4258,8 +4888,12 @@ function renderFactory(data) {
   if (!data.configured) message.appendChild(el('div', 'card card-pad factory-note', t('factory.notconfigured', 'IMAGE_FACTORY_STATUS_PATH is not configured; catalog data is available, but milestone evidence is not guessed by the UI.')));
 
   var tbody = document.getElementById('factory-profiles'); clear(tbody);
-  var profileEmpty = document.getElementById('factory-profile-empty'); clear(profileEmpty);
-  if (!profiles.length) profileEmpty.appendChild(el('div', 'empty', t('factory.none', 'None')));
+  // Same copy, same behaviour — this surface already told a failed load apart
+  // from an empty catalogue and is where the vocabulary came from. It reads the
+  // shared renderer so the attribute and the live region are the same ones the
+  // five other routes now carry.
+  pageState(document.getElementById('factory-profile-empty'),
+    profiles.length ? 'ok' : 'empty', t('factory.none', 'None'));
   profiles.forEach(function (profile) {
     var image = images.find(function (item) { return item.id === profile.image_id; }) || {};
     var tr = el('tr');
@@ -4278,8 +4912,8 @@ function renderFactory(data) {
   var status = data.status || {};
   var milestones = status.milestones || [];
   var milestoneList = document.getElementById('factory-milestones'); clear(milestoneList);
-  var milestoneEmpty = document.getElementById('factory-milestone-empty'); clear(milestoneEmpty);
-  if (!milestones.length) milestoneEmpty.appendChild(el('div', 'empty', t('factory.none', 'None')));
+  pageState(document.getElementById('factory-milestone-empty'),
+    milestones.length ? 'ok' : 'empty', t('factory.none', 'None'));
   milestones.forEach(function (milestone) {
     var li = el('li', 'milestone');
     var state = el('div'); state.appendChild(statusBadge(milestone.state)); li.appendChild(state);
@@ -4372,7 +5006,7 @@ const packagesContent = `
 </div>
 <div class="card">
   <div class="package-summary" id="package-summary" aria-live="polite"></div>
-  <div class="table-scroll"><table class="list" aria-label="Published packages">
+  <div class="table-scroll" tabindex="0" role="region" aria-label="Published packages"><table class="list packages" data-cols="5" aria-label="Published packages">
     <thead><tr>
       <th data-i18n="th.package">Package</th><th data-i18n="th.version">Version</th>
       <th data-i18n="packages.profile">Profile</th><th data-i18n="th.arch">Arch</th>
@@ -4421,16 +5055,31 @@ function renderPackageProfiles() {
   select.value = selected;
 }
 
+// A search is a filter, and an empty result under a filter is a different fact
+// from an empty catalogue: one is answered by clearing the search, the other
+// cannot be answered from this page at all. Both used to read "No matching
+// packages were found", which invites a first-time reader to keep searching a
+// binhost that has never published anything.
+function packageFilterState() {
+  var query = document.getElementById('package-query').value.trim();
+  var profile = document.getElementById('package-profile').value;
+  return (query || profile) ? 'filtered' : 'empty';
+}
 function renderPackages(response) {
   packageTotal = Number(response.total || 0);
   packageOffset = Number(response.offset || 0);
   var rows = document.getElementById('package-rows');
   var empty = document.getElementById('package-empty');
-  clear(rows); clear(empty);
+  clear(rows);
   (response.packages || []).forEach(function (pkg) {
     var row = document.createElement('tr');
     var name = el('td');
-    name.appendChild(el('span', 'package-name', pkg.name));
+    var atom = el('span', 'package-name', pkg.name);
+    // The atom is the string a reader copies into their terminal, and it is the
+    // one cell narrow enough to wrap: the title is where the unwrapped value
+    // stays available.
+    atom.title = pkg.name || '';
+    name.appendChild(atom);
     if (pkg.use_flags && pkg.use_flags.length) {
       var flags = pkg.use_flags.join(' ');
       var flagNode = el('span', 'package-flags', flags.length > 72 ? flags.slice(0, 69) + '…' : flags);
@@ -4450,9 +5099,11 @@ function renderPackages(response) {
     row.appendChild(download);
     rows.appendChild(row);
   });
-  if (!response.packages || !response.packages.length) {
-    empty.appendChild(el('div', 'empty', t('packages.none', 'No matching packages were found.')));
-  }
+  var listed = !!(response.packages && response.packages.length);
+  var state = listed ? 'ok' : packageFilterState();
+  pageState(empty, state, state === 'filtered'
+    ? t('packages.none', 'No package matches this search. Clear the search or choose a different profile.')
+    : t('packages.empty', 'No packages have been published to the public binhost yet.'));
   document.getElementById('package-summary').textContent =
     plural('packages.count', packageTotal,
       {one: '%d published package', other: '%d published packages'});
@@ -4472,12 +5123,17 @@ async function loadPackages() {
   if (profile) params.set('profile_id', profile);
   params.set('limit', String(packageLimit));
   params.set('offset', String(packageOffset));
+  // The page had no loading state at all: a bare table head with a summary
+  // line and a pager that had not been written yet, then 98px of content
+  // arriving under the reader's pointer.
+  pageState(document.getElementById('package-empty'), 'loading',
+    t('common.loading', 'Loading…'));
   try {
     renderPackages(await publicJSON('/api/public/packages?' + params.toString()));
   } catch (error) {
     clear(document.getElementById('package-rows'));
-    var empty = document.getElementById('package-empty'); clear(empty);
-    empty.appendChild(el('div', 'empty', t('packages.loadfail', 'Package search failed: ') + ' ' + error.message));
+    pageState(document.getElementById('package-empty'), 'error',
+      t('packages.loadfail', 'Package search failed: ') + error.message);
   }
 }
 
@@ -4552,7 +5208,7 @@ const statusContent = `
 </div>
 <div class="card">
   <div class="status-overall">
-    <div><strong id="status-title">Loading status…</strong><p id="status-updated"></p></div>
+    <div><strong id="status-title" data-i18n="status.loading">Loading status…</strong><p id="status-updated"></p></div>
     <span data-i18n="status.refresh">Refreshes automatically every 30 seconds</span>
   </div>
   <div class="status-list" id="status-components"></div>
@@ -4580,26 +5236,40 @@ function componentLabel(name) {
   var table = PUBLIC_COMPONENT_LABELS[lang];
   return (table && table[name]) || name;
 }
+// "dev" is the linker's default, not a release anybody can pin an incident to.
+// Naming it as a development build says the same thing without dressing a
+// placeholder as a version number; a real version is still printed verbatim,
+// because guessing at one is worse than printing it.
+function versionSuffix(version) {
+  if (!version) return '';
+  if (version === 'dev') return ' · ' + t('status.version.dev', 'Development build');
+  return ' · ' + t('status.version', 'Version ') + version;
+}
 async function loadPublicStatus() {
   var title = document.getElementById('status-title');
   var updated = document.getElementById('status-updated');
   var components = document.getElementById('status-components');
   try {
     var response = await publicJSON('/api/public/status');
+    title.removeAttribute('data-i18n');
     title.textContent = statusLabel(response.status);
-    updated.textContent = t('status.updated', 'Updated ') + fmtPublicTime(response.updated_at) +
-      (response.version ? ' · ' + t('status.version', 'Version ') + response.version : '');
-    clear(components);
-    (response.components || []).forEach(function (component) {
+    updated.textContent = t('status.updated', 'Updated ') +
+      fmtPublicTime(response.updated_at) + versionSuffix(response.version);
+    var listed = Array.isArray(response.components) ? response.components : [];
+    pageState(components, listed.length ? 'ok' : 'empty',
+      t('status.components.empty', 'This status snapshot reports no components.'));
+    listed.forEach(function (component) {
       var row = el('div', 'status-row');
       row.appendChild(el('span', null, componentLabel(component.name)));
       row.appendChild(statusIndicator(component.status));
       components.appendChild(row);
     });
   } catch (error) {
+    title.removeAttribute('data-i18n');
     title.textContent = statusLabel('unavailable');
     updated.textContent = error.message;
-    clear(components);
+    pageState(components, 'error',
+      t('common.loadfail', 'Failed to load: ') + error.message);
   }
 }
 function onLangChange() { loadPublicStatus(); }

@@ -1,0 +1,151 @@
+/* /monitor's own layout, and nothing else: the cards, badges, verdicts, tables
+   and state boxes it is built out of are the shared ones in components.css and
+   this file adds only what the route's two structural changes need — the block
+   that reserves a section's height before its payload lands, and the scheduler
+   card's three groups. */
+
+/* The reserve, on the block wrapper around an async list and not on the list.
+   Both children of this wrapper take space and they take it at different times:
+   while the section is loading the grid is empty and the state sentence is
+   under it, and once the payload lands the sentence is gone and the cards are
+   there. Reserving the pair — one card row plus the grid's own bottom margin —
+   is what makes that swap free, where reserving only the grid left a 90px
+   sentence stacked on top of a 132px hole and every heading below walked up the
+   page when the poll answered. Poll to poll nothing moves at all, because the
+   happy path writes no state node.
+
+   Only for a block that has a payload to swap in, which the caller declares:
+   /image-factory borrows this node as a state carrier with no children, and for
+   it the floor is not room held for something arriving, it is a hole in every
+   state including ok. Qualified rather than overridden further down, because
+   `.card > .mon-block` below is (0,2,0) and an unqualified opt-out would tie
+   with it and win only by position. */
+.mon-block[data-reserve='payload'] {
+  min-height: 156px;
+  margin-bottom: 24px;
+}
+/* The grid's margin belongs to the block now, so the two do not both pay it. */
+.mon-block .builder-grid {
+  margin-bottom: 0;
+}
+/* The state node is a live region and holds state text only. It is never the
+   container the cards are in: the console this replaces put role="status" on a
+   box that also held its rendered list and re-read the whole list to a screen
+   reader on every poll, forever. It is deliberately not hidden when empty — an
+   empty block box is already zero pixels tall, and a live region a stylesheet
+   removes and restores is one an assistive technology may never have registered
+   by the time a sentence arrives in it. */
+
+/* A block inside a card — the instances table and its state node — is already
+   inside the card's own margin, so it does not pay one of its own. The reserve
+   is a header row plus two data rows, which is what the table occupies once a
+   payload lands and what the header plus the state sentence occupies before
+   one does. It is on this wrapper and never on tbody, which reserves nothing:
+   a tbody's height is its rows and it has none yet. */
+.card > .mon-block[data-reserve='payload'] {
+  min-height: 132px;
+  margin-bottom: 0;
+}
+
+/* ---- the scheduler card's three questions ---- */
+/* Forty statistics in one wrapped row is developer output: dispatch counters
+   beside lease-expiry recovery counters beside per-pool capacity readings, with
+   nothing saying which of them answers which question. The three groups are the
+   three questions an operator actually arrives with, each with its own verdict,
+   and the card's headline is the worst of them. */
+.ledger-groups {
+  display: grid;
+  gap: 4px;
+  margin-top: 10px;
+}
+.ledger-group {
+  min-width: 0;
+}
+.ledger-group .group-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding-top: 10px;
+  border-top: var(--keyline);
+}
+.ledger-group h4 {
+  font: var(--subhead-emphasized);
+  text-transform: uppercase;
+  color: var(--systemSecondary);
+}
+/* Out-specifies `.ledger-grid .builder-card .meta` (0,3,0), which puts a rule
+   and 8px above every meta row: inside a group the rule is already drawn by the
+   group head one line up, and two rules 20px apart read as an empty row. */
+.ledger-grid .builder-card .ledger-group .meta {
+  border-top: 0;
+  padding-top: 6px;
+}
+
+/* ---- slot utilisation ---- */
+/* The one reading on this card that is a proportion rather than a count, and
+   the only place the " !" / " !!" suffix is needed: level comes from the shared
+   meterLevel(), so this cannot disagree with the quota meters in the rail about
+   where warn starts, and the suffix is what an operator who cannot tell orange
+   from red reads instead of the hue. */
+.slot-meter {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 0 6px;
+  margin-top: 12px;
+  font: var(--callout);
+  color: var(--systemSecondary);
+}
+.slot-meter .slot-k {
+  overflow-wrap: break-word;
+}
+/* tabular-nums equalises the width of a digit and not the count of them, so
+   "9 / 10" becoming "10 / 10" still moved the value's left edge on every poll.
+   The reserve plus the auto column's right edge fixes both ends. */
+.slot-meter .slot-v {
+  min-width: 8ch;
+  text-align: right;
+  color: var(--systemPrimary);
+  font-variant-numeric: tabular-nums;
+}
+.slot-meter .slot-bar {
+  grid-column: 1 / -1;
+  height: 6px;
+  margin-top: 4px;
+  border-radius: var(--radius-pill);
+  background: var(--systemQuinary);
+  overflow: hidden;
+}
+.slot-meter .slot-bar i {
+  display: block;
+  height: 100%;
+  background: var(--systemSecondary);
+}
+.slot-meter[data-level='warn'] .slot-bar i {
+  background: var(--systemOrange);
+}
+.slot-meter[data-level='crit'] .slot-bar i {
+  background: var(--systemRed);
+}
+.slot-meter[data-level='warn'] .slot-v::after {
+  content: ' !';
+}
+.slot-meter[data-level='crit'] .slot-v::after {
+  content: ' !!';
+}
+
+/* ---- target reliability ---- */
+/* Four lines about one window belong together; five windows in one flat column
+   is twenty lines a reader has to re-group by eye. The gap is what does the
+   grouping — there is no rule and no box, because the card already has both. */
+.target-card .meta .target-window {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-bottom: 7px;
+  min-width: 0;
+  max-width: 100%;
+}
+.target-card .meta .target-window:last-child {
+  padding-bottom: 0;
+}

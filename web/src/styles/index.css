@@ -1,0 +1,29 @@
+/* The stylesheet, in one order.
+
+   Every rule below is ported verbatim from the console this project replaces —
+   values, annotations and sequence. The split is by concern; the sequence is
+   not negotiable, because the source relies on it where two rules of equal
+   specificity target the same element and the later one is meant to win:
+
+     .card .card-pad (components.css) over .public-docs .card-pad (surfaces.css)
+     — both (0,2,0), and the docs card is meant to take the card's 20px.
+
+   So a file is a contiguous run of the source, never a gathering of rules from
+   across it, and adding a file means deciding where in this list it goes rather
+   than where it fits alphabetically.
+
+   What this list cannot decide is where the shared layer sits relative to the
+   PAGE layer. A page sheet is imported by its page component, so all nine of
+   them are emitted after everything here — preferences.css included, which is
+   why the two reader-preference blocks win on !important and not on being last.
+   src/styles/cascade.test.ts and src/styles/preferences.test.ts read the
+   emitted bundle for both halves of that. */
+
+@import url('./tokens.css');
+@import url('./base.css');
+@import url('./controls.css');
+@import url('./surfaces.css');
+@import url('./shell.css');
+@import url('./components.css');
+@import url('./panels.css');
+@import url('./preferences.css');

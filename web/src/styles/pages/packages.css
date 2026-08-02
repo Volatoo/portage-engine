@@ -1,0 +1,108 @@
+/* The public package catalogue.
+
+   Seven columns now: the sync path is one of them, because it used to be a
+   `title` attribute and a `title` is invisible to touch, to keyboard and to
+   most screen readers. Three of the seven carry machine-produced identifiers —
+   the atom, the profile id and the sync path — so the table needs more floor
+   than the six-column set in components.css gives it, and below that floor
+   `.table-scroll` pans instead of the document doing it. */
+.packages-page table.list.packages {
+  min-width: 1000px;
+}
+/* An equal split is the wrong split here: three columns hold identifiers whose
+   length this console does not choose — a 66-character sync path, a
+   36-character profile id, a package atom — and four hold a version, an arch,
+   a two-word state and one link. The floor above is the shell's own column
+   width at 1280, so a desktop reader pans nothing and a phone pans the table
+   and never the document. */
+.packages-page table.list.packages th:nth-child(1) {
+  width: 18%;
+}
+.packages-page table.list.packages th:nth-child(2) {
+  width: 8%;
+}
+.packages-page table.list.packages th:nth-child(3) {
+  width: 19%;
+}
+.packages-page table.list.packages th:nth-child(4) {
+  width: 23%;
+}
+.packages-page table.list.packages th:nth-child(5) {
+  width: 8%;
+}
+.packages-page table.list.packages th:nth-child(6) {
+  width: 13%;
+}
+.packages-page table.list.packages th:nth-child(7) {
+  width: 11%;
+}
+/* Seven columns at the shared 20px gutter spend 280px of a 1000px table on
+   whitespace. The inner gutters shrink and the two outer ones do not, so the
+   card's own 20px edge — which the summary above and the pager below are
+   aligned to — is still where the first and last columns start and end. */
+.packages-page table.list.packages th,
+.packages-page table.list.packages td {
+  padding-inline: 12px;
+}
+.packages-page table.list.packages th:first-child,
+.packages-page table.list.packages td:first-child {
+  padding-inline: 20px 12px;
+}
+.packages-page table.list.packages th:last-child,
+.packages-page table.list.packages td:last-child {
+  padding-inline: 12px 20px;
+}
+/* The reserve, on the block that wraps the table AND its state box — never on
+   tbody, which is a row box whose min-height the table model does not honour,
+   and never on the table alone, because the state box under it is 90px of
+   loading sentence that collapses to nothing the moment rows arrive.
+
+   140px is the taller of the two things that stand here before a catalogue
+   does: the 40px table head plus the 90px state box, and the 40px head plus one
+   row. Deliberately not four rows. A reserve larger than the answer makes the
+   page shrink when the answer lands, which pulls the pager up under a pointer
+   that was already reaching for it; a reserve smaller than the answer makes it
+   grow, which moves the same control away rather than out from under. Between
+   the two, growing is the one a reader can survive. */
+.packages-page .packages-list {
+  min-height: 140px;
+}
+/* break-word and not `anywhere`: a sync path is one long token with a break
+   opportunity at every slash, and `anywhere` would also offer every glyph as a
+   break to min-content, which is how a fixed column collapses to one character
+   per line. */
+.packages-page .package-sync {
+  overflow-wrap: break-word;
+  color: var(--systemSecondary);
+}
+/* One line of counted text that is rewritten on every search, over a card edge
+   the rows below are aligned to. tabular figures hold the digits still; the
+   height is what stops the table jumping when "共 0 个" becomes "共 128 个". */
+.packages-page .package-summary {
+  min-height: 45px;
+  font-variant-numeric: tabular-nums;
+}
+/* The pager's own reserve. tabular-nums equalises the width of a digit and not
+   the count of them, so 9–58 becoming 59–108 still moved both buttons; the
+   width is what fixes both edges. */
+.packages-page .page-range {
+  font-variant-numeric: tabular-nums;
+  min-width: 11ch;
+  text-align: center;
+  color: var(--systemSecondary);
+}
+/* Room for the retry the error state offers, which sits outside the live region
+   so that reaching for it does not re-announce the failure. */
+.packages-page .state-retry {
+  padding: 0 20px 16px;
+  text-align: center;
+}
+/* The catalogue's own caveat about what "published" means, under the card
+   rather than inside it: it qualifies the whole signature column and not any
+   one row. */
+.packages-verify-note {
+  max-width: var(--readingWidth);
+  margin-top: -8px;
+  font: var(--callout);
+  color: var(--systemSecondary);
+}

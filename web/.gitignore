@@ -1,0 +1,12 @@
+node_modules/
+
+# `npm run build` writes into internal/dashboard/webassets/bundle/dist, not
+# here, so the Go embed compiles in the bytes Vite just emitted with no copy
+# step in between. Nothing should land in web/dist; this catches it if the
+# outDir is ever changed without changing the embed.
+dist/
+
+# vite dev / vitest scratch
+.vite/
+*.tsbuildinfo
+vitest.log

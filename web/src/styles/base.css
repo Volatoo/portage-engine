@@ -1,0 +1,28 @@
+/* Base element rules and the two global media queries that outrank everything
+   a component can declare. Nothing here names a value; every one names a token
+   from tokens.css. */
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+[hidden] { display: none !important; }
+body {
+  background: var(--pageFloor);
+  color: var(--systemPrimary);
+  font: var(--body);
+  letter-spacing: 0;
+  font-synthesis: none;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+a { color: var(--keyColor); text-decoration: none; }
+/* The ring is an outline, not a box-shadow: forced-colors mode drops
+   box-shadow entirely and used to leave six tab stops with no indicator at
+   all. The offset also puts the page — not the control's own fill — next to
+   the ring, so 1.4.11's 3:1 is measured against a ground we control. */
+:focus-visible { outline: 3px solid var(--focusRing); outline-offset: 2px; }
+
+/* The two reader-preference queries that used to close this file now sit in
+   preferences.css, which is imported last of the shared sheets. The
+   forced-colors block restates `.field input:focus` at the specificity
+   surfaces.css declares it at; here it would have lost outright, and there it
+   wins on !important rather than on where it landed, because the page sheets
+   are emitted after it whatever index.css says. */

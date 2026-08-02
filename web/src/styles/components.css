@@ -1,0 +1,231 @@
+/* What the pages are assembled out of: cards, stat tiles, the list tables, the
+   status badge, the five load states, the log pane, the builder and ledger
+   cards, the settings form grid and the project quota block — then the
+   documentation prose block, which sits here rather than in a typography file
+   because it follows the card rules in the cascade and one of its own rules
+   depends on that. */
+/* ---- cards, stats, tables ---- */
+.card {
+  background: var(--pageRaised); border-radius: var(--radius-large);
+  box-shadow: var(--shadow-small); margin-bottom: 24px;
+}
+.card .card-pad { padding: 20px; }
+.card h3.card-title { font: var(--title-3-emphasized); padding: 16px 20px 0; }
+.section-title { font: var(--title-2-emphasized); margin: 0 0 13px; }
+
+.stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 20px; margin-bottom: 24px; }
+/* The tiles arrive on a poll. Reserving their height only while the grid is
+   still empty keeps the heading below from being pushed down 102px once the
+   first payload lands, and costs nothing after that. */
+.stat-grid:empty { min-height: 85px; }
+.stat-tile { background: var(--pageRaised); border-radius: var(--radius-large); box-shadow: var(--shadow-small); padding: 16px 20px; }
+.stat-tile h4 { font: var(--subhead-emphasized); text-transform: uppercase; color: var(--systemSecondary); margin-bottom: 6px; }
+.stat-tile .num { font: var(--title-1-emphasized); font-variant-numeric: tabular-nums; }
+.stat-tile .num small { font: var(--callout); color: var(--systemSecondary); margin-left: 2px; }
+.stat-tile .num.wrap { font: 500 .8125rem/1.5 var(--font-mono); word-break: break-all; }
+
+/* table-layout:fixed pins the column boundaries: these tables repopulate every
+   15s and an auto layout re-measured them against each payload, walking the
+   columns up to 56px sideways under the reader. */
+table.list { width: 100%; border-collapse: collapse; table-layout: fixed; }
+table.list th {
+  font: var(--subhead-emphasized); text-transform: uppercase; color: var(--systemSecondary);
+  text-align: left; padding: 12px 20px; border-bottom: var(--keyline);
+}
+/* Every one of these tables leads with the identifying column — a package
+   atom, a job id, an instance name — which carries the longest strings, so it
+   gets more than an equal share of a fixed layout. */
+table.list th:first-child { width: 24%; }
+table.list td { font: var(--body); padding: 11px 20px; border-bottom: var(--keyline); vertical-align: middle; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+table.list tr:last-child td { border-bottom: 0; }
+table.list tbody tr { transition: background-color 175ms ease-in; }
+table.list tbody tr:hover { background: var(--systemQuinary); }
+table.list td.mono, .mono { font-family: var(--font-mono); font-size: .8125rem; }
+table.list td.sec { color: var(--systemSecondary); }
+/* A fixed layout divides the width it is handed instead of measuring what is in
+   it, so at 360px the seven columns of /builds took 39px each and every cell
+   came back as a one-glyph ladder. These floors are what each column set needs
+   to still read as a row; below them .table-scroll pans instead. The floor is
+   on the table and never on the wrapper: a block box with overflow-x:auto keeps
+   its containing block's width whatever it holds, so none of this can widen the
+   document — the full-width sweep is unchanged, and the columns are still
+   pinned before the first payload arrives. */
+table.list { min-width: 560px; }
+table.list[data-cols="6"] { min-width: 660px; }
+table.list[data-cols="7"] { min-width: 760px; }
+/* Five columns, three of them identifiers — atom, version, profile id — so this
+   set needs the six-column floor rather than the five-column one. */
+table.list.packages { min-width: 660px; }
+/* A pan region a mouse can reach and a keyboard cannot is not a scroll
+   container, it is a trap: tabindex is what puts the arrow keys on it, and the
+   role and label are what say which table is about to move. */
+.table-scroll { overflow-x: auto; }
+
+.status { display: inline-flex; align-items: center; gap: 6px; font: var(--callout-emphasized); white-space: nowrap; }
+.status .dot { width: 7px; height: 7px; border-radius: var(--radius-circle); background: var(--status-color, var(--systemGray)); }
+.status.green  { --status-color: var(--systemGreen); }
+.status.blue   { --status-color: var(--systemBlue); }
+.status.orange { --status-color: var(--systemOrange); }
+.status.red    { --status-color: var(--systemRed); }
+.status.gray   { --status-color: var(--systemGray); }
+/* The same vocabulary, worn by a value instead of by a badge. The token block
+   above declares --successInk and --dangerInk for exactly this and says in
+   writing that text carrying an outcome takes the deepened ink — and the SLO
+   verdict and the write-error count were arriving in --systemSecondary at 400
+   weight, byte-identical to the cost figure beside them that concludes nothing.
+   Only green and red deepen: a token that concludes nothing keeps the row's own
+   ink rather than inventing a third. font-weight, not the font shorthand, so a
+   verdict worn by a counter keeps its tabular figures. */
+.verdict { font-weight: 600; }
+.verdict[data-verdict="green"] { color: var(--successInk); }
+.verdict[data-verdict="red"]   { color: var(--dangerInk); }
+
+/* .empty is where showError renders raw Go transport strings, which arrive as
+   one unbroken token and used to scroll the whole document sideways. */
+.empty { padding: 36px 20px; text-align: center; font: var(--callout); color: var(--systemSecondary); overflow-wrap: anywhere; }
+/* Five states, one box, and the state written on the box as an attribute so the
+   stylesheet and a screen reader read the same value. A failed load used to be
+   dressed exactly like an account with nothing in it — same padding, same
+   secondary ink — and the only thing telling the two apart was a sentence that
+   happened to begin "Failed to load". A surface that loaded and lost one
+   section of itself is a third thing again, and it sits tighter because the
+   rest of the surface is still there to be read. */
+.empty[data-state="error"] { color: var(--dangerInk); }
+.empty[data-state="partial"] { padding: 12px 20px; text-align: start; }
+.provider-status-list { display: grid; gap: 8px; margin-top: 12px; }
+.provider-status-row { padding: 10px 12px; border: 1px solid var(--labelDivider); border-radius: var(--radius-medium); font: var(--callout); overflow-wrap: anywhere; }
+
+pre.log-view {
+  background: var(--systemGray6); border-radius: var(--radius-medium);
+  padding: 16px; overflow: auto; max-height: 70vh;
+  font: 400 .78125rem/1.6 var(--font-mono); color: var(--systemPrimary);
+  white-space: pre-wrap; word-break: break-word;
+}
+
+.builder-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 20px; margin-bottom: 24px; }
+/* One card row, held only until the poll answers. /monitor stacks seven of
+   these grids, so with nothing reserved every heading below the first walks
+   down the page as each section fills in. */
+.builder-grid:empty { min-height: 132px; }
+/* min-width:0 defeats the grid item's automatic minimum size, which is its
+   min-content width — and the nowrap heading below makes that the whole title.
+   Without it a card refused to be narrower than its longest heading: the
+   ellipsis never fired, the card grew past its track, and /monitor scrolled
+   the entire document sideways at every viewport under 416px. */
+.builder-card { background: var(--pageRaised); border-radius: var(--radius-large); box-shadow: var(--shadow-small); padding: 16px 20px; min-width: 0; }
+/* nowrap is what makes the ellipsis apply at all: without it the line wraps,
+   text-overflow never fires, and two different profiles render identically. */
+.builder-card h3 { font: var(--title-3-emphasized); margin-bottom: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.builder-card .ep { font: var(--callout); color: var(--systemSecondary); margin-bottom: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.builder-card .meta { display: flex; justify-content: space-between; font: var(--callout); color: var(--systemSecondary); padding-top: 8px; border-top: var(--keyline); font-variant-numeric: tabular-nums; }
+.ledger-grid { grid-template-columns: 1fr; }
+/* These cards head a fixed phrase, not an identifier, and own a whole row: an
+   ellipsis there loses words for nothing, so they wrap where the
+   variable-length titles above still clip. */
+.ledger-grid .builder-card h3 { white-space: normal; overflow: visible; }
+.ledger-grid .builder-card .meta { justify-content: flex-start; gap: 6px 24px; flex-wrap: wrap; }
+.ledger-grid .builder-card .meta span { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
+/* The reserve for a counter going 9 -> 10, which used to shift the rest of the
+   row on every poll. tabular-nums alone cannot do it: the digit COUNT is what
+   changes, so the slot needs a width of its own. The second selector is not
+   redundant — it has to out-specify the min-width:0 one line above, which is
+   there so the surrounding prose can wrap. */
+.counter { display: inline-block; font-variant-numeric: tabular-nums; }
+.ledger-grid .builder-card .meta .counter { min-width: 2ch; }
+.target-card .meta {
+  flex-direction: column; align-items: flex-start; justify-content: flex-start;
+  gap: 5px; min-width: 0;
+}
+.target-card .meta span { max-width: 100%; overflow-wrap: anywhere; }
+
+.form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 20px; }
+@media (max-width: 800px) { .form-grid { grid-template-columns: 1fr; } }
+.form-actions { display: flex; gap: 10px; align-items: center; margin-top: 8px; }
+.save-msg { font: var(--callout); min-height: 15px; overflow-wrap: anywhere; }
+.save-msg.ok { color: var(--successInk); }
+.save-msg.err { color: var(--dangerInk); }
+/* The quota block reports about twenty numbers. A 240px rail cannot be read
+   as one twenty-fact sentence, so only the limits that actually stop a build
+   stay resident as meters; the rest is one disclosure away. A folded metric
+   that climbs past its warn threshold promotes itself, so nothing important
+   can hide behind the summary. */
+/* The block is one line of "Loading project quota…" until the policy call
+   answers and four meters plus a disclosure afterwards, and the rail moved
+   99.8px under the reader at the moment it landed. Four meters is not a number
+   the payload can change — the four that actually stop a build are always
+   resident — so the height they occupy is known before the request is made and
+   is reserved here: 4 × (14.85px label + 3px gap + 6px bar + 6px margin) plus
+   the 2px and 14.85px the disclosure takes. */
+.policy-summary { margin-top: 7px; min-height: 136px; font: var(--footnote); color: var(--systemSecondary); line-height: 1.45; overflow-wrap: anywhere; }
+.policy-summary[data-state="suspended"] { color: var(--dangerInk); }
+.quota-state { font: var(--footnote); color: var(--dangerInk); margin: 0 0 6px; }
+.quota-meter { display: grid; grid-template-columns: 1fr auto; gap: 0 6px; margin-bottom: 6px; }
+/* break-word, not the anywhere these two inherit from .policy-summary. The
+   difference is not how a long word breaks — it is that anywhere also counts
+   those breaks toward min-content, so each label's contribution to the 1fr
+   track fell to a single glyph, the auto value column took the rest, and
+   "failures" came back as a six-line column 9.7px wide. break-word still breaks
+   a value that cannot fit; it just does not offer the label as one. */
+.quota-k, .quota-dl dt { overflow-wrap: break-word; }
+.quota-k { color: var(--systemSecondary); }
+/* tabular-nums equalises the width of a digit, not the count of them, so
+   "9 / 10" becoming "10 / 10" still moved the value's left edge on every poll.
+   The reserve plus the right edge is what holds it: the column is auto, so the
+   right edge is already the rail's, and both ends are now fixed. */
+.quota-v { min-width: 7ch; text-align: right; color: var(--systemPrimary); font-variant-numeric: tabular-nums; }
+/* 3px reads as a rule, not as a ratio. The whole job of the bar is the
+   proportion between the fill and the track, and at three device pixels the
+   fill's own end could not be told from the track's. */
+.quota-bar { grid-column: 1 / -1; height: 6px; margin-top: 3px; border-radius: var(--radius-pill); background: var(--systemQuinary); overflow: hidden; }
+.quota-bar i { display: block; height: 100%; background: var(--systemSecondary); }
+/* Level is an attribute, not a class, and it drives a shape as well as a
+   colour: a bare hue would be the only signal for a colour-blind operator. */
+.quota-meter[data-level="warn"] .quota-bar i { background: var(--systemOrange); }
+.quota-meter[data-level="crit"] .quota-bar i { background: var(--systemRed); }
+.quota-meter[data-level="warn"] .quota-v::after { content: " !"; }
+.quota-meter[data-level="crit"] .quota-v::after { content: " !!"; }
+.quota-more { margin-top: 2px; }
+/* A word in the same secondary ink as the eight labels above it, sitting in a
+   stack of numbers, is not read as something that opens: the only thing saying
+   "More" was a control was the cursor, which a touch reader never sees. It
+   takes the link ink the rest of the console spends on things you can act on,
+   and a caret that turns when the disclosure does. The default marker is
+   suppressed because it is drawn outside the summary's own box and cannot be
+   aligned with the rail's 8px gutter. */
+.quota-more > summary { cursor: pointer; color: var(--keyColor); list-style: none; }
+.quota-more > summary::-webkit-details-marker { display: none; }
+.quota-more > summary::after { content: "\203a"; display: inline-block; margin-inline-start: 4px; transition: transform var(--hover-transition); }
+.quota-more[open] > summary::after { transform: rotate(90deg); }
+.quota-more > summary:focus-visible { outline: 2px solid var(--focusRing); outline-offset: 2px; }
+.quota-dl { margin: 6px 0 0; display: grid; grid-template-columns: 1fr auto; gap: 3px 6px; }
+.quota-dl dt { color: var(--systemSecondary); margin: 0; }
+.quota-dl dd { margin: 0; color: var(--systemPrimary); font-variant-numeric: tabular-nums; text-align: right; }
+
+.docs-body { max-width: var(--readingWidth); }
+.docs-body h2 { font: var(--title-2-emphasized); margin: 26px 0 10px; }
+.docs-body h2:first-child { margin-top: 0; }
+.docs-body p { font: var(--body-tall); color: var(--systemSecondary); margin-bottom: 8px; text-wrap: pretty; }
+.docs-body pre { font: 400 .78125rem/1.6 var(--font-mono); color: var(--systemPrimary); background: var(--systemQuinary); border-radius: var(--radius-medium); padding: 12px 14px; margin: 8px 0 14px; overflow-x: auto; }
+
+/* ---- step-up ---- */
+/* The credential a 428 asks for, drawn on top of the page the write was made
+   from and never instead of it: the reader clicked a control on a page they
+   were reading, and a credential request is a thing over that page. Same card
+   and same backdrop as the confirmation dialog, because it is the same kind of
+   interruption — it lives here rather than in a page stylesheet because six
+   controls across three routes can raise it. */
+.stepup-dialog {
+  border: 0;
+  padding: 20px 24px;
+  max-width: 24rem;
+  width: calc(100% - 32px);
+  border-radius: var(--radius-large);
+  background: var(--pageRaised);
+  color: var(--systemPrimary);
+  box-shadow: var(--shadow-medium);
+}
+.stepup-dialog::backdrop { background: var(--scrim); }
+.stepup-dialog h2 { font: var(--title-3-emphasized); margin-bottom: 14px; }
+/* The pair reads right-to-left like every other confirmation in the console:
+   the control that proceeds is the last one, nearest the thumb. */
+.stepup-actions { justify-content: flex-end; }

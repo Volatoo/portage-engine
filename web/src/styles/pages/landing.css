@@ -1,0 +1,33 @@
+/* The landing page, now that it sits inside the one public chrome rather than
+   carrying a nav and a footer of its own.
+
+   `.public-main` already provides the layout column and the body gutter, so the
+   three sections below drop the horizontal padding they carried when they were
+   the whole document — otherwise every block is inset by two gutters and the
+   hero starts 150px down the page. Everything else about them is unchanged and
+   still declared in surfaces.css. */
+.landing-page .landing-hero {
+  padding: 42px 0 56px;
+}
+.landing-page .landing-grid {
+  padding: 0 0 56px;
+}
+.landing-page .landing-flow {
+  padding: 0;
+}
+/* Two buttons whose labels are set by the catalogue, in a row 270px wide at the
+   narrowest supported viewport. "Open Console" and "Documentation" together
+   measure within a glyph or two of that, and a longer pair in any future
+   locale has nowhere to go: a flex row with no wrap overflows its container
+   rather than folding, and an overflowing hero scrolls the whole document. */
+.landing-page .landing-hero .cta {
+  flex-wrap: wrap;
+}
+/* A grid item's automatic minimum size is its min-content width, and the card
+   headings are ordinary prose that can wrap — but `Standard Packages index` in
+   a 20px bold face still sets a floor, and a locale with a longer compound word
+   sets a higher one. The step below already carries this; the card is the other
+   three-column track on the page and it did not. */
+.landing-page .landing-card {
+  min-width: 0;
+}

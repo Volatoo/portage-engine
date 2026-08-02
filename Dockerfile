@@ -1,3 +1,21 @@
+# Build the operator console. It is a separate stage because npm is a build
+# dependency of exactly one thing — the dashboard's embedded frontend — and
+# nothing that ships. The lockfile is copied on its own so a source-only change
+# reuses the install layer, and `npm ci` (not `npm install`) is what makes the
+# resolved tree the same one the lockfile records.
+FROM node:22.23.2-bookworm-slim@sha256:f32b81066cde10a75dbac96646099533316d94bac4150c55da1636e1f0ffdc46 AS web-build
+
+WORKDIR /app/web
+
+COPY web/package.json web/package-lock.json ./
+RUN npm ci
+
+COPY web/ ./
+# Writes to /app/internal/dashboard/webassets/bundle/dist — the layout mirrors
+# the repository so the outDir in vite.config.ts needs no container-specific
+# override.
+RUN npm run build
+
 # Build the control-plane binaries. Package builds are deliberately excluded:
 # portage-builder runs only in a disposable native Gentoo root/VM.
 FROM golang:1.26.5@sha256:3aff6657219a4d9c14e27fb1d8976c49c29fddb70ba835014f477e1c70636647 AS go-build
@@ -10,6 +28,12 @@ RUN go mod download
 COPY cmd ./cmd
 COPY internal ./internal
 COPY pkg ./pkg
+
+# After COPY internal, so the freshly built bundle is what go:embed compiles in.
+# .dockerignore keeps the host's own dist out of the build context, so this is
+# the only way a bundle can get here.
+COPY --from=web-build /app/internal/dashboard/webassets/bundle/dist \
+     ./internal/dashboard/webassets/bundle/dist
 
 RUN CGO_ENABLED=0 go build -trimpath -o /out/portage-server ./cmd/server && \
     CGO_ENABLED=0 go build -trimpath -o /out/portage-dashboard ./cmd/dashboard && \

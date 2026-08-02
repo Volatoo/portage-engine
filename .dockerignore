@@ -20,3 +20,10 @@ backups
 *.swp
 .DS_Store
 coverage*
+
+# The console is built in its own stage from web/package-lock.json. Both of
+# these exist on a normal working copy and neither may reach the Go build:
+# node_modules is a several-hundred-megabyte host artifact, and a host-built
+# bundle would be embedded in place of the one the image just built.
+web/node_modules
+internal/dashboard/webassets/bundle/dist

@@ -29,6 +29,12 @@ jobs:
         run: go mod verify
 
       - name: Test build
+        # Deliberately with no npm run before it. The dashboard embeds the
+        # console bundle, and this job is the standing proof that a Go-only
+        # checkout still compiles: the committed placeholder inside
+        # internal/dashboard/webassets/bundle keeps the //go:embed pattern
+        # matching, and /ui reports the missing bundle at runtime instead of the
+        # build failing for everyone who has not installed node.
         run: go build ./...
 
       - name: golangci-lint
@@ -107,6 +113,109 @@ jobs:
           flags: unittests
           fail_ci_if_error: false
 
+  console:
+    name: Operator console
+    runs-on: ubuntu-latest
+    env:
+      # The verbose reporter's output is read back below. Colour codes would sit
+      # between the marker and the test name and break every grep.
+      NO_COLOR: '1'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Set up Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: '22.23.2'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: '1.26.5'
+          cache: true
+
+      - name: Install console dependencies
+        # `npm ci` rather than `npm install`: it installs exactly the tree the
+        # committed lockfile records and fails when package.json and the lockfile
+        # disagree, which is what makes the build reproducible offline.
+        run: npm ci
+        working-directory: web
+
+      - name: Build console
+        run: npm run build
+        working-directory: web
+
+      - name: Lint console
+        # eslint, stylelint and prettier --check. stylelint is in there because
+        # the console this replaces kept its stylesheet in a Go string constant,
+        # where a rule that broke the shell on every page passed go build, go vet,
+        # go test and golangci-lint without being read as CSS once.
+        run: npm run lint
+        working-directory: web
+
+      - name: Test console
+        run: |
+          set -euo pipefail
+          npm run test 2>&1 | tee "${RUNNER_TEMP}/vitest.log"
+        working-directory: web
+
+      - name: Assert the console suite executed
+        # A green `npm run test` proves nothing on its own: an include pattern
+        # that stops matching, or a describe block turned into describe.skip,
+        # both report success. Naming the cases that carry the invariants makes
+        # either of those red. The summary check is the second half — a skipped
+        # case still prints its name, so the names alone would pass a suite that
+        # quietly stopped running.
+        run: |
+          set -euo pipefail
+          log="${RUNNER_TEMP}/vitest.log"
+          for name in \
+            "falls back to the language stamped on the html element when the payload is missing" \
+            "does not read the operating system locale when the server sent nothing" \
+            "leaves the principal unknown rather than inventing an anonymous one" \
+            "turns a flag on only for a literal true, so a drifted payload fails closed" \
+            "declares every dark token in the light block, so a dark typo cannot be silent" \
+            "draws the focus ring as an outline, which forced colors keeps" \
+            "clamps every animation under prefers-reduced-motion: reduce"
+          do
+            grep -qF -- "${name}" "${log}" || {
+              echo "console case '${name}' did not run" >&2
+              exit 1
+            }
+          done
+          summary=$(grep -E '^[[:space:]]*Tests[[:space:]]+' "${log}" | tail -1)
+          echo "vitest summary: ${summary}"
+          case "${summary}" in
+            *skipped*|*failed*|*todo*)
+              echo "the console suite did not finish with every case passed" >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Go tests against the built bundle
+        run: |
+          set -euo pipefail
+          go test -v ./internal/dashboard/... 2>&1 | tee "${RUNNER_TEMP}/console-go-test.log"
+
+      - name: Assert the tests that need a built bundle executed
+        # These two skip when npm has not run, which is the normal state of a
+        # working copy and of the Go test job. Naming them is what makes a build
+        # ordering mistake red: PASS becomes SKIP the moment the bundle is
+        # missing, and a suite full of SKIP is still a green `go test`.
+        run: |
+          set -euo pipefail
+          for name in \
+            TestBuiltBundleIsMountedAtTheAssetPrefixTheServerServes \
+            TestConsoleServesTheShellForEveryRouteItNames
+          do
+            grep -q -- "--- PASS: ${name} " "${RUNNER_TEMP}/console-go-test.log" || {
+              echo "${name} did not execute against a built console bundle" >&2
+              exit 1
+            }
+          done
+
   build:
     name: Build
     runs-on: ubuntu-latest
@@ -117,10 +226,27 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
+      - name: Set up Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: '22.23.2'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
       - name: Set up Go
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version: '1.26.5'
+
+      - name: Build the console bundle
+        # Before the Go build, because the dashboard binary embeds it. Without
+        # this the uploaded artifact would start, serve every old route, and
+        # answer 503 on /ui — a defect only a browser would find.
+        run: |
+          set -eu
+          npm ci
+          npm run build
+        working-directory: web
 
       - name: Build
         env:

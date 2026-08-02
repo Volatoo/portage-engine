@@ -1,0 +1,82 @@
+/* The instance terminal's own chrome.
+
+   The two rules that keep this page from scrolling the document sideways —
+   `#term { overflow-x: auto }` and the sticky head — are in panels.css, beside
+   the paragraph explaining why the screen is 220 columns wide in the first
+   place. What is here is the rest of the page: a viewport-height column, so the
+   terminal takes exactly the space the head does not.
+
+   The column is what replaces the `calc(100vh - 46px)` the ported page used.
+   That number was the head's height on one machine in one language; a head that
+   wrapped — which it does at 375px, with Back, the instance id, the connection
+   state and the language control in it — left the terminal 46px too tall and
+   put a scrollbar on the document, which is the failure this page is being
+   fixed for. A flex column has no number in it to be wrong. */
+.shell-page {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+.shell-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  flex: none;
+  min-height: 46px;
+  padding: 10px 16px;
+  border-bottom: var(--keyline);
+}
+.shell-head .brand {
+  font: var(--body-emphasized);
+}
+/* The instance id is the one string here the console does not choose the length
+   of. It ellipsises rather than wrapping, because a wrapped id is a head one
+   row taller for a string the `title` attribute carries in full anyway. */
+.shell-head .iid {
+  font: 500 0.75rem var(--font-mono);
+  color: var(--systemSecondary);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.shell-head .lang-btn {
+  margin-inline-start: auto;
+}
+/* min-height:0 defeats the flex item's automatic minimum size, which is its
+   content's — and the content here is a 220-column terminal. Without it the
+   item refuses to be narrower or shorter than that screen and the container
+   grows to fit it, which is the same document-level overflow by another route. */
+#term {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+}
+.xterm {
+  height: 100%;
+}
+/* The same box before the terminal has it: whether the page is authorizing,
+   asking for a password or refusing, the region below the head is one shape, so
+   nothing moves when the answer arrives. */
+.shell-gate {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--bodyGutter);
+}
+.shell-stepup {
+  width: min(100%, var(--authCardWidth));
+  background: var(--pageRaised);
+  border-radius: var(--radius-large);
+  box-shadow: var(--shadow-medium);
+  padding: 28px;
+}
+.shell-stepup .btn {
+  width: 100%;
+  margin-top: 6px;
+}

@@ -1,0 +1,36 @@
+// One project, covering src and the build config. Project references were not
+// worth their machinery here: two tsconfigs and a solution file exist to keep
+// incremental builds fast on a tree far larger than this one.
+//
+// TypeScript is pinned to 5.9 rather than the current 7.x on purpose. The repo
+// pins every version, and typescript-eslint 8 declares `typescript <6.1.0` as a
+// peer, so a 7.x here silently drops type-aware linting — the half of the lint
+// job that can see anything a compiler could.
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "moduleDetection": "force",
+    "jsx": "react-jsx",
+    "types": ["node", "vite/client"],
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "allowImportingTsExtensions": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+
+    "strict": true,
+    "noImplicitOverride": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "erasableSyntaxOnly": true,
+    "noUncheckedSideEffectImports": true
+  },
+  "include": ["src", "vite.config.ts"]
+}

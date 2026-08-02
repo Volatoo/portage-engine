@@ -1,0 +1,22 @@
+/* The two controls every surface uses, before any surface declares one.
+   Order inside this file and against its siblings is load-bearing; index.css
+   holds the reason. */
+/* ---- pill buttons ---- */
+.btn {
+  border: 0; cursor: pointer; display: inline-block;
+  border-radius: var(--radius-pill); padding: 7px 16px;
+  font: var(--body-bold-tall); word-break: keep-all;
+  transition: background-color .14s ease-out;
+  background: rgba(var(--keyColor-rgb), calc(var(--alpha-multiplier) * .06));
+  color: var(--onTintInk);
+}
+.btn:hover  { background: rgba(var(--keyColor-rgb), calc(var(--alpha-multiplier) * .1)); transition: background-color .21s ease-out; }
+.btn:active { background: rgba(var(--keyColor-rgb), calc(var(--alpha-multiplier) * .07)); }
+.btn.blue        { background: var(--accentFill); color: var(--onAccentInk); }
+.btn.blue:hover  { background: color-mix(in srgb, var(--accentFill), #000 3%); }
+.btn.blue:active { background: color-mix(in srgb, var(--accentFill), #000 6%); }
+.btn.danger      { color: var(--dangerInk); }
+.btn[disabled] { opacity: .4; cursor: default; }
+.btn[aria-disabled="true"] { opacity: .4; cursor: default; }
+.lang-btn { border: 0; background: none; cursor: pointer; font: var(--callout); color: var(--systemSecondary); padding: 4px 8px; border-radius: var(--radius-pill); transition: background-color 175ms ease-in; }
+.lang-btn:hover { background: var(--systemQuinary); }

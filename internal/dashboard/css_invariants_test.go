@@ -8,6 +8,7 @@ package dashboard
 // refuses the next instance rather than the last one.
 
 import (
+	"fmt"
 	"math"
 	"regexp"
 	"strconv"
@@ -451,6 +452,280 @@ func TestCSSFocusRingClearsTheAccentButton(t *testing.T) {
 			t.Errorf("%s: --focusRing over --accentFill is %.2f:1, under the 3:1 "+
 				"WCAG 1.4.11 floor for a non-text indicator", mode.name, ratio)
 		}
+	}
+}
+
+// A contrast ratio is a property of a PAIR the DOM composed, never of a token.
+// Almost every ink in these blocks carries alpha and almost every surface under
+// it does too, so measuring a token against its own declared value answers a
+// question no reader ever asks. The comments in the token block were written
+// that way — --keyColor is annotated "4.02:1 on #fff", which is a real number
+// about #fff and not about --pageFloor, where the same ink measured 4.31:1 and
+// the quiet button on top of its own tint wash measured 3.99:1. The four gates
+// below assemble the ground first, one composite at a time, and only then ask
+// for the ratio.
+
+// modes is the two mode blocks, named so a failure says which one it is in.
+var modes = []struct {
+	name string
+	dark bool
+}{{"light", false}, {"dark", true}}
+
+// surface is one ground a reader actually sees, already composited down to the
+// page floor. The name is the chain that produced it, so a failure names the
+// stack rather than a colour nobody wrote.
+type surface struct {
+	name string
+	c    srgb
+}
+
+// modeSurfaces builds every ground text is set on in this stylesheet. The three
+// bases are the page floor, the raised card over it and the sidebar rail over
+// it; the alpha fills (--systemQuinary on a hovered row, a chip and a code
+// block, --systemQuaternary on the stage and step cards, --systemGray6 on the
+// log view, --controlBG inside a field) are composited onto whichever of those
+// three they are actually painted over.
+func modeSurfaces(t *testing.T, mode string, tokens map[string]string) []surface {
+	t.Helper()
+	floor := modeColor(t, mode, tokens, "--pageFloor")
+	raised := over(modeColor(t, mode, tokens, "--pageRaised"), floor)
+	nav := over(modeColor(t, mode, tokens, "--navSidebarBG"), floor)
+	on := func(token string, ground surface) surface {
+		return surface{token + " over " + ground.name, over(modeColor(t, mode, tokens, token), ground.c)}
+	}
+	base := []surface{{"--pageFloor", floor}, {"--pageRaised", raised}, {"--navSidebarBG", nav}}
+	out := append([]surface(nil), base...)
+	for _, ground := range base {
+		out = append(out, on("--systemQuinary", ground))
+	}
+	// The quaternary cards and the log view only ever sit inside a card, and the
+	// controls sit both inside one and on the bare page.
+	out = append(out,
+		on("--systemQuaternary", base[1]),
+		on("--systemGray6", base[1]),
+		on("--controlBG", base[1]),
+		on("--controlBG", base[0]),
+	)
+	return out
+}
+
+// accentTint is the wash the stylesheet mixes under the quiet button, the
+// current nav item and the current pipeline chip. It is a colour no token
+// declares: it is --keyColor-rgb at an alpha the dark block scales through
+// --alpha-multiplier, so it has to be assembled from both before anything can
+// be measured standing on it.
+func accentTint(t *testing.T, mode string, tokens map[string]string, alpha float64, ground srgb) srgb {
+	t.Helper()
+	channels, ok := resolveToken(tokens, "--keyColor-rgb")
+	if !ok {
+		t.Fatalf("%s: --keyColor-rgb is declared nowhere, so no tint can be assembled", mode)
+	}
+	multiplier, err := strconv.ParseFloat(strings.TrimSpace(tokens["--alpha-multiplier"]), 64)
+	if err != nil {
+		t.Fatalf("%s: --alpha-multiplier = %q is not a number", mode, tokens["--alpha-multiplier"])
+	}
+	wash, ok := parseColor(fmt.Sprintf("rgba(%s, %g)", channels, alpha*multiplier))
+	if !ok {
+		t.Fatalf("%s: rgba(%s, %g) is not a colour this gate can measure", mode, channels, alpha*multiplier)
+	}
+	return over(wash, ground)
+}
+
+// TestCSSTextInkClearsEverySurfaceItLandsOn is the body-text floor, 4.5:1, held
+// against composited grounds rather than against #fff. --systemSecondary is the
+// tight one: it clears by 0.04 on a quaternary card, which is the whole reason
+// this measures the stack instead of the token — one more alpha layer under it
+// and the rung is under the floor with nothing on screen to say so.
+func TestCSSTextInkClearsEverySurfaceItLandsOn(t *testing.T) {
+	decls := parseCSS()
+	for _, mode := range modes {
+		tokens := rootTokens(decls, mode.dark)
+		surfaces := modeSurfaces(t, mode.name, tokens)
+		for _, ink := range []string{"--systemPrimary", "--systemSecondary", "--successInk", "--dangerInk"} {
+			colour := modeColor(t, mode.name, tokens, ink)
+			for _, s := range surfaces {
+				// The status inks dress an outcome sentence in a card, on the
+				// page and in the sidebar rail; they never land on a fill.
+				if strings.HasSuffix(ink, "Ink") && strings.Contains(s.name, " over ") {
+					continue
+				}
+				if ratio := contrastRatio(over(colour, s.c), s.c); ratio < 4.5 {
+					t.Errorf("%s: %s on %s is %.2f:1, under the 4.5:1 floor for body text",
+						mode.name, ink, s.name, ratio)
+				}
+			}
+		}
+	}
+}
+
+// TestCSSAccentInkClearsTheGroundItIsWrittenOn pins the pair three separate
+// readings converged on. A tint wash of the key colour is not a surface the key
+// colour can be written on: --keyColor over its own 6% wash measured 3.99:1 on
+// the page floor and its 8% wash in the sidebar 3.70:1, both under the floor
+// 14px bold has, and the fix is an ink token for that ground rather than a
+// darker value pasted into each of the four rules that needed one.
+func TestCSSAccentInkClearsTheGroundItIsWrittenOn(t *testing.T) {
+	decls := parseCSS()
+	for _, mode := range modes {
+		tokens := rootTokens(decls, mode.dark)
+		floor := modeColor(t, mode.name, tokens, "--pageFloor")
+		raised := over(modeColor(t, mode.name, tokens, "--pageRaised"), floor)
+		nav := over(modeColor(t, mode.name, tokens, "--navSidebarBG"), floor)
+		ink := modeColor(t, mode.name, tokens, "--onTintInk")
+		// Every base alpha the stylesheet mixes the accent at: the quiet button
+		// resting, active and hovered, and the current nav item.
+		for _, alpha := range []float64{.06, .07, .08, .1} {
+			for _, ground := range []surface{{"--pageRaised", raised}, {"--pageFloor", floor}, {"--navSidebarBG", nav}} {
+				wash := accentTint(t, mode.name, tokens, alpha, ground.c)
+				if ratio := contrastRatio(over(ink, wash), wash); ratio < 4.5 {
+					t.Errorf("%s: --onTintInk on a %.0f%% accent wash over %s is %.2f:1, "+
+						"under the 4.5:1 floor the button and nav label need",
+						mode.name, alpha*100, ground.name, ratio)
+				}
+			}
+		}
+		// The filled half of the same pair: white on the accent, which is a
+		// different token because the tint and the fill are different grounds.
+		for _, ground := range []surface{{"--pageRaised", raised}, {"--pageFloor", floor}} {
+			fill := over(modeColor(t, mode.name, tokens, "--accentFill"), ground.c)
+			label := over(modeColor(t, mode.name, tokens, "--onAccentInk"), fill)
+			if ratio := contrastRatio(label, fill); ratio < 4.5 {
+				t.Errorf("%s: --onAccentInk on --accentFill over %s is %.2f:1, "+
+					"under the 4.5:1 floor", mode.name, ground.name, ratio)
+			}
+		}
+	}
+}
+
+// TestCSSControlBorderReadsAsAnEdge pins 1.4.11 for the boundary that IS the
+// control. A field's fill is --controlBG and the card behind it is the same
+// colour, so the 1px border is the only thing saying where the input starts;
+// --labelDivider, which is right for a hairline between two table rows, measured
+// 1.41:1 there. The edge is checked against both sides — its own fill and the
+// page around it — because 3:1 against one of them is not a visible edge.
+func TestCSSControlBorderReadsAsAnEdge(t *testing.T) {
+	decls := parseCSS()
+	for _, mode := range modes {
+		tokens := rootTokens(decls, mode.dark)
+		floor := modeColor(t, mode.name, tokens, "--pageFloor")
+		raised := over(modeColor(t, mode.name, tokens, "--pageRaised"), floor)
+		for _, ground := range []surface{{"--pageRaised", raised}, {"--pageFloor", floor}} {
+			fill := over(modeColor(t, mode.name, tokens, "--controlBG"), ground.c)
+			edge := over(modeColor(t, mode.name, tokens, "--controlBorder"), fill)
+			for _, against := range []surface{{"--controlBG", fill}, {ground.name, ground.c}} {
+				if ratio := contrastRatio(edge, against.c); ratio < 3 {
+					t.Errorf("%s: --controlBorder on a control over %s is %.2f:1 against %s, "+
+						"under the 3:1 WCAG 1.4.11 floor for the boundary that identifies the control",
+						mode.name, ground.name, ratio, against.name)
+				}
+			}
+		}
+	}
+}
+
+// TestCSSPipelineFoldsInsteadOfPanning pins the row that could not be read.
+// Nine stages in one nowrap flex row measured 1195px inside a 285px box at
+// 375px: the failing Publish cell sat 793px past the right edge, two of the
+// nine were visible, and the only thing saying the rest existed was a
+// scrollbar. Two declarations carry the fix — the row folds, and the chip may
+// break its own label rather than force the fold to fail.
+// Red by: dropping flex-wrap from .pipeline, or putting white-space: nowrap
+// back on .pipe-chip.
+func TestCSSPipelineFoldsInsteadOfPanning(t *testing.T) {
+	folds := false
+	for _, d := range parseCSS() {
+		if d.selector == ".pipeline" && d.prop == "flex-wrap" && d.value == "wrap" {
+			folds = true
+		}
+		if d.selector == ".pipe-chip" && d.prop == "white-space" {
+			t.Errorf(".pipe-chip { white-space: %s } stops the chip breaking its own "+
+				"label, so a fold that cannot fit one chip overflows instead", d.value)
+		}
+	}
+	if !folds {
+		t.Error(".pipeline does not declare flex-wrap: wrap; nine stages then hold " +
+			"one row wider than any viewport the console is read at")
+	}
+}
+
+// TestCSSFailedSurfacesShareOneTreatment pins the pair. The failed stage was
+// told from the eight that were not by nothing at all — same grey card, and an
+// error block computing to rgb(255,255,255) with border 0px none, byte-
+// identical to an ordinary card. The wash and the ink are declared once for the
+// chip and reused, so a failure cannot read one way in the row and another way
+// in the card under it.
+// Red by: removing the failed stage card rule or the failure report's edge.
+func TestCSSFailedSurfacesShareOneTreatment(t *testing.T) {
+	want := map[string]string{
+		".pipe-stage.failed .pipe-chip": "background",
+		".stage-log-card.failed":        "background",
+		".failure-report":               "border",
+	}
+	for _, d := range parseCSS() {
+		prop, ok := want[d.selector]
+		if !ok || d.prop != prop {
+			continue
+		}
+		if !strings.Contains(d.value, "--systemRed") && !strings.Contains(d.value, "--dangerInk") {
+			t.Errorf("%s { %s: %s } does not carry the failure token", d.selector, d.prop, d.value)
+		}
+		delete(want, d.selector)
+	}
+	for selector, prop := range want {
+		t.Errorf("%s declares no %s, so a failure is not distinguished there", selector, prop)
+	}
+}
+
+// TestCSSQuotaMeterSpeaksOnTwoChannels pins the rail's near-limit signal. The
+// meter is the only thing in the console that says a build is about to be
+// refused, and hue alone cannot say it: the level drives a bar colour AND a
+// suffix on the value, so an operator who cannot separate orange from red still
+// reads "9 / 10 !!". The bar's own height is part of the same reading — the
+// whole point of a bar is the proportion between the fill and the track, and at
+// three device pixels the fill's end could not be told from the track's.
+// Red by: dropping either ::after rule, or thinning the bar back to 3px.
+func TestCSSQuotaMeterSpeaksOnTwoChannels(t *testing.T) {
+	suffixes := map[string]string{"warn": `" !"`, "crit": `" !!"`}
+	hues := map[string]string{"warn": "--systemOrange", "crit": "--systemRed"}
+	for _, d := range parseCSS() {
+		for level := range suffixes {
+			if d.selector == `.quota-meter[data-level="`+level+`"] .quota-v::after` && d.prop == "content" {
+				if d.value != suffixes[level] {
+					t.Errorf("the %s suffix is %s, not %s; the word channel is what a "+
+						"reader who cannot use the hue is left with", level, d.value, suffixes[level])
+				}
+				delete(suffixes, level)
+			}
+			if d.selector == `.quota-meter[data-level="`+level+`"] .quota-bar i` && d.prop == "background" {
+				if !strings.Contains(d.value, hues[level]) {
+					t.Errorf("the %s bar is %s, not %s", level, d.value, hues[level])
+				}
+				delete(hues, level)
+			}
+		}
+		if d.selector == ".quota-bar" && d.prop == "height" {
+			height, err := strconv.ParseFloat(strings.TrimSuffix(d.value, "px"), 64)
+			if err != nil || height < 6 {
+				t.Errorf(".quota-bar { height: %s } is too thin to read as a ratio", d.value)
+			}
+		}
+	}
+	for level := range suffixes {
+		t.Errorf("the %s level has no ::after suffix, so it is signalled by hue alone", level)
+	}
+	for level := range hues {
+		t.Errorf("the %s level does not recolour its bar", level)
+	}
+	// The rail's numbers move under the reader when a count gains a digit;
+	// tabular figures equalise digit width, not digit count.
+	reserved := false
+	for _, d := range parseCSS() {
+		if d.selector == ".quota-v" && d.prop == "min-width" {
+			reserved = true
+		}
+	}
+	if !reserved {
+		t.Error(".quota-v reserves no width, so the value shifts as the count gains a digit")
 	}
 }
 

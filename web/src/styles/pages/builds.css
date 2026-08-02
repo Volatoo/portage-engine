@@ -1,0 +1,215 @@
+/* The four build routes: /overview, /builds, /build/:jobID and /logs/:jobID.
+
+   Everything the pipeline, the failure report, the stage cards, the log pane and
+   the list tables already had is in panels.css and components.css and is not
+   restated here. What is here is what those four pages needed and the ported
+   stylesheet had no rule for: the reserve a list holds before its payload
+   arrives, the filter and pager rows, the separation between a destructive
+   control and the controls beside it, and the confirmation dialog. */
+
+/* ---- reserved geometry ---- */
+/* A list arrives on a poll, and the card under it used to walk down the page
+   when it landed — 103px on /overview. The skeleton rows hold the table's own
+   height and this holds the block's floor, so a list that comes back empty and
+   a list that comes back full both land in a box that was already this tall. */
+.table-block {
+  min-height: 220px;
+}
+/* The same reserve, for the card that stands where the pipeline and its nine
+   stage cards will be once the record answers. */
+.detail-state {
+  min-height: 160px;
+}
+/* A bar, not a dash and not a zero: a placeholder that reads as a value is a
+   reading, and "0 building" is a fact about a cluster this page has not heard
+   from yet. Aria-hidden at the row, so nothing announces it. */
+.skeleton-row td {
+  height: 42px;
+}
+.skeleton-bar {
+  display: inline-block;
+  width: 62%;
+  height: 11px;
+  vertical-align: middle;
+  border-radius: var(--radius-small);
+  background: var(--systemQuinary);
+}
+/* The five counters on /overview and the duration on a detail page all change
+   their DIGIT COUNT, which tabular figures do not equalise: the reserve is what
+   stops the tile's own value moving under the reader on every poll. */
+.stat-num {
+  display: inline-block;
+  min-width: 3ch;
+}
+.duration-value {
+  min-width: 8ch;
+}
+/* The metadata tiles take the title-3 rung and not the headline the counter
+   tiles take: Status, Arch, Created, Updated and Duration are labelled facts,
+   and a formatted timestamp at 26px wraps inside a minmax(160px, 1fr) tile.
+   The Go markup said so per tile with an inline `style` attribute, so it beat
+   `.stat-tile .num` without having to name it; a bare class cannot, because
+   that rule is (0,2,0) and this would be (0,1,0). Out-specifying it is also how
+   settings.css states the same override on the same element
+   (`.stat-tile .num.settings-gpg-state`), so both sites win by specificity and
+   neither depends on where its file lands in the bundle.
+
+   The shorthand resets font-variant-numeric, exactly as the inline `style.font`
+   it replaces did; the duration is the one of these that needs tabular figures
+   and it carries `.counter`, which sets them on the span itself. */
+.stat-tile .num.meta-value {
+  font: var(--title-3-emphasized);
+}
+
+/* ---- filter and pager ---- */
+.list-filter {
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+/* min-width:0 defeats the flex item's automatic minimum size, which for a field
+   is the input's own intrinsic width — about twenty characters, and wider than
+   the 270px a 320px viewport has left after the gutters. Without it the row
+   cannot shrink and the document scrolls sideways at the narrowest width the
+   sweep covers. */
+.list-filter .field {
+  margin-bottom: 0;
+  flex: 1 1 200px;
+  min-width: 0;
+  max-width: 22rem;
+}
+.list-filter .field input,
+.list-filter .field select {
+  min-height: 38px;
+}
+.list-note {
+  font: var(--callout);
+  color: var(--systemSecondary);
+  margin-bottom: 12px;
+}
+/* Always in the flow and empty most of the time: it carries what a write said,
+   and a line that appears from nowhere moves everything under it. The height is
+   one line of its own type. */
+.write-note {
+  font: var(--callout);
+  color: var(--dangerInk);
+  min-height: 19px;
+  margin-bottom: 8px;
+  overflow-wrap: break-word;
+}
+.pager {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 24px;
+}
+.pager-range {
+  font: var(--callout);
+  color: var(--systemSecondary);
+  min-width: 9ch;
+  text-align: center;
+}
+/* The controls sit beside the live region and not inside it, so the selector
+   binding them to a state reads that state off the wrapper the pair shares. */
+.state-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: center;
+  flex-wrap: wrap;
+  margin-top: 10px;
+}
+.build-state[data-state='partial'] .state-actions {
+  justify-content: flex-start;
+}
+
+/* ---- destructive controls ---- */
+/* "Clean Up Failed" sat beside "Refresh" in the same blue pill, at the same
+   size and weight, and it deletes every failed record on the deployment;
+   "Delete Job" sat between "Retry Job" and "Refresh" the same way. Three things
+   separate them now: they come last, a rule stands between them and the safe
+   controls, and the danger ink is on the edge as well as on the label, so the
+   difference survives a reader who cannot use the hue. */
+.danger-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding-inline-start: 12px;
+  border-inline-start: var(--keyline);
+}
+.danger-actions .btn.danger,
+.confirm-actions .btn.danger {
+  box-shadow: inset 0 0 0 1px var(--dangerInk);
+}
+@media (max-width: 520px) {
+  /* Wrapped onto its own line the rule would divide nothing, and a border on
+     the leading edge of a line reads as a list marker. */
+  .danger-actions {
+    padding-inline-start: 0;
+    border-inline-start: 0;
+  }
+}
+
+/* ---- confirmation ---- */
+/* The modality, the focus trap, the Escape key and the inert background are the
+   element's own; what is styled here is the card it draws. It sits at the
+   card's elevation and not above it in colour, because the sentence and the
+   count are what the reader is here for. */
+.confirm-dialog {
+  border: 0;
+  padding: 20px 24px;
+  max-width: 30rem;
+  width: calc(100% - 32px);
+  border-radius: var(--radius-large);
+  background: var(--pageRaised);
+  color: var(--systemPrimary);
+  box-shadow: var(--shadow-medium);
+}
+.confirm-dialog::backdrop {
+  background: var(--scrim);
+}
+.confirm-dialog h2 {
+  font: var(--title-3-emphasized);
+}
+.confirm-detail {
+  margin-top: 8px;
+  font: var(--body);
+  color: var(--systemSecondary);
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: break-word;
+}
+.confirm-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+  margin-top: 20px;
+  flex-wrap: wrap;
+}
+
+/* ---- failure report and artifacts ---- */
+/* The log line the failing stage wrote, under the control plane's own sentence
+   and set apart from it: one is the record's account of the failure and the
+   other is the builder's, and reading them as one paragraph makes the second
+   look like a continuation of the first. */
+.failure-report .failure-line {
+  margin-top: 9px;
+  padding-top: 9px;
+  border-top: var(--keyline);
+  font: 400 0.78125rem/1.6 var(--font-mono);
+  color: var(--systemSecondary);
+  overflow-wrap: break-word;
+}
+.artifact-extra {
+  display: block;
+  margin-top: 4px;
+  font: var(--footnote);
+}
+.artifact-extra-note {
+  display: block;
+  margin-top: 4px;
+  font: var(--footnote);
+  color: var(--systemSecondary);
+}

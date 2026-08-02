@@ -277,6 +277,322 @@ func TestStylesheetLinksCarryTheContentDigest(t *testing.T) {
 	}
 }
 
+// The build detail page carried two elements with the same class: an empty
+// pre for the job error and the live log pane. Anything reading .log-view on
+// that page — a reader hunting for the log, a probe measuring it — got the
+// error box, which is empty on a job that succeeded and holds one sentence on
+// a job that failed, and concluded the log renderer was dead.
+// Red by: dressing the failure report as a <pre class="log-view"> again.
+func TestBuildDetailHasExactlyOneLogPane(t *testing.T) {
+	if n := strings.Count(buildDetailHTML, `class="log-view"`); n != 1 {
+		t.Errorf("build detail carries %d .log-view elements; the log pane must be "+
+			"the only thing on the page wearing the class that names it", n)
+	}
+	if !strings.Contains(buildDetailHTML, `<pre class="log-view" id="live-log">`) {
+		t.Error("the one .log-view on build detail is not the live log pane")
+	}
+}
+
+// What an operator opens a failed build to read comes first. The error used to
+// be the last card on the page: below the fold at 1280 and at 375, under eight
+// surfaces that had nothing to do with the failure.
+// Red by: moving the failure section back below the pipeline or the log.
+func TestBuildDetailLeadsWithTheFailureReport(t *testing.T) {
+	order := []string{`id="head"`, `id="failure"`, `id="pipeline"`, `id="meta"`, `id="live-log"`}
+	previous := -1
+	for _, anchor := range order {
+		at := strings.Index(buildDetailHTML, anchor)
+		if at < 0 {
+			t.Fatalf("build detail no longer renders %s", anchor)
+		}
+		if at < previous {
+			t.Errorf("%s is rendered above the surface that must precede it", anchor)
+		}
+		previous = at
+	}
+}
+
+// Every state the stage machine can produce needs a word, because the word is
+// the channel a reader who cannot use the dot's hue is left with. A state with
+// no entry prints its own raw token beside the stage name.
+// Red by: returning a new state from stageState without adding it to
+// STAGE_STATE_WORDS.
+func TestEveryPipelineStageStateHasAWord(t *testing.T) {
+	words := map[string]bool{}
+	table := regexp.MustCompile(`(\w+):\s+\{ key: 'stage\.(\w+)'`)
+	for _, entry := range table.FindAllStringSubmatch(buildDetailJS, -1) {
+		if entry[1] != entry[2] {
+			t.Errorf("STAGE_STATE_WORDS[%s] is keyed on stage.%s; the state and its "+
+				"message key must be the same token", entry[1], entry[2])
+		}
+		words[entry[1]] = true
+	}
+	if len(words) == 0 {
+		t.Fatal("STAGE_STATE_WORDS is gone; the stage states have no words at all")
+	}
+	body := jsFunctionBody(t, buildDetailJS, "function stageState(")
+	quoted := regexp.MustCompile(`'(\w+)'`)
+	returned := regexp.MustCompile(`return ([^;]*);`)
+	statements := returned.FindAllStringSubmatch(body, -1)
+	if len(statements) == 0 {
+		t.Fatal("stageState returns nothing this gate can read")
+	}
+	for _, statement := range statements {
+		for _, state := range quoted.FindAllStringSubmatch(statement[1], -1) {
+			if !words[state[1]] {
+				t.Errorf("stageState returns %q, which STAGE_STATE_WORDS has no word for", state[1])
+			}
+		}
+	}
+}
+
+// A remedy that points at a settings panel which is not there is worse than no
+// remedy: it answers "where do I fix this" with a page that does not scroll to
+// anything. Both halves are checked — the panel the fragment resolves to, and
+// the field label the sentence names.
+// Red by: renaming a settings panel, or a field's message key, without moving
+// the entry in ERROR_REMEDIES with it.
+func TestErrorRemediesResolveToRealSettings(t *testing.T) {
+	panels := regexp.MustCompile(`panel: '([\w-]+)'`).FindAllStringSubmatch(buildDetailJS, -1)
+	labels := regexp.MustCompile(`(?:field|section): '([\w.]+)'`).FindAllStringSubmatch(buildDetailJS, -1)
+	if len(panels) == 0 || len(labels) != 2*len(panels) {
+		t.Fatalf("ERROR_REMEDIES has %d panels and %d labels; every console-owned "+
+			"entry names a field and the section holding it", len(panels), len(labels))
+	}
+	for _, panel := range panels {
+		if !strings.Contains(settingsHTML, `data-panel="`+panel[1]+`"`) ||
+			!strings.Contains(settingsHTML, `id="`+panel[1]+`"`) {
+			t.Errorf("a remedy links to /settings#%s, which resolves to no panel", panel[1])
+		}
+	}
+	for _, label := range labels {
+		if !strings.Contains(settingsHTML, `data-i18n="`+label[1]+`"`) {
+			t.Errorf("a remedy names %q, which labels nothing on the settings page", label[1])
+		}
+	}
+	// The other shape: a value this console does not own is named and never
+	// linked, because there is no field for a link to land on.
+	for _, env := range regexp.MustCompile(`env: '([A-Z0-9_]+)'`).FindAllStringSubmatch(buildDetailJS, -1) {
+		if strings.Contains(settingsHTML, strings.ToLower(env[1])) {
+			t.Errorf("%s is named as a deployment key but the settings page carries a "+
+				"control for it; link the reader to the control instead", env[1])
+		}
+	}
+}
+
+// pageScripts returns the <script> body every assembled page ships, keyed by
+// the page. The three gates below read the shipped script rather than the const
+// that feeds it: a formatter is defined in one const and called from six
+// others, and only the assembled page proves the two arrived together.
+func pageScripts() map[string]string {
+	scripts := map[string]string{}
+	block := regexp.MustCompile(`(?s)<script>(.*?)</script>`)
+	for page, html := range assembledPages() {
+		if found := block.FindStringSubmatch(html); found != nil {
+			scripts[page] = found[1]
+		}
+	}
+	return scripts
+}
+
+// enclosingJSFunction names the function a byte offset sits inside, by reading
+// back to the nearest declaration. The scripts declare no nested functions
+// above the sites this is used on, so the nearest declaration is the owner.
+var jsDeclaration = regexp.MustCompile(`function (\w+)\(`)
+
+func enclosingJSFunction(prefix string) string {
+	found := jsDeclaration.FindAllStringSubmatch(prefix, -1)
+	if len(found) == 0 {
+		return "(top level)"
+	}
+	return found[len(found)-1][1]
+}
+
+// Go's zero time.Time is on the wire — a time.Time field serialises as
+// 0001-01-01T00:00:00Z whether or not the event it names has happened, and
+// omitempty cannot suppress it because a struct is never empty — so a locale
+// formatter handed one returned "1/1/1, 8:05:43 AM". The Job Ledger printed
+// that beside its write-error count, which are the two numbers a reader uses to
+// decide whether the ledger can be trusted at all. Two formatters own every
+// clock reading on the console and the public pages, and both resolve the value
+// through the one predicate first.
+// Red by: writing new Date(x).toLocaleString(...) at any call site, or dropping
+// the peInstant call from either formatter.
+func TestEveryClockReadingResolvesThroughTheInstantGuard(t *testing.T) {
+	formatters := map[string]bool{"fmtTime": true, "fmtPublicTime": true}
+	locale := regexp.MustCompile(`toLocale(?:String|DateString|TimeString)\(`)
+	seen := 0
+	for page, script := range pageScripts() {
+		for _, at := range locale.FindAllStringIndex(script, -1) {
+			seen++
+			if owner := enclosingJSFunction(script[:at[0]]); !formatters[owner] {
+				t.Errorf("%s: %s() formats a clock reading itself; every timestamp goes "+
+					"through the two formatters that resolve peInstant first, or a Go "+
+					"zero time renders as a real date", page, owner)
+			}
+		}
+	}
+	if seen == 0 {
+		t.Fatal("no page formats a timestamp at all; this gate no longer reads the code")
+	}
+	// The predicate itself, and everything that subtracts two instants rather
+	// than printing one — a duration is the site where an unresolvable value
+	// does not announce itself, because it comes back as a number.
+	if body := jsFunctionBody(t, i18nRuntimeJS, "function peInstant("); !strings.Contains(body, "getUTCFullYear") {
+		t.Error("peInstant no longer holds a year floor, so it accepts the zero time as an instant")
+	}
+	for _, owner := range []struct{ source, signature string }{
+		{baseRuntimeJS, "function fmtTime("},
+		{publicJS, "function fmtPublicTime("},
+		{baseRuntimeJS, "function fmtTimeRange("},
+		{buildDetailJS, "function durationTile("},
+	} {
+		if !strings.Contains(jsFunctionBody(t, owner.source, owner.signature), "peInstant(") {
+			t.Errorf("%s does not resolve its value through peInstant", owner.signature)
+		}
+	}
+	// new Date() with no argument is the clock, not a parse; every other
+	// construction belongs to the guard.
+	construction := regexp.MustCompile(`new Date\((.)`)
+	for page, script := range pageScripts() {
+		for _, at := range construction.FindAllStringSubmatchIndex(script, -1) {
+			if script[at[2]:at[3]] == ")" {
+				continue
+			}
+			if owner := enclosingJSFunction(script[:at[0]]); owner != "peInstant" {
+				t.Errorf("%s: %s() parses a timestamp outside peInstant", page, owner)
+			}
+		}
+	}
+}
+
+// The Job Ledger card reported "consistent" while showing "write errors 19" and
+// a last-checked date that was the zero time wearing a locale format. Three
+// judgements of one fact: the badge read ledger.ok, the count was rendered
+// beside it in the meta row's own ink, and the reconcile timestamp was gated on
+// a truthiness test the zero value passes. One token now decides all three, and
+// it is a token from the shared vocabulary rather than a colour picked here.
+// Red by: badging on ledger.ok alone again, or dropping the never word from the
+// checked_at line so the zero timestamp is formatted.
+func TestJobLedgerVerdictReadsItsOwnNumbers(t *testing.T) {
+	if strings.Contains(monitorJS, "statusBadge(ledger.ok") {
+		t.Error("the ledger badge is computed from ledger.ok alone, so a non-zero " +
+			"write-error count can sit two lines under the word \"consistent\"")
+	}
+	verdict := regexp.MustCompile(`(?s)var ledgerToken = (.*?);`).FindStringSubmatch(monitorJS)
+	if verdict == nil {
+		t.Fatal("the ledger card no longer computes one token for its whole verdict")
+	}
+	for _, term := range []string{"writeErrors", "reconciledAt"} {
+		if !strings.Contains(verdict[1], term) {
+			t.Errorf("the ledger verdict does not account for %s", term)
+		}
+	}
+	if !strings.Contains(monitorJS, "fmtTime(reconcile.checked_at, t('common.never'") {
+		t.Error("the last-checked line no longer names the never state, so a reconcile " +
+			"that has not run renders as a date")
+	}
+	if strings.Contains(monitorJS, "if (reconcile.checked_at)") {
+		t.Error("the last-checked line is gated on a truthiness test that the zero " +
+			"timestamp passes and the absent field fails — the reverse of what it needs")
+	}
+}
+
+// Conclusion-bearing text takes the deepened ink the token block declares for
+// it, and takes it from the same table the badge beside it reads. Every status
+// token spelled in the monitor's verdict expressions has to be one that table
+// carries, or the ink falls to the catch-all and a breach renders as quietly as
+// the cost figure under it.
+// Red by: inventing a token in a *Token expression, or binding .verdict to a
+// colour instead of --successInk / --dangerInk.
+func TestConclusionInkComesFromTheStatusVocabulary(t *testing.T) {
+	if !strings.Contains(jsFunctionBody(t, baseRuntimeJS, "function verdictInk("), "STATUS_VOCABULARY[") {
+		t.Fatal("verdictInk no longer reads the status vocabulary")
+	}
+	assignments := regexp.MustCompile(`(?s)var \w*Token = (.*?);`).FindAllStringSubmatch(monitorJS, -1)
+	if len(assignments) == 0 {
+		t.Fatal("the monitor spells no status token; this gate no longer reads the code")
+	}
+	quoted := regexp.MustCompile(`'([a-z_]+)'`)
+	for _, assignment := range assignments {
+		for _, token := range quoted.FindAllStringSubmatch(assignment[1], -1) {
+			if _, ok := statusVocabulary[token[1]]; !ok {
+				t.Errorf("a verdict is keyed on %q, which statusVocabulary does not carry; "+
+					"the ink falls to the catch-all and the conclusion reads as an aside", token[1])
+			}
+		}
+	}
+	// The other half of the pair: nothing outside the table may pick a status
+	// colour, and the two verdict inks are the tokens the ladder declares.
+	for _, forbidden := range []string{"successInk", "dangerInk", "'status green'", "'status red'"} {
+		if strings.Contains(monitorJS, forbidden) {
+			t.Errorf("monitorJS spells %s itself instead of reading the status table", forbidden)
+		}
+	}
+	for ink, verdict := range map[string]string{"--successInk": "green", "--dangerInk": "red"} {
+		rule := `.verdict[data-verdict="` + verdict + `"]`
+		if !strings.Contains(appleCSS, rule) || !strings.Contains(appleCSS, "var("+ink+")") {
+			t.Errorf("%s does not bind var(%s)", rule, ink)
+		}
+	}
+}
+
+// Five states, one renderer. Every route re-derived loading / empty /
+// filtered-empty / error / partial for itself and each lost a different one: a
+// filtered result showed the copy that invites you to publish your first
+// package, and a failed load rendered into the same node as an account with
+// nothing in it. pageState is now the only thing that builds a .empty node, and
+// it is what puts the live region on the box.
+// Red by: appending el('div', 'empty', …) at any call site again.
+func TestEveryStateBoxComesFromOneRenderer(t *testing.T) {
+	if n := strings.Count(i18nRuntimeJS, "className = 'empty'"); n != 1 {
+		t.Fatalf("pageState is not the only builder of a state node (%d found)", n)
+	}
+	handBuilt := regexp.MustCompile(`(?:el|createElement)\(\s*'div',\s*'empty'`)
+	for page, script := range pageScripts() {
+		if handBuilt.MatchString(script) {
+			t.Errorf("%s builds a state node outside pageState, so it carries neither "+
+				"the state attribute nor the live region", page)
+		}
+	}
+	body := jsFunctionBody(t, i18nRuntimeJS, "function pageState(")
+	for _, required := range []string{"'status'", "aria-live", "data-state"} {
+		if !strings.Contains(body, required) {
+			t.Errorf("pageState no longer writes %s, so a reader is not told the content changed", required)
+		}
+	}
+	// The state a search produces is not the state an unpublished binhost
+	// produces, and the two copies must not be the same string.
+	if zhCatalogue["packages.none"] == zhCatalogue["packages.empty"] {
+		t.Error("the filtered-empty and empty copies are identical; a first-time reader " +
+			"is told to change a search they never made")
+	}
+}
+
+// jsFunctionBody returns the brace-delimited body of the named JS function.
+func jsFunctionBody(t *testing.T, source, signature string) string {
+	t.Helper()
+	start := strings.Index(source, signature)
+	if start < 0 {
+		t.Fatalf("%q is not in the script", signature)
+	}
+	open := strings.Index(source[start:], "{") + start
+	depth := 0
+	for i := open; i < len(source); i++ {
+		switch source[i] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return source[open+1 : i]
+			}
+		}
+	}
+	t.Fatalf("%q is never closed", signature)
+	return ""
+}
+
 func betweenTags(body, open, close string) string {
 	start := strings.Index(body, open)
 	if start < 0 {
