@@ -32,8 +32,14 @@
       HTML, so a reader with scripting off read the page. This one is a bundle,
       and without this element that reader gets #root and nothing else: a white
       page that reads as an outage. It says which it is, and it names the console
-      that still answers without script — internal/dashboard/ui.go is mounted at
-      the top-level paths beside this one for exactly as long as the port runs.
+      that still answers without script — internal/dashboard/ui.go, now mounted
+      under /legacy for as long as the fallback is kept.
+
+      The links go there and not to the bare paths they used to. Those addresses
+      belong to this console now, and this console is precisely what the reader
+      of this element cannot run: sending them to /overview would answer "here is
+      a page you can read" with a second copy of the blank page they are already
+      looking at.
 
       The words arrive from the server, for the same reason the language on the
       html element does: the browser rendering this element is the browser that
@@ -49,9 +55,11 @@
       <h1>Portage Engine</h1>
       <p>{{.NoScript.NeedsScript}}</p>
       <p>
-        {{.NoScript.StillServed}} <a href="/overview">{{.NoScript.Overview}}</a>,
-        <a href="/builds">{{.NoScript.Builds}}</a>, <a href="/packages">{{.NoScript.Packages}}</a>,
-        <a href="/docs">{{.NoScript.Docs}}</a>, <a href="/status">{{.NoScript.Status}}</a>.
+        {{.NoScript.StillServed}} <a href="/legacy/overview">{{.NoScript.Overview}}</a>,
+        <a href="/legacy/builds">{{.NoScript.Builds}}</a>,
+        <a href="/legacy/packages">{{.NoScript.Packages}}</a>,
+        <a href="/legacy/docs">{{.NoScript.Docs}}</a>,
+        <a href="/legacy/status">{{.NoScript.Status}}</a>.
       </p>
     </noscript>
     <div id="root"></div>

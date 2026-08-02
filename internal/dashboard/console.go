@@ -11,17 +11,44 @@ import (
 )
 
 const (
-	// consoleBase is where the ported console is mounted while ui.go still owns
-	// the top-level paths. Both serve at once on purpose: the old console stays
-	// the operator's console until the port is finished, and mounting the new
-	// one beside it is what makes a ported page comparable against the page it
-	// replaces, on the same deployment, without a flag day.
-	consoleBase = "/ui"
+	// consoleBase is where the ported console answers: the top level. Every
+	// suffix in the route table below is therefore the address itself.
+	//
+	// The bundle's router basename (CONSOLE_BASE in web/src/app/routes.ts) has to
+	// be this same string, because the basename is what react-router strips off
+	// the browser's location before matching. A basename left at the /ui this
+	// console was built at strips nothing off /overview, matches no route, and
+	// renders the not-found frame on a page the server answered with a 200 —
+	// which is a failure neither side can see alone.
+	// TestBundleBasenameIsTheMountTheServerServesTheShellAt holds them together.
+	consoleBase = "/"
+
+	// legacyBase is where internal/dashboard/ui.go answers now that the ported
+	// console owns the top-level paths.
+	//
+	// The old console is moved rather than deleted. The ported one has been read
+	// page by page in a browser, but on one deployment — and a console is what an
+	// operator opens to find out what is wrong, so losing it is the one failure
+	// with no workaround. Keeping it mounted for a release makes backing the
+	// promotion out an edit to the registrations in Router rather than a revert
+	// of the port, and leaves the operator somewhere to go in the meantime.
+	legacyBase = "/legacy"
+
+	// consolePreviewBase is where the ported console was mounted while it was
+	// built beside the old one. Links to it exist — in the deployment, in the
+	// review that verified those ten pages, and possibly in a bookmark — so the
+	// address forwards to the console's new home rather than 404ing at a reader
+	// who followed a link that worked yesterday.
+	consolePreviewBase = "/ui"
 
 	// consoleAssetPrefix has to equal `base` in web/vite.config.ts, because that
 	// is the string the build wrote into every asset URL inside index.html.
 	// TestBuiltBundleIsMountedAtTheAssetPrefixTheServerServes checks the two
 	// against each other once a build exists.
+	//
+	// It is deliberately not the console's own mount point: the shell is served
+	// from every path in the route table, and the hashed tree has to sit
+	// somewhere no route can ever grow into.
 	consoleAssetPrefix = "/static/ui/"
 )
 
@@ -33,7 +60,10 @@ const (
 type consoleRoute struct {
 	name string
 
-	// suffix is the path under consoleBase.
+	// suffix is the path the route answers at. The console is mounted at the top
+	// level, so this is the address itself; on the two other mounts — the old
+	// console's /legacy and the /ui this console was built at — it is what is
+	// left after the mount point is trimmed off.
 	suffix string
 
 	// prefix marks a route whose trailing segment is a parameter rather than
@@ -88,12 +118,8 @@ var consoleRoutes = []consoleRoute{
 // matchConsoleRoute resolves a request path against the table. Exact entries are
 // tried before prefix entries so a fixed path can never be swallowed by a prefix
 // that happens to be shorter than it.
-func matchConsoleRoute(path string, query url.Values) (consoleRoute, webassets.Route, bool) {
-	suffix, ok := consoleSuffix(path)
-	if !ok {
-		return consoleRoute{}, webassets.Route{}, false
-	}
-	resolved := webassets.Route{Path: path}
+func matchConsoleRoute(suffix string, query url.Values) (consoleRoute, webassets.Route, bool) {
+	resolved := webassets.Route{Path: suffix}
 	for _, entry := range consoleRoutes {
 		if entry.prefix || suffix != entry.suffix {
 			continue
@@ -110,7 +136,7 @@ func matchConsoleRoute(path string, query url.Values) (consoleRoute, webassets.R
 		}
 		tail := strings.TrimPrefix(suffix, entry.suffix)
 		if tail == "" {
-			// The parameter is the route. /ui/build/ carries no job id, and the
+			// The parameter is the route. /build/ carries no job id, and the
 			// bundle's own table spells this path /build/:jobID, which matches
 			// nothing without one — so serving the shell here answered three
 			// paths with a router that matched no route and a blank page.
@@ -124,35 +150,50 @@ func matchConsoleRoute(path string, query url.Values) (consoleRoute, webassets.R
 	return consoleRoute{}, webassets.Route{}, false
 }
 
-// consoleSuffix returns the path under consoleBase. "/ui" and "/ui/" are the
-// same route; "/uixyz" is not a console path at all, and saying so here means no
-// caller has to think about it.
-func consoleSuffix(path string) (string, bool) {
-	if path == consoleBase {
+// mountSuffix returns the path under a mount point. "/legacy" and "/legacy/"
+// are the same page; "/legacyish" is not under the mount at all, and saying so
+// here means no caller has to think about it.
+func mountSuffix(mount, path string) (string, bool) {
+	if path == mount {
 		return "/", true
 	}
-	if strings.HasPrefix(path, consoleBase+"/") {
-		return strings.TrimPrefix(path, consoleBase), true
+	if strings.HasPrefix(path, mount+"/") {
+		return strings.TrimPrefix(path, mount), true
 	}
 	return "", false
 }
 
-// consolePathIsPublic reports whether a console path mirrors one of the old
-// console's community pages. authMiddleware asks this instead of carrying a
-// second list of strings.
+// consoleAddress reduces a request path to the route it names, whichever mount
+// it arrived on.
+//
+// Three addresses reach the same page: the console's own, the old console's
+// under /legacy, and the /ui the console was built at and still forwards from.
+// They are one vocabulary spelled three times, so one table answers for all
+// three — otherwise a reader following a shared /ui/packages link meets a login
+// redirect on the way to the page /packages serves without one, and the
+// forwarding that was supposed to keep the old link working breaks it instead.
+func consoleAddress(path string) string {
+	for _, mount := range []string{legacyBase, consolePreviewBase} {
+		if suffix, ok := mountSuffix(mount, path); ok {
+			return suffix
+		}
+	}
+	return path
+}
+
+// consolePathIsPublic reports whether a path names one of the community pages a
+// reader may see without a session. authMiddleware asks this instead of
+// carrying a second list of strings.
 func consolePathIsPublic(path string) bool {
-	entry, _, ok := matchConsoleRoute(path, nil)
+	entry, _, ok := matchConsoleRoute(consoleAddress(path), nil)
 	return ok && entry.public
 }
 
-// handleConsole serves the shell for every console route.
+// handleConsole serves the shell for every console route. It is the mux's
+// catch-all, so it is also what answers an address neither console names: the
+// route table is the whole vocabulary, and a path outside it is a 404 rather
+// than a shell whose router would match nothing.
 func (d *Dashboard) handleConsole(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path == consoleBase {
-		// One canonical form, so a bookmark and a link do not produce two cache
-		// entries for the same page.
-		http.Redirect(w, r, consoleBase+"/", http.StatusMovedPermanently)
-		return
-	}
 	_, route, ok := matchConsoleRoute(r.URL.Path, r.URL.Query())
 	if !ok {
 		http.NotFound(w, r)
@@ -168,6 +209,105 @@ func (d *Dashboard) handleConsole(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Failed to render console", http.StatusInternalServerError)
 		log.Printf("Console shell error (%s): %v", route.Name, err)
 	}
+}
+
+// handleConsoleLogin answers the one promoted path that is not only a page.
+//
+// /login is where the sign-in form posts its credentials — in this console and
+// in the one it replaces, both of which spell that destination as a literal —
+// so the POST stays exactly where it has always been and only the GET moves to
+// the bundle. Handing the whole path to handleConsole would have answered a
+// credential submission with a shell and left every deployment unable to sign
+// anyone in.
+func (d *Dashboard) handleConsoleLogin(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		if !d.config.AuthEnabled {
+			// Nothing to log in to. Rendering the page anyway would offer a form
+			// whose POST this dashboard answers with 404, which is what the old
+			// console avoided here by the same redirect.
+			http.Redirect(w, r, "/overview", http.StatusFound)
+			return
+		}
+		d.handleConsole(w, r)
+	case http.MethodPost:
+		d.handleLoginSubmit(w, r)
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// handleConsoleMoved forwards the address the console was built at.
+//
+// It resolves the trimmed path against the route table before sending anyone
+// anywhere, which does two things. A path neither console names 404s here
+// rather than by way of a redirect. And, because trimming "/ui" off
+// "/ui//elsewhere.example" leaves a protocol-relative URL, the table is what
+// keeps an attacker-chosen host out of Location.
+//
+// The redirect is temporary on purpose. The promotion is meant to be reversible
+// by the route table rather than by a revert, and a permanent redirect is one a
+// browser keeps honouring long after the route table stopped saying it.
+func (d *Dashboard) handleConsoleMoved(w http.ResponseWriter, r *http.Request) {
+	suffix, ok := mountSuffix(consolePreviewBase, r.URL.Path)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	entry, _, matched := matchConsoleRoute(suffix, r.URL.Query())
+	if !matched {
+		http.NotFound(w, r)
+		return
+	}
+	// Rebuilt from the table rather than forwarded: `suffix` is request path
+	// with "/ui" trimmed off, and a trimmed path is still the caller's string.
+	// Matching it proves a route accepted it, not that it is safe to put in
+	// Location — "/ui//elsewhere.example" trims to a protocol-relative URL, and
+	// the only reason it does not arrive here is that no route matches it, which
+	// is a fact about today's table. Composing the answer out of the entry's own
+	// constant suffix and an escaped parameter is a fact about this function.
+	location := url.URL{Path: entry.suffix}
+	if entry.prefix {
+		location.Path += strings.TrimPrefix(suffix, entry.suffix)
+	}
+	// Re-encoded rather than forwarded, for the same reason as the path: what
+	// arrives is the caller's spelling, and what leaves is this function's.
+	// Only /device reads anything out of it, but a query dropped on the way to
+	// the new address is a device code the reader has to type again.
+	if r.URL.RawQuery != "" {
+		location.RawQuery = r.URL.Query().Encode()
+	}
+	http.Redirect(w, r, location.String(), http.StatusFound)
+}
+
+// legacyRouter is the console in internal/dashboard/ui.go, moved aside.
+//
+// Its pages are registered at the addresses they were written for and reached
+// through http.StripPrefix, because several of them read their own parameter
+// off the path — handleBuildDetail trims "/build/" from it — and a second
+// spelling of each route under the mount point would be a second place for that
+// prefix to be wrong.
+//
+// Only pages are here. The old console's script calls /api/... and /logout by
+// absolute path, and those are unmoved, so they keep answering the pages under
+// this mount exactly as they answered them at the top level.
+func (d *Dashboard) legacyRouter() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", d.handleLanding)
+	mux.HandleFunc("/login", d.handleLoginRoute)
+	mux.HandleFunc("/device", d.handleDeviceAuthorizationPage)
+	mux.HandleFunc("/overview", d.handleOverview)
+	mux.HandleFunc("/builds", d.handleBuildsPage)
+	mux.HandleFunc("/build/", d.handleBuildDetail)
+	mux.HandleFunc("/logs/", d.handleBuildLogs)
+	mux.HandleFunc("/monitor", d.handleBuildersMonitor)
+	mux.HandleFunc("/image-factory", d.handleImageFactoryPage)
+	mux.HandleFunc("/settings", d.handleSettingsPage)
+	mux.HandleFunc("/packages", d.handlePackagesPage)
+	mux.HandleFunc("/docs", d.handleDocs)
+	mux.HandleFunc("/status", d.handlePublicStatusPage)
+	mux.HandleFunc("/shell/", d.handleShellPage)
+	return http.StripPrefix(legacyBase, mux)
 }
 
 // consoleAssetHandler serves the hashed bundle, or explains its absence.

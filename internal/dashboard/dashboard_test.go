@@ -566,7 +566,10 @@ func TestPublicCommunityPagesUseAnonymousShell(t *testing.T) {
 		JWTSecret: strings.Repeat("x", 32),
 	})
 	router := dashboard.Router()
-	for _, target := range []string{"/packages", "/docs", "/status"} {
+	// Under /legacy, because the ported console answers the bare paths now. This
+	// case is about ui.go's own server-rendered public shell, which is still the
+	// one a reader with scripting disabled is sent to.
+	for _, target := range []string{"/legacy/packages", "/legacy/docs", "/legacy/status"} {
 		response := httptest.NewRecorder()
 		router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, target, nil))
 		if response.Code != http.StatusOK {

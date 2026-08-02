@@ -21,9 +21,12 @@ import (
 
 const maxLedgerErrorBytes = 64 * 1024
 
-// LedgerReconcileReport compares the legacy in-memory view with visible
-// PostgreSQL shadow rows. Missing/mismatched rows are repaired; extra rows are
-// reported because DB-1 must not silently invent legacy queue ownership.
+// LedgerReconcileReport compares the in-memory job view with the visible
+// PostgreSQL rows. Two callers produce one: the migration-era Reconcile, which
+// repairs missing and mismatched rows and only reports extra ones because DB-1
+// must not silently invent legacy queue ownership, and the scheduled
+// InspectLedger, which repairs nothing at all. Repaired is what tells them
+// apart in the published status.
 type LedgerReconcileReport struct {
 	CheckedAt       time.Time `json:"checked_at"`
 	LegacyCount     int       `json:"legacy_count"`
@@ -1073,63 +1076,82 @@ type ledgerRow struct {
 	StatusJSON    []byte
 }
 
-// Reconcile is retained for migration-era repair tests and diagnostics. DB-4
-// runtime projection reads PostgreSQL as authority and never calls this from
-// the legacy JSON path.
-func (r *JobRepository) Reconcile(ctx context.Context, jobs map[string]*builder.BuildStatus) (report LedgerReconcileReport) {
-	report.CheckedAt = time.Now().UTC()
-	report.LegacyCount = len(jobs)
+// ledgerDivergence is one difference the compare found between the in-memory
+// projection and the durable row, carried far enough that a repairing caller
+// can act on it and a reporting caller can throw it away.
+type ledgerDivergence struct {
+	JobID   string
+	Row     ledgerRow
+	Status  *builder.BuildStatus
+	Absent  bool // no legacy-visible row exists for this job at all
+	Request bool // the stored request digest disagrees as well
+}
 
+// loadLedgerRows reads the legacy-visible rows the compare works from.
+//
+// The nil check is not defensive noise: the compare now runs on a background
+// schedule (see internal/server checkLedgerConsistency), and a repository built
+// around a database that never connected must report that as an error the
+// operator can read rather than take the process down from a timer goroutine.
+func (r *JobRepository) loadLedgerRows(ctx context.Context) (map[string]ledgerRow, error) {
+	if r.db == nil || r.db.pool == nil {
+		return nil, fmt.Errorf("job ledger has no database connection")
+	}
 	rows, err := r.db.pool.Query(ctx, `
 		SELECT id::text, state, request_digest, status_digest, status_snapshot
 		FROM build_jobs
 		WHERE legacy_visible = true
 	`)
 	if err != nil {
-		report.Error = err.Error()
-		r.recordReconcile(report)
-		return report
+		return nil, err
 	}
+	defer rows.Close()
 	ledgerRows := make(map[string]ledgerRow)
 	for rows.Next() {
 		var id string
 		var row ledgerRow
 		if err := rows.Scan(&id, &row.State, &row.RequestDigest, &row.StatusDigest, &row.StatusJSON); err != nil {
-			rows.Close()
-			report.Error = err.Error()
-			r.recordReconcile(report)
-			return report
+			return nil, err
 		}
 		ledgerRows[id] = row
 	}
 	if err := rows.Err(); err != nil {
-		rows.Close()
-		report.Error = err.Error()
-		r.recordReconcile(report)
-		return report
+		return nil, err
 	}
-	rows.Close()
-	report.LedgerCount = len(ledgerRows)
+	return ledgerRows, nil
+}
+
+// diffLedger compares the in-memory projection with the durable rows without
+// touching either. Separating the comparison from the repair is what lets the
+// scheduled check report a divergence without also writing memory back over
+// PostgreSQL; Reconcile still applies the divergences this returns.
+func diffLedger(
+	jobs map[string]*builder.BuildStatus, rows map[string]ledgerRow,
+) (LedgerReconcileReport, []ledgerDivergence) {
+	report := LedgerReconcileReport{
+		CheckedAt:   time.Now().UTC(),
+		LegacyCount: len(jobs),
+		LedgerCount: len(rows),
+	}
+	// Extra counts rows no in-memory job claimed, so the survivors of this set
+	// are the answer; the caller's map is left alone because a reporting caller
+	// has no business mutating what it was handed.
+	unclaimed := make(map[string]struct{}, len(rows))
+	for id := range rows {
+		unclaimed[id] = struct{}{}
+	}
+	var divergences []ledgerDivergence
 
 	for id, status := range jobs {
-		row, exists := ledgerRows[id]
+		row, exists := rows[id]
 		if !exists {
 			report.Missing++
-			req := status.Request
-			if req == nil {
-				req = &builder.BuildRequest{
-					PackageName: status.PackageName, Version: status.Version, Arch: status.Arch,
-					ResolvedContext: status.ResolvedContext,
-				}
-			}
-			if _, err := r.createJob(ctx, req, status, "legacy_json"); err != nil {
-				report.Error = err.Error()
-				continue
-			}
-			report.Repaired++
+			divergences = append(divergences, ledgerDivergence{
+				JobID: id, Status: status, Absent: true,
+			})
 			continue
 		}
-		delete(ledgerRows, id)
+		delete(unclaimed, id)
 
 		_, wantedStatusDigest, digestErr := statusDocument(status)
 		if digestErr != nil {
@@ -1153,14 +1175,88 @@ func (r *JobRepository) Reconcile(ctx context.Context, jobs map[string]*builder.
 			continue
 		}
 		report.Mismatched++
-		if err := r.repairJob(ctx, id, row, status, requestMismatch); err != nil {
+		divergences = append(divergences, ledgerDivergence{
+			JobID: id, Row: row, Status: status, Request: requestMismatch,
+		})
+	}
+	report.Extra = len(unclaimed)
+	report.settle()
+	return report, divergences
+}
+
+// settle decides the one field everything downstream reads. A repairing pass is
+// consistent when it converged; a reporting pass repairs nothing, so the same
+// arithmetic says "nothing was wrong" for it.
+func (report *LedgerReconcileReport) settle() {
+	report.Consistent = report.Error == "" &&
+		report.Repaired == report.Missing+report.Mismatched &&
+		report.Extra == 0
+}
+
+// Reconcile compares the in-memory view with the durable rows and repairs what
+// it finds, writing memory back over PostgreSQL. That direction is only correct
+// during a migration from the legacy JSON store, which is what this was written
+// for; the periodic runtime check calls InspectLedger instead.
+func (r *JobRepository) Reconcile(ctx context.Context, jobs map[string]*builder.BuildStatus) (report LedgerReconcileReport) {
+	rows, err := r.loadLedgerRows(ctx)
+	if err != nil {
+		report.CheckedAt = time.Now().UTC()
+		report.LegacyCount = len(jobs)
+		report.Error = err.Error()
+		r.recordReconcile(report)
+		return report
+	}
+	report, divergences := diffLedger(jobs, rows)
+	for _, divergence := range divergences {
+		if divergence.Absent {
+			req := divergence.Status.Request
+			if req == nil {
+				req = &builder.BuildRequest{
+					PackageName:     divergence.Status.PackageName,
+					Version:         divergence.Status.Version,
+					Arch:            divergence.Status.Arch,
+					ResolvedContext: divergence.Status.ResolvedContext,
+				}
+			}
+			if _, err := r.createJob(ctx, req, divergence.Status, "legacy_json"); err != nil {
+				report.Error = err.Error()
+				continue
+			}
+			report.Repaired++
+			continue
+		}
+		if err := r.repairJob(
+			ctx, divergence.JobID, divergence.Row, divergence.Status, divergence.Request,
+		); err != nil {
 			report.Error = err.Error()
 			continue
 		}
 		report.Repaired++
 	}
-	report.Extra = len(ledgerRows)
-	report.Consistent = report.Error == "" && report.Repaired == report.Missing+report.Mismatched && report.Extra == 0
+	report.settle()
+	r.recordReconcile(report)
+	return report
+}
+
+// InspectLedger runs the same comparison as Reconcile and writes nothing. It is
+// the form a scheduled check is allowed to take: PostgreSQL is the read/write
+// authority in DB-4 and the in-memory map is derived from it, so repairing on a
+// timer would let the derived copy overwrite the authority. It is also the only
+// form that can tell the truth — SyncLedgerJobs deliberately keeps signing and
+// promotion facts that memory established and the ledger has not recorded yet
+// (see preserveLocalGenerationFacts), so a difference here can mean "memory is
+// a moment ahead" as easily as "the ledger is wrong", and only an operator
+// looking at the report can tell which. Repairing would make the first durable.
+func (r *JobRepository) InspectLedger(ctx context.Context, jobs map[string]*builder.BuildStatus) LedgerReconcileReport {
+	rows, err := r.loadLedgerRows(ctx)
+	if err != nil {
+		report := LedgerReconcileReport{
+			CheckedAt: time.Now().UTC(), LegacyCount: len(jobs), Error: err.Error(),
+		}
+		r.recordReconcile(report)
+		return report
+	}
+	report, _ := diffLedger(jobs, rows)
 	r.recordReconcile(report)
 	return report
 }

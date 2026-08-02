@@ -47,6 +47,46 @@ func TestLoadServerDatabaseConfig(t *testing.T) {
 	}
 }
 
+// TestLedgerConsistencyIntervalDefaultsToScheduled keeps the ledger compare on
+// by default. The check spent a release unwired, which left /monitor reporting
+// "last checked: never" by construction; a default of zero would reproduce that
+// state through configuration instead of through a missing caller.
+func TestLedgerConsistencyIntervalDefaultsToScheduled(t *testing.T) {
+	cfg, err := LoadServerConfig(filepath.Join(t.TempDir(), "missing.conf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Database.LedgerConsistencyIntervalSeconds != 900 {
+		t.Fatalf("LedgerConsistencyIntervalSeconds = %d, want 900",
+			cfg.Database.LedgerConsistencyIntervalSeconds)
+	}
+
+	t.Setenv("LEDGER_CONSISTENCY_INTERVAL_SECONDS", "0")
+	off, err := LoadServerConfig(filepath.Join(t.TempDir(), "missing.conf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if off.Database.LedgerConsistencyIntervalSeconds != 0 {
+		t.Fatalf("an operator turning the compare off got %d",
+			off.Database.LedgerConsistencyIntervalSeconds)
+	}
+}
+
+// TestNegativeLedgerConsistencyIntervalWarns catches the typo that silently
+// disables the compare while the operator believes it is running.
+func TestNegativeLedgerConsistencyIntervalWarns(t *testing.T) {
+	cfg := &ServerConfig{}
+	cfg.Database.Enabled = true
+	cfg.Database.MaxConns = 10
+	cfg.Database.MinConns = 1
+	cfg.Database.LedgerConsistencyIntervalSeconds = -900
+
+	warnings := strings.Join(cfg.validateDatabaseAndCache(), "\n")
+	if !strings.Contains(warnings, "LEDGER_CONSISTENCY_INTERVAL_SECONDS") {
+		t.Fatalf("a negative compare interval passed validation silently: %q", warnings)
+	}
+}
+
 func TestLoadServerRedisConfig(t *testing.T) {
 	t.Setenv("REDIS_REQUIRED", "true")
 	t.Setenv("REDIS_HOST", "redis.internal")

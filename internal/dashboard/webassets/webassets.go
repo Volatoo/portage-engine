@@ -284,19 +284,22 @@ type Boot struct {
 // attribute on <html>, so it is also the only thing in a position to choose
 // these words.
 //
-// No Chinese is written here. Each page name is the string
-// internal/dashboard/ui.go already prints for that page — this element points
-// the reader at that console, so it should point in that console's own words —
-// and TestNoScriptNamesThePagesTheWayTheOldConsoleDoes compares the two. The
-// dashboard package is what imports this one, so the values cannot be read from
-// its catalogue directly; they are transcribed and then held against it, which
-// is the arrangement the route tables and the status vocabulary are already in.
+// Each page name is the string internal/dashboard/ui.go already prints for that
+// page — this element points the reader at that console, so it should point in
+// that console's own words — and TestNoScriptNamesThePagesTheWayTheOldConsoleDoes
+// compares the two. The dashboard package is what imports this one, so the
+// values cannot be read from its catalogue directly; they are transcribed and
+// then held against it, which is the arrangement the route tables and the status
+// vocabulary are already in.
 //
-// The two sentences have no counterpart in that catalogue. A console that
-// rendered on the server never had to tell anyone what scripting off costs
-// them, so there is nothing to carry over, and they stay English in both
-// languages rather than being invented here — which is what a Chinese reader
-// already gets for every key the translated catalogue has not caught up with.
+// The two sentences have no counterpart in that catalogue: a console that
+// rendered on the server never had to tell anyone what scripting off costs them,
+// so there was nothing to carry over and they shipped English in both languages.
+// They are written here now, in the register of the bundle's own catalogue,
+// because a Chinese reader whose browser runs no script is the one reader who
+// cannot be sent anywhere else to be told why the page is blank. The same test
+// pins that both languages have their own, so "the noscript is English only"
+// cannot come back by deletion.
 type NoScript struct {
 	// NeedsScript names which failure this is. A reader who sees a page with no
 	// content cannot tell a bundle that did not run from a server that is down,
@@ -338,6 +341,14 @@ func NoScriptCopy(lang string) NoScript {
 	if lang != "zh" {
 		return text
 	}
+	// The two sentences. 控制台 is what the whole product calls this thing
+	// (brand.sub, device.console), 脚本包 says "bundle" without pretending the
+	// reader knows the build tool's word for it, and 旧版控制台 names the server-
+	// rendered console the links below point at. The em dash is doubled and
+	// unspaced, which is how set.mirrors.hint already writes one.
+	text.NeedsScript = "控制台需要 JavaScript。服务端没有问题——本页面就是一个脚本包," +
+		"禁用脚本后没有任何东西可运行。"
+	text.StillServed = "旧版控制台在服务端渲染,以下页面仍然可用:"
 	// zhCatalogue in internal/dashboard/ui.go, keys nav.overview, nav.builds,
 	// nav.packages, nav.docs and nav.status.
 	text.Overview = "总览"

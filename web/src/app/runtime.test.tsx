@@ -657,7 +657,11 @@ describe('a step-up refusal is satisfied where the write was made', () => {
     const run = vi.fn(() => Promise.resolve({ ...refusal, method: 'unavailable' as const }));
     const elevate = vi.fn(() => Promise.resolve(true));
     const reauthenticate = vi.fn();
-    const outcome = await withStepUp(run, { elevate, reauthenticate, sessionMethod: () => 'local' });
+    const outcome = await withStepUp(run, {
+      elevate,
+      reauthenticate,
+      sessionMethod: () => 'local',
+    });
     expect(elevate).not.toHaveBeenCalled();
     expect(reauthenticate).not.toHaveBeenCalled();
     expect(outcome).toEqual({ ...refusal, method: 'unavailable' });
@@ -670,10 +674,16 @@ function stepUpOnce(): (path: string) => unknown {
   return (path: string) => {
     if (path.startsWith('/api/settings/cloud/test') && !refused) {
       refused = true;
-      return new Response(JSON.stringify({ code: 'step_up_required', error: 'fresh step-up authentication required' }), {
-        status: 428,
-        headers: { 'Content-Type': 'application/json' },
-      });
+      return new Response(
+        JSON.stringify({
+          code: 'step_up_required',
+          error: 'fresh step-up authentication required',
+        }),
+        {
+          status: 428,
+          headers: { 'Content-Type': 'application/json' },
+        },
+      );
     }
     return controlPlane(path);
   };

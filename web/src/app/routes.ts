@@ -254,14 +254,21 @@ export const CONSOLE_ROUTES: readonly ConsoleRoute[] = [
 ];
 
 /**
- * The console base. Every path above is relative to it, and the router's
- * basename is what keeps a hand-written `href` from escaping it.
+ * The console base: the top level, now that this console is the console.
  *
- * It has to equal `consoleBase` in internal/dashboard/console.go; a Go test
- * asserts the built bundle's asset URLs sit under the matching asset prefix, and
- * a mismatch here would produce a shell that 404s every link instead.
+ * It has to be the prefix the server serves the shell at, because that is what
+ * the browser's own location will start with — `matchConsoleRoute` in
+ * internal/dashboard/console.go matches the paths above against the request path
+ * itself. While this console was built beside the old one it was `/ui`, and a
+ * basename left at `/ui` after the promotion strips nothing off `/overview`,
+ * matches no route in the table above, and renders the not-found frame on every
+ * page.
+ *
+ * `/ui` is not gone, but it is not this: the server forwards it here rather than
+ * mounting a second copy of the console, so there is one address per page and a
+ * link into the console cannot be shared in two spellings.
  */
-export const CONSOLE_BASE = '/ui';
+export const CONSOLE_BASE = '/';
 
 /** The destinations the main navigation offers, in the order it offers them. */
 export const NAV_ROUTES = CONSOLE_ROUTES.filter(

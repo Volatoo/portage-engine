@@ -222,15 +222,25 @@ func TestStatusVocabularyIsOneTable(t *testing.T) {
 // then every string replaced under the reader.
 // Red by: putting <html lang="en"> back on any shell, or by dropping the
 // localize() call from appPage/publicPage.
+// Under /legacy, because the ported console answers the bare paths now, and it
+// keeps only half of this. Its <html lang> IS resolved before the first byte —
+// TestConsoleBootResolvesLanguageTheSameWayTheOldConsoleDoes holds it to the
+// same rule as this one — but its <title> is not: the shell paints "Portage
+// Engine" and the bundle sets the real one. Server-rendering it would mean a
+// second copy of every title string in Go, which is the drift this port exists
+// to end; the console_test.go route table keeps one vocabulary, not two. So the
+// title swap is the accepted cost of the port, recorded here rather than
+// discovered later, and this case goes on holding ui.go to the stricter rule
+// for as long as ui.go is mounted.
 func TestPagesRenderInTheResolvedLanguage(t *testing.T) {
 	dashboard := New(&config.DashboardConfig{})
 	for _, tc := range []struct{ route, en, zh string }{
-		{"/overview", "Overview", "总览"},
-		{"/settings", "Settings", "设置"},
-		{"/monitor", "Build Nodes", "构建节点"},
-		{"/packages", "Packages", "软件包"},
-		{"/status", "Service Status", "服务状态"},
-		{"/", "Portage Engine — self-hosted", "自托管"},
+		{"/legacy/overview", "Overview", "总览"},
+		{"/legacy/settings", "Settings", "设置"},
+		{"/legacy/monitor", "Build Nodes", "构建节点"},
+		{"/legacy/packages", "Packages", "软件包"},
+		{"/legacy/status", "Service Status", "服务状态"},
+		{"/legacy/", "Portage Engine — self-hosted", "自托管"},
 	} {
 		for _, lang := range []struct{ header, tag, want string }{
 			{"en", "en", tc.en},

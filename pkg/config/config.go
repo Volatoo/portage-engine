@@ -259,6 +259,12 @@ type DatabaseConfig struct {
 	MinConns              int
 	ConnectTimeoutSeconds int
 	HealthTimeoutSeconds  int
+	// How often the server compares the in-memory job projection with the
+	// durable rows. The check only reports, so the cadence trades how quickly a
+	// divergence is noticed against one extra query per interval. Zero turns it
+	// off; health then says the ledger is unchecked instead of implying it was
+	// checked and agreed.
+	LedgerConsistencyIntervalSeconds int
 }
 
 // CacheConfig controls Redis-backed ephemeral coordination. PostgreSQL remains
@@ -821,6 +827,13 @@ func (c *ServerConfig) validateDatabaseAndCache() []string {
 	}
 	if c.Database.Enabled && (c.Database.MaxConns <= 0 || c.Database.MinConns < 0 || c.Database.MinConns > c.Database.MaxConns) {
 		warnings = append(warnings, "CONFIG: database pool requires 0 <= DATABASE_MIN_CONNS <= DATABASE_MAX_CONNS")
+	}
+	// A negative interval reads as "off" and is honoured as "off", but it is far
+	// more likely a typo for a number of seconds than a deliberate way to write
+	// zero, and an operator who thinks the ledger is being compared and finds out
+	// later that it never was has been let down quietly.
+	if c.Database.Enabled && c.Database.LedgerConsistencyIntervalSeconds < 0 {
+		warnings = append(warnings, "CONFIG: LEDGER_CONSISTENCY_INTERVAL_SECONDS must be 0 (disabled) or positive")
 	}
 	if c.Cache.Required && !c.Cache.Enabled {
 		warnings = append(warnings, "CONFIG: REDIS_REQUIRED requires REDIS_ENABLED")
@@ -1830,6 +1843,15 @@ func LoadServerConfig(path string) (*ServerConfig, error) {
 	config.Database.MinConns = getEnvInt(env, "DATABASE_MIN_CONNS", 1)
 	config.Database.ConnectTimeoutSeconds = getEnvInt(env, "DATABASE_CONNECT_TIMEOUT_SECONDS", 10)
 	config.Database.HealthTimeoutSeconds = getEnvInt(env, "DATABASE_HEALTH_TIMEOUT_SECONDS", 2)
+	// Fifteen minutes: long enough that the extra query is invisible next to the
+	// five-second projection refresh, short enough that a divergence is reported
+	// while the build that produced it is still recent enough to explain. A
+	// compare that disagrees re-runs on the next projection tick, so this is the
+	// interval between clean checks rather than the delay before a bad one is
+	// rechecked.
+	config.Database.LedgerConsistencyIntervalSeconds = getEnvInt(
+		env, "LEDGER_CONSISTENCY_INTERVAL_SECONDS", 900,
+	)
 	config.Cache.Enabled = getEnvBool(env, "REDIS_ENABLED", false)
 	config.Cache.Required = getEnvBool(env, "REDIS_REQUIRED", false)
 	if config.Cache.Required {
