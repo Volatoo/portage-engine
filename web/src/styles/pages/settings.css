@@ -1,0 +1,134 @@
+/* The settings page's own rules.
+
+   The sub-navigation, the panel layout, the form grid and the field controls
+   are all in the ported stylesheet already — panels.css, components.css and
+   surfaces.css — so what is left here is the handful of things the Go markup
+   carried as inline style attributes, the geometry the four asynchronous blocks
+   on this page have to reserve, and two treatments the ported sheet turns out
+   never to have declared.
+
+   Every selector below out-specifies the rule it is meant to beat rather than
+   relying on arriving after it: this file is imported from the page component,
+   so where it lands in the bundle depends on module evaluation order, and a
+   rule that wins only by position is a rule that stops winning when somebody
+   reorders an import. */
+
+/* At 800px and under the rail becomes a horizontal scroller, and a scroll
+   container clips what overflows it: the 3px ring base.css draws 2px outside a
+   focused link was cut on the first and last item, which are the two a keyboard
+   reader reaches first and last. The padding is the ring's width plus its
+   offset. Only inside the query — at 1440 the rail clips nothing and the 5px
+   would just walk it away from the panels. */
+@media (max-width: 800px) {
+  .subnav {
+    padding: 5px;
+  }
+}
+
+/* A `class="hint"` directly inside a card, which the Go markup uses for the
+   sentence above the mirrors grid, above the upload grid and under the signing
+   tiles. surfaces.css styles `.field .hint` and nothing else, so those three
+   paragraphs rendered at body size in primary ink — the same treatment as a
+   setting's own label, one line above the settings they introduce. Same
+   footnote rung as every other hint on the page. */
+#settings-form .card-pad > .hint,
+.settings-panels .card-pad > .hint {
+  font: var(--footnote);
+  color: var(--systemSecondary);
+  margin-top: 3px;
+}
+
+/* Inline style attributes from the Go markup, named. */
+.card .card-pad.settings-check-pad {
+  padding-top: 0;
+}
+.settings-lead {
+  margin-bottom: 10px;
+}
+/* The stated build mode is a label with no control under it, so it cannot be a
+   <label>; it takes a label's ink and weight so the card still reads as one
+   list of settings rather than as a form with a paragraph dropped into it. */
+.settings-stated-label {
+  font: var(--callout-emphasized);
+  color: var(--systemSecondary);
+  margin-bottom: 4px;
+}
+
+/* Geometry reserved before data arrives. Each of these four blocks is filled by
+   a request, and each has something below it that would otherwise walk down the
+   page when the payload lands. The reserve is on the wrapper every time and
+   never on a tbody, which cannot be given one. */
+.settings-sessions-state {
+  min-height: 60px;
+}
+.settings-testbuild-result {
+  min-height: 24px;
+  margin-top: 10px;
+}
+.settings-providers {
+  min-height: 42px;
+}
+pre.log-view.settings-pubkey {
+  min-height: 120px;
+  max-height: 260px;
+}
+/* The signing state is one word that arrives late and is the widest thing in
+   its tile; the ramp rung is the one the Go markup named inline. */
+.stat-tile .num.settings-gpg-state {
+  font: var(--title-3-emphasized);
+}
+.settings-gpg-grid {
+  margin-bottom: 16px;
+}
+/* Three counters on one line whose digit COUNT changes, not just their digits,
+   so tabular figures alone cannot hold the line still — the two neighbours
+   stepped sideways when a queue went from 9 to 10. */
+.settings-gpg-queue .counter {
+  min-width: 2ch;
+}
+/* The cluster-node card exists only after a test has answered, and it is the
+   last thing in its panel, so nothing below it can be moved by its arrival. */
+.settings-nodes {
+  margin-top: 20px;
+}
+
+/* The four secret inputs are disabled when the deployment owns the values, and
+   their placeholder is the only place this form says whether a credential is
+   already stored. A user agent's own disabled treatment dims exactly that
+   sentence, so both channels are restated at rungs that were measured: the
+   secondary ink is 4.94:1 on white, where the rung the placeholder used to sit
+   on was 1.83:1 and now has no reader at all. */
+#settings-form .field input:disabled {
+  opacity: 1;
+  color: var(--systemSecondary);
+  background: var(--systemQuinary);
+}
+#settings-form .field input:disabled::placeholder {
+  color: var(--systemSecondary);
+}
+
+/* One live region, four states, and the state written on the node as an
+   attribute so the stylesheet and a screen reader cannot come to different
+   conclusions about it. The failed rung is the loud one on purpose: when the
+   server's prose names no field it is the only place the failure exists, and
+   the footer it sits in is sticky, so it is on screen wherever the reader has
+   scrolled to. */
+.settings-msg[data-state='busy'] {
+  color: var(--systemSecondary);
+}
+.settings-msg[data-state='ok'] {
+  color: var(--successInk);
+}
+.settings-msg[data-state='failed'] {
+  font: var(--body-emphasized);
+  color: var(--dangerInk);
+  padding: 5px 10px;
+  border-radius: var(--radius-medium);
+  background: rgba(var(--systemRed-rgb), calc(var(--alpha-multiplier) * 0.1));
+}
+/* The region takes focus when nothing else can carry the failure, and a focused
+   node with no ring is a reading position nobody can see. */
+.settings-msg:focus-visible {
+  outline: 3px solid var(--focusRing);
+  outline-offset: 2px;
+}

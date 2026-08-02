@@ -1,0 +1,60 @@
+<!doctype html>
+<!--
+  This file is a Go template as well as the Vite entry: Vite rewrites the module
+  script to the hashed bundle, and the server fills the template actions per
+  request. Nothing in this file may write a doubled brace it does not mean as an
+  action — Go parses them inside HTML comments too, and a stray pair fails the
+  parse at startup rather than at the line that wrote it.
+
+  The two things that must be right before the browser paints anything are up
+  here: the language on the html element, resolved server-side from the cookie
+  and then Accept-Language, and the boot payload in a synchronous script ahead
+  of the module. A bundle that fetched either would paint one frame in the wrong
+  language, or paint a deep link's frame with no id in it.
+-->
+<html lang="{{.HTMLLang}}" data-pe-lang="{{.Lang}}">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!-- Theme is prefers-color-scheme only. This tells the browser both grounds
+         exist so form controls and scrollbars follow, with no stored preference
+         and no script. -->
+    <meta name="color-scheme" content="light dark" />
+    <!-- A product name, identical in both languages, so it needs no catalogue. -->
+    <title>Portage Engine</title>
+    <script>
+      window.__PE_BOOT__ = {{.Boot}};
+    </script>
+  </head>
+  <body>
+    <!--
+      The console this replaces rendered every one of these routes as server-side
+      HTML, so a reader with scripting off read the page. This one is a bundle,
+      and without this element that reader gets #root and nothing else: a white
+      page that reads as an outage. It says which it is, and it names the console
+      that still answers without script — internal/dashboard/ui.go is mounted at
+      the top-level paths beside this one for exactly as long as the port runs.
+
+      English only, and untranslated on purpose rather than by omission: it is
+      outside the bundle's catalogue, and inventing a Chinese string here is not
+      this file's to do. The server already knows the language and could pick,
+      which is what makes this a template action waiting to be added rather than
+      a fact nobody can reach.
+    -->
+    <noscript>
+      <h1>Portage Engine</h1>
+      <p>
+        The operator console needs JavaScript. Nothing is wrong with the server — this page is a
+        bundle, and with scripting disabled there is nothing to run.
+      </p>
+      <p>
+        The previous console renders on the server and still answers:
+        <a href="/overview">/overview</a>, <a href="/builds">/builds</a>,
+        <a href="/packages">/packages</a>, <a href="/docs">/docs</a> and
+        <a href="/status">/status</a>.
+      </p>
+    </noscript>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

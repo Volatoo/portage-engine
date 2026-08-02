@@ -1,0 +1,141 @@
+/* The three surfaces that carry a build's own story — the pipeline row, the
+   failure report and the stage log cards — plus the settings sub-navigation,
+   the image factory panels and the instance terminal. */
+/* ---- build pipeline ---- */
+/* Nine stages held in one nowrap row is nine stages an operator cannot see: at
+   375px the row measured 1195px inside a 285px box, the failing Publish cell
+   sat 793px past the right edge, and the only thing saying so was a scrollbar.
+   Nine equal items wrap when the row runs out. overflow-x stays as the floor
+   for a reader at a large text size, and the chip may break its own label so
+   that a fold too narrow for one chip still folds instead of widening the
+   document. */
+.pipeline { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 0; overflow-x: auto; padding: 4px 0; }
+.pipe-stage { display: flex; align-items: center; flex-shrink: 0; }
+.pipe-chip {
+  display: inline-flex; align-items: center; flex-wrap: wrap; gap: 2px 7px;
+  padding: 7px 14px; border-radius: var(--radius-pill);
+  font: var(--callout-emphasized); color: var(--systemSecondary);
+  background: var(--systemQuinary);
+  transition: background-color 210ms ease-out;
+}
+/* The chip's one word is the stage's own name, never its state, so which of
+   the nine had run, was running, had failed or had never started was carried
+   by the dot's hue and by nothing else. */
+.pipe-state { font: var(--footnote); }
+.pipe-chip .dot { width: 7px; height: 7px; border-radius: var(--radius-circle); background: var(--systemGray); }
+.pipe-stage.done .pipe-chip { color: var(--systemPrimary); }
+.pipe-stage.done .pipe-chip .dot { background: var(--systemGreen); }
+.pipe-stage.current .pipe-chip { background: rgba(var(--keyColor-rgb), calc(var(--alpha-multiplier) * .1)); color: var(--onTintInk); }
+.pipe-stage.current .pipe-chip .dot { background: var(--systemBlue); }
+/* The pulse is declared inside the query, not clamped outside it: a Gentoo
+   build runs for hours, so this is the one animation on the console that never
+   stops. Which stage is current stays legible without it — the chip alone
+   carries the tint fill and the tint label. */
+@media (prefers-reduced-motion: no-preference) {
+  .pipe-stage.current .pipe-chip .dot { animation: pipe-pulse 1.2s ease-in-out infinite; }
+}
+/* The fill was frozen light-mode red, so in dark it sat at 1x under a label
+   the multiplier had already darkened and the failed stage read weaker than
+   its neighbours — the one stage an operator is hunting for. */
+.pipe-stage.failed .pipe-chip { background: rgba(var(--systemRed-rgb), calc(var(--alpha-multiplier) * .1)); color: var(--dangerInk); }
+.pipe-stage.failed .pipe-chip .dot { background: var(--systemRed); }
+@keyframes pipe-pulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
+.pipe-arrow { width: 22px; height: 1px; background: var(--labelDivider); margin: 0 2px; flex-shrink: 0; }
+.log-filters { display: flex; gap: 6px; margin-bottom: 10px; flex-wrap: wrap; }
+.log-filters .btn { padding: 4px 12px; font: var(--callout-emphasized); }
+.log-filters .btn[aria-pressed="true"] { background: var(--accentFill); color: var(--onAccentInk); }
+/* These two carry formatted timestamps, and neither declared any overflow
+   behaviour at all, so a narrow column got whatever the initial value happened
+   to do with them. A timestamp is two tokens with a space already between them:
+   break-word wraps there and only splits a token that cannot fit on a line of
+   its own, which is the one thing that should never happen to a clock reading. */
+.log-meta, .milestone-meta { overflow-wrap: break-word; }
+.log-meta { display: flex; gap: 8px 18px; flex-wrap: wrap; margin: -2px 0 10px; font: var(--footnote); color: var(--systemSecondary); font-variant-numeric: tabular-nums; }
+.stage-log-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin-top: 14px; }
+.stage-log-card { min-width: 0; padding: 10px 12px; border-radius: var(--radius-medium); background: var(--systemQuaternary); }
+.stage-log-card strong { display: block; font: var(--callout-emphasized); overflow-wrap: anywhere; }
+.stage-log-card span { display: block; margin-top: 3px; font: var(--footnote); color: var(--systemSecondary); overflow-wrap: anywhere; }
+/* All nine cards were the same grey whatever had happened inside them, so the
+   stage that failed was told apart from the eight that did not by nothing at
+   all. The wash and the ink are the pair the failed chip already uses — one
+   treatment in two places rather than two treatments of one state — and the
+   state word beside them is what a reader who can use neither still gets. */
+.stage-log-card.failed { background: rgba(var(--systemRed-rgb), calc(var(--alpha-multiplier) * .1)); }
+.stage-log-card.failed strong, .stage-log-card.failed .stage-log-state { color: var(--dangerInk); }
+.stage-log-card.done .stage-log-state { color: var(--successInk); }
+@media (max-width: 900px) { .stage-log-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 520px) { .stage-log-grid { grid-template-columns: 1fr; } }
+
+/* ---- build failure report ---- */
+/* The one thing an operator opens a failed build to read used to be the last
+   card on the page, dressed exactly like the eight above it: white ground, no
+   border, --systemPrimary ink, its heading at y=937 in a 900px viewport and at
+   y=2182 of a 3335px document at 375px — below the fold at both. It leads the
+   page now. The danger ink is spent on the edge and on the sentence that says
+   a build failed, and on nothing else: the error text under it is body ink,
+   because it is the evidence and not the alarm. */
+.failure-report {
+  background: var(--pageRaised); border: 1px solid var(--dangerInk);
+  border-radius: var(--radius-large); box-shadow: var(--shadow-small);
+  padding: 16px 20px; margin-bottom: 24px;
+}
+.failure-report h2 { font: var(--title-2-emphasized); color: var(--dangerInk); overflow-wrap: anywhere; }
+.failure-report p { margin-top: 7px; font: var(--body-tall); color: var(--systemPrimary); overflow-wrap: anywhere; }
+.failure-report .failure-remedy { font: var(--callout); color: var(--systemSecondary); }
+/* A pane that rendered nothing under a chip reading "All (2628)" is a claim
+   the reader has no way to check. Chip and pane come from one fetch, so they
+   can only disagree if the render did not land, and a disagreement gets a
+   sentence and a way out of it instead of an empty box. */
+.log-fault { margin: -2px 0 10px; font: var(--callout); color: var(--dangerInk); overflow-wrap: anywhere; }
+.log-fault-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+
+/* ---- settings sub-navigation ---- */
+.settings-layout { display: flex; gap: 28px; align-items: flex-start; }
+.subnav { width: 190px; flex-shrink: 0; display: flex; flex-direction: column; gap: 2px; position: sticky; top: 20px; }
+.subnav a { display: block; padding: 8px 10px; border-radius: var(--radius-medium); font: var(--body); color: var(--systemPrimary); cursor: pointer; transition: background-color 175ms ease-in; }
+.subnav a:hover { background: var(--systemQuinary); }
+.subnav a[aria-current="true"] { background: rgba(var(--keyColor-rgb), calc(var(--alpha-multiplier) * .08)); color: var(--onTintInk); font: var(--body-emphasized); }
+.subnav .subnav-label { font: var(--subhead-emphasized); text-transform: uppercase; color: var(--systemSecondary); padding: 12px 10px 4px; }
+.settings-panels { flex: 1; min-width: 0; }
+.settings-footer { position: sticky; bottom: 0; padding: 12px 0; background: var(--pageFloor); display: flex; gap: 10px; align-items: center; border-top: var(--keyline); }
+@media (max-width: 800px) {
+  .settings-layout { display: block; }
+  .subnav { width: auto; flex-direction: row; overflow-x: auto; position: static; margin-bottom: 16px; }
+  .subnav .subnav-label { display: none; }
+  .subnav a { white-space: nowrap; }
+}
+.radio-row { display: flex; gap: 18px; margin: 2px 0 10px; flex-wrap: wrap; }
+.radio-row label { display: flex; align-items: center; gap: 6px; font: var(--body); color: var(--systemPrimary); }
+.card-actions { display: flex; gap: 10px; align-items: center; padding: 0 20px 16px; }
+.factory-grid { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(260px, .6fr); gap: 20px; }
+@media (max-width: 900px) { .factory-grid { grid-template-columns: 1fr; } }
+.milestone-list { list-style: none; margin: 0; padding: 0; }
+.milestone { display: grid; grid-template-columns: 110px minmax(0, 1fr); gap: 16px; padding: 16px 20px; border-bottom: var(--keyline); }
+.milestone:last-child { border-bottom: 0; }
+.milestone h3 { font: var(--body-emphasized); margin-bottom: 3px; overflow-wrap: anywhere; }
+.milestone p { font: var(--callout); color: var(--systemSecondary); overflow-wrap: anywhere; }
+.milestone-meta { margin-top: 5px; font: var(--footnote); color: var(--systemSecondary); }
+.evidence-list { margin-top: 7px; display: flex; flex-wrap: wrap; gap: 6px 14px; }
+.evidence-list span { font: 400 .71875rem/1.5 var(--font-mono); color: var(--systemSecondary); overflow-wrap: anywhere; }
+.factory-step-details { margin-top: 10px; border-top: var(--keyline); padding-top: 9px; }
+.factory-step-details > summary { cursor: pointer; font: var(--callout-emphasized); color: var(--keyColor); }
+.factory-step-list { margin-top: 9px; display: grid; gap: 8px; }
+.factory-step { padding: 10px 12px; border-radius: var(--radius-medium); background: var(--systemQuaternary); }
+.factory-step-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.factory-step-head strong { font: var(--callout-emphasized); overflow-wrap: anywhere; }
+.factory-step-id { font: var(--footnote); color: var(--systemSecondary); }
+.factory-step p { margin-top: 5px; }
+.factory-step-log { margin-top: 7px; padding-top: 7px; border-top: var(--keyline); font: 400 .71875rem/1.5 var(--font-mono); color: var(--systemSecondary); overflow-wrap: anywhere; }
+.factory-note { font: var(--callout); color: var(--systemSecondary); line-height: 1.5; }
+.blocker { padding: 13px 0; border-bottom: var(--keyline); }
+.blocker:last-child { border-bottom: 0; }
+.blocker strong { display: block; font: var(--body-emphasized); overflow-wrap: anywhere; }
+.blocker p { font: var(--callout); color: var(--systemSecondary); margin-top: 3px; overflow-wrap: anywhere; }
+
+/* ---- instance shell ---- */
+/* The xterm screen is fixed at 220 columns, so it is wider than any viewport
+   until a fit addon and a resize channel exist. Scrolling it inside its own
+   box is the half of that fix which needs no protocol change, and the sticky
+   head keeps Back on screen instead of at right:-1275px. */
+#term { overflow-x: auto; }
+.shell-head { position: sticky; top: 0; z-index: 100; background: var(--pageFloor); }

@@ -1,0 +1,41 @@
+/* The documentation page's three templated commands.
+
+   Each block holds its own height before the binhost inventory answers, so the
+   prose below it does not walk down the page when the host, the profile id and
+   the sync path arrive. The reserve is exact rather than generous: the command
+   shapes are fixed and only the substituted values change, so the line count is
+   known before the request is made. The pre scrolls sideways rather than
+   wrapping, which is what keeps the count true at every width.
+
+   1.25rem is the pane's own line box — .78125rem type at 1.6 — and 24px is its
+   vertical padding, both declared on `.docs-body pre` in components.css. */
+.docs-page .docs-command {
+  min-height: calc(var(--docs-command-lines, 4) * 1.25rem + 24px);
+}
+.docs-page .docs-command[data-lines='5'] {
+  --docs-command-lines: 5;
+}
+.docs-page .docs-command[data-lines='6'] {
+  --docs-command-lines: 6;
+}
+/* The selector and the section's state line. Reserved together, because the
+   selector is absent until the inventory names at least one profile and the
+   state line is what stands there in the meantime. */
+.docs-page .docs-profile {
+  min-height: 96px;
+  margin: 14px 0 4px;
+}
+.docs-page .docs-profile .field {
+  max-width: 420px;
+  margin-bottom: 0;
+}
+/* The section state sits inline with the prose, not as a full card state: the
+   rest of the page is still there to be read, and 36px of centred padding for
+   one sentence would read as the page having failed. */
+.docs-page .docs-profile .empty {
+  padding: 10px 0;
+  text-align: start;
+}
+.docs-page .docs-profile .state-retry {
+  padding-top: 4px;
+}

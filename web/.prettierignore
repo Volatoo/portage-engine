@@ -1,0 +1,13 @@
+# npm owns this file. A value from a file we do not write is reported, not
+# reformatted into compliance.
+package-lock.json
+
+# The stylesheets are ported verbatim from the console this project replaces:
+# aligned value columns, hand-wrapped annotations, and rules in the order they
+# are read in. Prettier would reflow all three and the provenance with them.
+# stylelint still reads these files; it is configured not to rewrite them.
+# Scoped to the CSS, so the test that reads these files is still formatted.
+src/styles/*.css
+
+# Build output.
+dist/

@@ -1,0 +1,47 @@
+/* Two reader preferences, and the only two blocks in the project that outrank
+   everything a component can declare.
+
+   Being imported last is not what does that, and believing it was is what left
+   the forced-colors ring beaten. index.css imports this file last of the SHARED
+   sheets, which is all index.css can decide: a page sheet is imported by its
+   page component, so all nine of them are emitted after this file — thirty-three
+   kilobytes of rules, at page specificity, downstream of the block that is
+   supposed to have the last word. `.settings-msg:focus-visible` in
+   pages/settings.css was already winning, and a reader in forced-colors mode got
+   the outline drawn in the text colour rather than in the system highlight.
+
+   So both blocks state !important on every declaration, which is a priority and
+   not a position: a reader preference is not a style a component is entitled to
+   argue with, and this is the one place in the project where that is true.
+   src/styles/preferences.test.ts reads the emitted bundle and holds it. */
+/* ---- reduced motion ---- */
+/* Everything the console animates is decoration over a state that is already
+   spelled out in colour and text, so under reduce it all stops rather than
+   being shortened. Animations that must survive are declared inside a
+   no-preference query instead (see .pipe-stage.current). */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 1ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* ---- forced colors ---- */
+/* The status dot is deliberately not rescued below. forced-colors replaces its
+   background with the reader's own palette and every dot goes one colour, which
+   is exactly what a reader who turned the mode on asked for; the status word
+   beside it still says which state it is. forced-color-adjust: none would push
+   the hue back through and take that choice away to restore a channel nothing
+   depends on. */
+/* box-shadow is dropped in forced-colors mode; an outline is not, which is why
+   the ring above is an outline. Highlight is named explicitly so the ring
+   lands on the system's focus colour rather than on the text colour. */
+@media (forced-colors: active) {
+  :focus-visible,
+  .field input:focus, .field select:focus, .field textarea:focus {
+    outline: 3px solid Highlight !important;
+    outline-offset: 2px !important;
+  }
+}

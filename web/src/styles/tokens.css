@@ -1,0 +1,178 @@
+/* Token foundation for the console. Values are verbatim from Apple's shipped
+   App Store stylesheet, and every annotation below was written next to a
+   measurement — most of them after a contrast reading failed. This file is the
+   only place in the project allowed to spell a colour, a radius or a duration;
+   stylelint enforces that (see .stylelintrc.json), so a component that needs a
+   new value adds a token here rather than a literal at the call site.
+
+   Ink is an alpha ladder, surfaces are two levels (recessed floor / raised
+   card), separation is hairlines, the only motion is a 210ms ease-out nudge,
+   and dark mode is pure token remapping via prefers-color-scheme: there is no
+   stored theme, no matchMedia in JS, and no component-level dark rule. */
+
+:root {
+  color-scheme: light dark;
+  --font-family: -apple-system, BlinkMacSystemFont, "Apple Color Emoji", "SF Pro", "PingFang SC", "SF Pro Icons", "Helvetica Neue", Helvetica, Arial, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+
+  /* Type ramp: Apple's rung structure, scaled up one step for dashboard
+     readability (the original 13px body reads small for dense admin UI).
+     Rungs are rem against the 16px root, not px, so a reader who raises the
+     browser's font size moves the whole ramp; at the default root every rung
+     computes to the same pixel value the px ramp had. */
+  --header-emphasized:      700 2.375rem/1.18 var(--font-family);
+  --title-1-emphasized:     700 1.625rem/1.2 var(--font-family);
+  --title-2-emphasized:     700 1.25rem/1.3 var(--font-family);
+  --title-3-emphasized:     600 1.0625rem/1.35 var(--font-family);
+  --title-3-tall:           400 1.0625rem/1.5 var(--font-family);
+  --body:                   400 .875rem/1.35 var(--font-family);
+  --body-emphasized:        600 .875rem/1.35 var(--font-family);
+  --body-tall:              400 .875rem/1.5 var(--font-family);
+  --body-bold-tall:         700 .875rem/1.4 var(--font-family);
+  --callout:                400 .8125rem/1.35 var(--font-family);
+  --callout-emphasized:     600 .8125rem/1.35 var(--font-family);
+  --subhead-emphasized:     600 .75rem/1.3 var(--font-family);
+  --footnote:               400 .6875rem/1.35 var(--font-family);
+
+  --systemPrimary:    rgba(0, 0, 0, .85);
+  /* .5 is Apple's rung and measures 3.98:1 on #fff — under the 4.5 floor for
+     the body and callout text bound to it. .56 is Apple's own value for
+     non-Apple platforms (the @supports block below) and clears it at 4.94:1. */
+  --systemSecondary:  rgba(0, 0, 0, .56);
+  /* The ladder skips .25 here, and the gap is deliberate. That rung was the
+     placeholder ink at 1.83:1 on the control fill, and a placeholder is the one
+     piece of text in the settings form carrying state a reader cannot get
+     anywhere else — the secret fields say "Saved — leave empty to keep" and
+     "Managed by deployment environment" there and nowhere else. Placeholders
+     bind --systemSecondary now, which left the rung with no reader at all, and
+     a rung nobody reads describes a system the stylesheet does not run. */
+  --systemQuaternary: rgba(0, 0, 0, .1);
+  --systemQuinary:    rgba(0, 0, 0, .05);
+
+  --systemRed:    #ff3b30;
+  --systemRed-rgb: 255, 59, 48;
+  --systemOrange: #ff9500;
+  --systemGreen:  #28cd41;
+  --systemBlue:   #007aff;
+  --systemGray:   #8e8e93;
+  --systemGray6:  #f2f2f7;
+
+  /* Status text inks. The palette above is dot and fill hues only, and two of
+     them are quiet on white — #28cd41 measures 2.12:1 and #ff9500 2.20:1. They
+     stay quiet on purpose: a status dot is never the only channel (a status
+     word sits beside every one of them), so 1.4.11's "required to understand"
+     does not reach it, and darkening the hue would buy contrast a reader who
+     needs it already has in the word. Text carrying an outcome is a different
+     job and takes a darkened ink. */
+  --successInk: #1d7d2f;
+  --dangerInk:  #d70015;
+
+  /* Two blue roles, one hue family. --keyColor is tint ink: #007aff is 4.02:1
+     on #fff, so light mode takes Apple's darker store blue. --accentFill is
+     the ground under a white-on-accent label and has to clear 4.5:1 on its
+     own, which the dark-mode tint #0a84ff cannot. */
+  --keyColor: #0071e3;
+  --keyColor-rgb: 0, 113, 227;
+  --accentFill: #0071e3;
+  --onAccentInk: #fff;
+  /* The third accent role, and the one that was missing. A tint wash of the key
+     colour is not a surface the key colour can then be written on: --keyColor
+     over its own 6% wash is 4.33:1 and over the 8% wash in the sidebar 3.70:1,
+     both under the 4.5 floor 14px bold text has. This is the ink for anything
+     sitting on that wash — the quiet button, the current nav item, the current
+     pipeline chip — and it clears 4.5:1 on every wash the stylesheet mixes over
+     every surface the wash lands on. */
+  --onTintInk: #005bbf;
+  /* A control's border is the only thing that says where the control is: the
+     field fill is --pageRaised and so is the card behind it, so 1.4.11's 3:1
+     for a non-text boundary binds here. --labelDivider is 1.41:1 on that fill,
+     which is right for a hairline between rows and wrong for an edge. */
+  --controlBorder: rgba(0, 0, 0, .45);
+  /* 1.4.11 asks 3:1 against everything the ring abuts. outline-offset puts the
+     page there, but this value also clears 3:1 against --accentFill so a
+     focused primary button still reads as ringed rather than merely fatter. */
+  --focusRing: #002255;
+
+  --pageFloor: #f5f5f7;
+  --pageRaised: #fff;
+  --controlBG: var(--pageRaised);
+  --navSidebarBG: rgba(60, 60, 67, .03);
+
+  --labelDivider: rgba(0, 0, 0, .15);
+  --keyline: .5px solid var(--labelDivider);
+  --shadow-small:  0 3px  9px rgba(0, 0, 0, .08);
+  --shadow-medium: 0 3px 20px rgba(0, 0, 0, .08);
+  /* What a modal dims the page with. Black in both modes and not a wash of the
+     page ink: a scrim's job is to say the page behind it is out of reach, and
+     the light-on-dark inversion the other neutral tokens take would lighten the
+     ground behind a dialog instead of putting it away. Deeper in dark for the
+     same reason the shadows are: the same alpha over a #151515 ground is a
+     shift of two levels and reads as nothing at all. */
+  --scrim: rgba(0, 0, 0, .32);
+
+  --radius-small: 9px;
+  --radius-medium: 12px;
+  --radius-large: 17px;
+  --buttonRadius: 6px;
+  --radius-pill: 1000px;   /* capsule: any radius past half the tallest pill */
+  --radius-circle: 50%;    /* dots and avatars, whose box is already square */
+
+  --bodyGutter: 25px;
+  --shellWidth: 1080px;    /* the one layout column every public route sits in */
+  --readingWidth: 720px;   /* measure cap for prose blocks inside that column */
+	--authCardWidth: 340px;
+	--deviceCardWidth: 440px;
+  --hover-transition: 210ms ease-out;
+  --alpha-multiplier: 1;
+}
+@media (min-width: 1000px) { :root { --bodyGutter: 40px; } }
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --systemPrimary:    hsla(0, 0%, 100%, .85);
+    --systemSecondary:  hsla(0, 0%, 100%, .55);
+    --systemQuaternary: hsla(0, 0%, 100%, .1);
+    --systemQuinary:    hsla(0, 0%, 100%, .05);
+    --systemRed:    #ff453a;
+    --systemRed-rgb: 255, 69, 58;
+    --systemOrange: #ff9f0a;
+    --systemGreen:  #32d74b;
+    --systemBlue:   #0a84ff;
+    --systemGray:   #98989d;
+    --systemGray6:  #1c1c1e;
+    /* The dark palette is already legible on the raised surface (8.6:1 and
+       4.8:1), so the status inks are the palette here. */
+    --successInk: #32d74b;
+    --dangerInk:  #ff453a;
+    --keyColor: #0a84ff;
+    --keyColor-rgb: 10, 132, 255;
+    --accentFill: #0a6cd8;   /* #0a84ff under white ink is 3.65:1 */
+    --onAccentInk: #fff;
+    /* Same job, opposite direction: the wash lightens a dark ground, so the ink
+       on it has to be lighter than --keyColor rather than darker. */
+    --onTintInk: #4da3ff;
+    --controlBorder: hsla(0, 0%, 100%, .4);
+    --focusRing: #a8ccff;
+    --pageFloor: #151515;
+    /* Kept dark on purpose: lifting the card toward the old white-10% repaint
+       reads as more elevation but drops --keyColor and --dangerInk on it to
+       4.1:1. The shadows below carry the elevation instead. */
+    --pageRaised: #1f1f1f;
+    --controlBG: var(--systemQuinary);
+    --navSidebarBG: rgba(235, 235, 245, .03);
+    --labelDivider: hsla(0, 0%, 100%, .1);
+    /* 8% black over a #151515 ground shifts it by 2/255: elevation stopped
+       existing, which is why five component rules used to repaint every card
+       in dark. Deepen the shadow and one card background serves both modes. */
+    --shadow-small:  0 3px  9px rgba(0, 0, 0, .5);
+    --shadow-medium: 0 3px 20px rgba(0, 0, 0, .55);
+    --scrim: rgba(0, 0, 0, .6);
+    --alpha-multiplier: 1.33;
+  }
+}
+@supports not (font: -apple-system-body) {
+  :root { --systemPrimary: rgba(0, 0, 0, .88); --systemSecondary: rgba(0, 0, 0, .56); }
+  @media (prefers-color-scheme: dark) {
+    :root { --systemPrimary: hsla(0, 0%, 100%, .92); --systemSecondary: hsla(0, 0%, 100%, .64); }
+  }
+}

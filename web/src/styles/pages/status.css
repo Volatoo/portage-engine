@@ -1,0 +1,48 @@
+/* The public service status page.
+
+   The headline is a flex row rather than the `.status` badge itself: a badge is
+   `white-space: nowrap`, which is right for one word beside a dot and wrong for
+   a sentence that has to wrap at 320px. So the badge wraps the dot alone and
+   the sentence sits beside it as its own item, which is also what lets the dot
+   stay on the first line when the sentence takes three. */
+.status-page .status-headline {
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+  font: var(--title-2-emphasized);
+  margin-bottom: 4px;
+  text-wrap: pretty;
+}
+.status-page .status-headline .status {
+  flex: none;
+}
+/* Two lines of reserve, because that is what this line takes at a phone width:
+   the timestamp with its zone and the build identity wrap once under about
+   700px and sit on one line above it. Reserving the wider case at every width
+   costs 19px of quiet space on a desktop and buys a card whose height does not
+   change at the moment the snapshot lands — which is the moment a reader is
+   looking straight at it. */
+.status-page .status-meta {
+  min-height: 2.7em;
+  color: var(--systemSecondary);
+  font-variant-numeric: tabular-nums;
+}
+/* The line the version and the timestamp share. It is rewritten on every poll,
+   which is exactly why it is not inside the live region above it. */
+.status-page .status-version {
+  white-space: nowrap;
+}
+.status-page .status-cadence {
+  color: var(--systemSecondary);
+  font: var(--callout);
+}
+/* Three components is what handlers_public.go reports, and the height of three
+   rows is what the card holds before the first answer — so the footer does not
+   rise under the reader when the snapshot lands, and does not move again on any
+   later poll that finds the same three. */
+.status-page .status-list {
+  min-height: 153px;
+}
+.status-page .status-list .state-retry {
+  padding: 0 20px 16px;
+}

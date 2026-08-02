@@ -1,0 +1,39 @@
+/* /image-factory adds almost nothing: the milestone list, the step disclosure,
+   the evidence rows and the blocker block are all in panels.css already, and
+   the catalogue table and the stat tiles are the shared ones. What is here is
+   the two places the route's own copy needs room. */
+
+/* The not-configured note is a card, not a state box, and it must not be read
+   as one: the request succeeded and the sentence is what the server said about
+   its own configuration. It sits at the card's own padding and keeps the
+   reading measure a paragraph needs, because it is three clauses long and every
+   one of them is load-bearing — what is unset, what is still true, and what the
+   UI will not guess. `.card .card-pad` cannot reach it: the two class names sit
+   on one element, so the descendant rule never matched and the sentence stood
+   flush against the card's own edge. */
+.factory-note.card-pad {
+  padding: 20px;
+  max-width: var(--readingWidth);
+}
+
+/* The desktop panel's four labelled lines are `<strong>` inside a note, and the
+   note's line-height is set for prose. Tightening them here keeps four facts as
+   four lines rather than as a paragraph. */
+.factory-note + .factory-note {
+  margin-top: 6px;
+}
+
+/* The default marker beside a profile id is a status badge, so it wears the dot
+   and the word like every other status on the console, and it needs the gap the
+   " · " separator used to draw before it.
+
+   Named by the cell it was written for. "Page-scoped" is a fiction here: routes.ts
+   imports all fourteen page components statically, so every styles/pages/*.css is
+   in one always-loaded bundle, and a selector keyed on shared markup —
+   `table.list td .status` was — reaches the Status column on /builds and
+   /overview, the /monitor instances table, the /packages Signature column and
+   the settings session and node tables. A page file only reaches its own page if
+   it says which page it is. */
+.factory-profile-id .status {
+  margin-inline-start: 6px;
+}
