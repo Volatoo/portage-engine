@@ -35,23 +35,23 @@
       that still answers without script — internal/dashboard/ui.go is mounted at
       the top-level paths beside this one for exactly as long as the port runs.
 
-      English only, and untranslated on purpose rather than by omission: it is
-      outside the bundle's catalogue, and inventing a Chinese string here is not
-      this file's to do. The server already knows the language and could pick,
-      which is what makes this a template action waiting to be added rather than
-      a fact nobody can reach.
+      The words arrive from the server, for the same reason the language on the
+      html element does: the browser rendering this element is the browser that
+      will never run the bundle, so the bundle's catalogue is not something it
+      can be reached from. Each page is named the way the old console names it in
+      the reader's own language — it is that console this points at, so it points
+      in that console's words. The two sentences have no counterpart there and
+      stay English in both, because a console that rendered on the server never
+      had to say what scripting off costs the reader. NoScript in
+      internal/dashboard/webassets/webassets.go holds both halves.
     -->
     <noscript>
       <h1>Portage Engine</h1>
+      <p>{{.NoScript.NeedsScript}}</p>
       <p>
-        The operator console needs JavaScript. Nothing is wrong with the server — this page is a
-        bundle, and with scripting disabled there is nothing to run.
-      </p>
-      <p>
-        The previous console renders on the server and still answers:
-        <a href="/overview">/overview</a>, <a href="/builds">/builds</a>,
-        <a href="/packages">/packages</a>, <a href="/docs">/docs</a> and
-        <a href="/status">/status</a>.
+        {{.NoScript.StillServed}} <a href="/overview">{{.NoScript.Overview}}</a>,
+        <a href="/builds">{{.NoScript.Builds}}</a>, <a href="/packages">{{.NoScript.Packages}}</a>,
+        <a href="/docs">{{.NoScript.Docs}}</a>, <a href="/status">{{.NoScript.Status}}</a>.
       </p>
     </noscript>
     <div id="root"></div>

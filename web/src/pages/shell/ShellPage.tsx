@@ -84,6 +84,23 @@ export function ShellPage({ route, boot, onLanguageChange }: PageProps) {
 
   useEffect(() => {
     let abandoned = false;
+    // Asked outside every project, and not by omission.
+    //
+    // Eight other surfaces had lost the project header and were given it back;
+    // this one is checked and stays without. `/api/shell/preflight` is answered
+    // by handleShellPreflight in internal/dashboard/dashboard.go, which resolves
+    // no project on either of its branches: a local session is decided against
+    // the deployment's own step-up key, the admin credentials and the session
+    // cookie, and a federated one against `principal.step_up` from the control
+    // plane's /api/v1/iam/me — and handleIAMMe in internal/server/iam.go never
+    // reaches authorizeProject, which is the only thing that resolves a
+    // selector. The socket this gates is the same: handlers_shell.go matches
+    // the instance by its id across every instance the control plane holds.
+    //
+    // So the question is "may this session open a terminal", which has no
+    // project in it. A header would be forwarded upstream by serverGet and
+    // ignored there, and reading the project scope here would make this page
+    // wait for a selection that no part of its answer depends on.
     void api.shellPreflight().then((outcome) => {
       if (abandoned) {
         return;

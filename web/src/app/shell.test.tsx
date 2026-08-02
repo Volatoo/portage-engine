@@ -706,9 +706,25 @@ describe('the shell says what it needs before it can say anything', () => {
     const noscript = /<noscript>([\s\S]*?)<\/noscript>/.exec(shell);
     expect(noscript).not.toBeNull();
     const said = noscript?.[1] ?? '';
-    expect(said).toContain('JavaScript');
+    // The sentences themselves are Go's, because the server is what knows the
+    // reader's language before a bundle has run — webassets.NoScriptCopy holds
+    // them and console_test.go holds them to the old console's own wording. What
+    // is checkable from here is that this element still defers to it: a literal
+    // sentence in this file would be an English-only noscript that no Go test
+    // would notice, since it would render the same in both languages.
+    expect(said).toMatch(/\{\{\.NoScript\.\w+\}\}/);
+    const leftToTheTemplate = said
+      .replace(/\{\{[^}]*\}\}/g, '') // Go's sentences
+      .replace(/<[^>]*>/g, '') // the markup around them
+      .replace(/Portage Engine/g, ''); // the product, which is not translated
+    expect(
+      leftToTheTemplate.match(/[A-Za-z]+/g) ?? [],
+      'a word written here renders English in both languages, and no Go test sees it',
+    ).toEqual([]);
     // …and names the console that still answers without it, for as long as both
     // are mounted.
-    expect(said).toContain('/overview');
+    for (const path of ['/overview', '/builds', '/packages', '/docs', '/status']) {
+      expect(said).toContain(`href="${path}"`);
+    }
   });
 });

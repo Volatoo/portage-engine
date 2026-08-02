@@ -20,7 +20,6 @@ import type { ErrorInfo, ReactNode } from 'react';
 import { NavLink } from 'react-router';
 
 import { useMessages } from '../i18n/context';
-import { fallback } from './fallbackCopy';
 
 /**
  * The catch-all route's page.
@@ -34,8 +33,8 @@ export function RouteNotFound() {
   return (
     <div className="page-head">
       <div>
-        <h1>{fallback('err.notfound.h1')}</h1>
-        <p className="sub">{fallback('err.notfound.hint')}</p>
+        <h1>{messages.t('err.notfound.h1')}</h1>
+        <p className="sub">{messages.t('err.notfound.hint')}</p>
       </div>
       <div className="actions">
         <NavLink className="btn" to="/overview">
@@ -55,12 +54,13 @@ export function RouteNotFound() {
  * not a broken console.
  */
 export function RouteNotPermitted({ capability }: { capability: string }) {
+  const messages = useMessages();
   return (
     <div className="page-head">
       <div>
-        <h1>{fallback('err.forbidden.h1')}</h1>
+        <h1>{messages.t('err.forbidden.h1')}</h1>
         <p className="sub" role="status">
-          {fallback('err.forbidden.hint', { capability })}
+          {messages.t('err.forbidden.hint', { capability })}
         </p>
       </div>
     </div>
@@ -72,11 +72,60 @@ interface BoundaryState {
 }
 
 /**
+ * What the boundary puts on screen, split out as a function component so it can
+ * reach the catalogue: a class has no hooks, and these three strings belong with
+ * the other six hundred rather than in a private table of their own.
+ *
+ * Reading the messages context is safe in the one case that looks like it is
+ * not. The outermost boundary stands above `MessagesProvider`, so when the
+ * provider is itself what threw, this reads the context's default value — which
+ * i18n/context.ts seeds with the English messages object for exactly this
+ * situation. Nothing here needs the tree that was caught; a lookup that
+ * degrades to the source string is the whole of the dependency.
+ */
+function RenderFailure({ error }: { error: Error }): ReactNode {
+  const messages = useMessages();
+  // A fragment and not a layout element: this renders both directly under
+  // #root, where the whole shell failed, and inside the chrome's own <main>,
+  // where only a page did. Nesting a second landmark inside the first is what a
+  // wrapper here would do to the second case.
+  return (
+    <>
+      <div className="page-head">
+        <div>
+          <h1>{messages.t('err.render.h1')}</h1>
+          <p className="sub">{messages.t('err.render.hint')}</p>
+        </div>
+        <div className="actions">
+          <button
+            className="btn"
+            type="button"
+            onClick={() => {
+              window.location.reload();
+            }}
+          >
+            {messages.t('err.render.reload')}
+          </button>
+        </div>
+      </div>
+      <div className="card">
+        <div className="card-pad">
+          <div className="empty" data-state="error" role="alert">
+            {error.message}
+          </div>
+        </div>
+      </div>
+    </>
+  );
+}
+
+/**
  * The boundary, which is a class because React offers no hook that catches.
  *
- * It renders no chrome and reads no context. Whatever threw is somewhere below
- * this, the providers are part of what it is catching, and a boundary that needs
- * the tree it caught is a boundary that throws while rendering the error.
+ * It renders no chrome and nothing of the tree it caught: whatever threw is
+ * somewhere below this, the providers are part of what it is catching, and a
+ * boundary that needs the tree it caught is a boundary that throws while
+ * rendering the error.
  *
  * The way out is a full reload rather than a router navigation: React has
  * unmounted the subtree that failed, every piece of state above it is now
@@ -101,37 +150,6 @@ export class ConsoleErrorBoundary extends Component<{ children: ReactNode }, Bou
     if (error === null) {
       return this.props.children;
     }
-    // A fragment and not a layout element: this renders both directly under
-    // #root, where the whole shell failed, and inside the chrome's own <main>,
-    // where only a page did. Nesting a second landmark inside the first is what
-    // a wrapper here would do to the second case.
-    return (
-      <>
-        <div className="page-head">
-          <div>
-            <h1>{fallback('err.render.h1')}</h1>
-            <p className="sub">{fallback('err.render.hint')}</p>
-          </div>
-          <div className="actions">
-            <button
-              className="btn"
-              type="button"
-              onClick={() => {
-                window.location.reload();
-              }}
-            >
-              {fallback('err.render.reload')}
-            </button>
-          </div>
-        </div>
-        <div className="card">
-          <div className="card-pad">
-            <div className="empty" data-state="error" role="alert">
-              {error.message}
-            </div>
-          </div>
-        </div>
-      </>
-    );
+    return <RenderFailure error={error} />;
   }
 }

@@ -10,10 +10,12 @@ import { MemoryRouter } from 'react-router';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { onSessionExpired, request } from '../api/client';
+import { api } from '../api/endpoints';
 import type { ProjectPolicy } from '../api/types';
 import type { BootPayload } from '../boot/payload';
 import { MessagesProvider } from '../i18n/context';
 import { ConfirmDialog } from '../pages/builds/parts';
+import { useIdentity } from './capabilities';
 import { ProjectQuota } from './ProjectQuota';
 import { PROJECT_STORAGE_KEY, ProjectScopeContext } from './project';
 import type { ProjectScope } from './project';
@@ -48,6 +50,9 @@ afterEach(() => {
     container.remove();
   }
   vi.unstubAllGlobals();
+  // The identity counter below is a spy on a real module export, so it has to
+  // be put back or the next case counts this one's asks as well.
+  vi.restoreAllMocks();
 });
 
 interface Call {
@@ -333,20 +338,62 @@ const SCOPED_SURFACES: { name: string; node: () => ReactNode }[] = [
 ];
 
 /**
- * The three paths that are deliberately made outside any project.
+ * The two paths that are deliberately made outside any project.
  *
- * `/api/iam/me` is the chrome asking who the reader is, which is the question
- * whose answer NAMES the projects; `/api/keys/public` and `/auth/step-up` are
- * not project resources at all. Everything else the console asks for is asked
- * for in a project, and this list is short so that adding to it is a decision.
+ * Neither is a project resource at all: one is the deployment's signing key,
+ * the other is a credential. Everything else the console asks for is asked for
+ * in a project, and this list is short so that adding to it is a decision.
+ *
+ * `/api/iam/me` was on this list and is not any more. It is one path with two
+ * callers and two different right answers — the identity ask, which is the
+ * question whose answer NAMES the projects and so cannot be made in one, and
+ * the security panel's, which is made by a surface that already holds one. A
+ * path-shaped exemption forgives both: dropping the scope from the panel left
+ * every case in this file green, which was checked by doing it. So the
+ * exemption is now made per caller, below, and not per path.
  */
-const UNSCOPED_PATHS = ['/api/iam/me', '/api/keys/public', '/auth/step-up'];
+const UNSCOPED_PATHS = ['/api/keys/public', '/auth/step-up'];
 
-function scopeFailures(calls: readonly Call[]): string[] {
+/**
+ * The requests a surface made outside the project it was mounted in.
+ *
+ * `identityAsks` is how many times the surface reached `api.iamMe`, the entry
+ * point whose parameter type carries no project and which therefore cannot send
+ * one — so exactly that many unscoped `/api/iam/me` requests belong on the
+ * wire, and any beyond them are named here like any other unscoped request.
+ * That is what catches a scoped caller whose project went empty: it still goes
+ * through `api.iamMeInProject`, so the allowance stays where it was and the
+ * request it made without a header is one too many.
+ *
+ * What it cannot catch is a scoped caller that moves to the unscoped entry
+ * point, because then it raises the allowance as it spends it — the two are
+ * one method and one URL on the wire and nothing reading requests can tell them
+ * apart. That case is caught by driving the two surfaces separately, below.
+ */
+function scopeFailures(calls: readonly Call[], identityAsks = 0): string[] {
+  let forgiven = identityAsks;
   return calls
     .filter((call) => !UNSCOPED_PATHS.some((path) => call.path.startsWith(path)))
     .filter((call) => call.projectID !== SCOPED_PROJECT)
+    .filter((call) => {
+      if (!call.path.startsWith('/api/iam/me') || forgiven === 0) {
+        return true;
+      }
+      forgiven -= 1;
+      return false;
+    })
     .map((call) => `${call.method} ${call.path}`);
+}
+
+/**
+ * Counts the identity asks a case makes, calling through to the real one.
+ *
+ * The count is the whole point: it is what turns "this route is exempt" into
+ * "this caller is exempt, that many times".
+ */
+function countIdentityAsks(): { made: () => number } {
+  const spy = vi.spyOn(api, 'iamMe');
+  return { made: () => spy.mock.calls.length };
 }
 
 describe('every surface that reads the project scope sends it', () => {
@@ -373,16 +420,59 @@ describe('every surface that reads the project scope sends it', () => {
 
   for (const surface of SCOPED_SURFACES) {
     it(`${surface.name} puts X-Project-ID on every request it makes`, async () => {
+      const identity = countIdentityAsks();
       const calls = captureRoutes(controlPlane);
       await mount(surface.node(), { projectID: SCOPED_PROJECT, ready: true });
       expect(calls.length, 'this surface asked for nothing at all').toBeGreaterThan(0);
-      expect(scopeFailures(calls)).toEqual([]);
+      expect(scopeFailures(calls, identity.made())).toEqual([]);
     });
   }
 });
 
+/** Nothing on screen: a component that exists to make the chrome's one ask. */
+function IdentityHarness() {
+  const identity = useIdentity(true);
+  return <span>{identity.resolved ? identity.displayName : ''}</span>;
+}
+
+/**
+ * One path, two callers, driven one at a time.
+ *
+ * They are indistinguishable on the wire — same method, same URL — so nothing
+ * reading the recorded requests can say which of them made one. The two cases
+ * below take the surfaces apart instead: a page whose only ask is the identity
+ * hook's, and a page whose only ask is the panel's. Each is then held to what it
+ * put on the wire, which is the thing the control plane actually sees.
+ */
+describe('the two callers of /api/iam/me answer to different rules', () => {
+  it('asks unscoped from the identity hook, whose answer is what names the projects', async () => {
+    // Deliberately mounted inside a settled scope, so a request that carries no
+    // header is carrying none by decision rather than by having nothing to
+    // carry. `useIdentity` runs in front of any project the reader could have
+    // been given, and a selector here would name one they may not hold.
+    const calls = captureRoutes(controlPlane);
+    await mount(<IdentityHarness />, { projectID: SCOPED_PROJECT, ready: true });
+    const asked = calls.filter((call) => call.path.startsWith('/api/iam/me'));
+    expect(asked).toHaveLength(1);
+    expect(asked[0]?.projectID).toBeNull();
+  });
+
+  it('asks in the project the rail names from the security panel', async () => {
+    // The other caller. /settings mounts no identity hook at all, so every
+    // request this surface makes to that route is the panel's, and the panel has
+    // already been handed a project — one it reads the identity providers in,
+    // like every other request the page makes.
+    const calls = captureRoutes(controlPlane);
+    await mount(pageFor('settings'), { projectID: SCOPED_PROJECT, ready: true });
+    const asked = calls.filter((call) => call.path.startsWith('/api/iam/me'));
+    expect(asked.length, '/settings asked nobody who the reader is').toBeGreaterThan(0);
+    expect(asked.filter((call) => call.projectID !== SCOPED_PROJECT)).toEqual([]);
+  });
+});
+
 describe('every project-scoped write sends it too', () => {
   it('cleans up failed jobs in the project the rail names', async () => {
+    const identity = countIdentityAsks();
     const calls = captureRoutes(controlPlane);
     const page = await mount(pageFor('builds'), { projectID: SCOPED_PROJECT, ready: true });
     await press(control(page.container, 'Clean Up Failed'));
@@ -392,10 +482,11 @@ describe('every project-scoped write sends it too', () => {
     expect(calls.filter((call) => call.path.startsWith('/api/builds/cleanup-failed'))).toHaveLength(
       1,
     );
-    expect(scopeFailures(calls)).toEqual([]);
+    expect(scopeFailures(calls, identity.made())).toEqual([]);
   });
 
   it('retries and deletes a job in the project the rail names', async () => {
+    const identity = countIdentityAsks();
     const calls = captureRoutes(controlPlane);
     const page = await mount(pageFor('build-detail', { job_id: 'job-1' }), {
       projectID: SCOPED_PROJECT,
@@ -407,10 +498,11 @@ describe('every project-scoped write sends it too', () => {
     }
     expect(calls.filter((call) => call.path.startsWith('/api/builds/retry'))).toHaveLength(1);
     expect(calls.filter((call) => call.path.startsWith('/api/builds/delete'))).toHaveLength(1);
-    expect(scopeFailures(calls)).toEqual([]);
+    expect(scopeFailures(calls, identity.made())).toEqual([]);
   });
 
   it('cancels a running job in the project the rail names', async () => {
+    const identity = countIdentityAsks();
     const calls = captureRoutes((path) =>
       path.startsWith('/api/builds/detail') ? { ...JOB, status: 'running' } : controlPlane(path),
     );
@@ -421,13 +513,14 @@ describe('every project-scoped write sends it too', () => {
     await press(control(page.container, 'Cancel Job'));
     await press(control(page.container.querySelector('dialog') as ParentNode, 'Cancel Job'));
     expect(calls.filter((call) => call.path.startsWith('/api/builds/cancel'))).toHaveLength(1);
-    expect(scopeFailures(calls)).toEqual([]);
+    expect(scopeFailures(calls, identity.made())).toEqual([]);
   });
 
   it('saves, tests and submits from /settings in the project the rail names', async () => {
     // Four writers on one page, three resources: the settings PUT, the
     // connection test, and the build the test-build control submits after the
     // PUT it makes first.
+    const identity = countIdentityAsks();
     const calls = captureRoutes(controlPlane);
     const page = await mount(pageFor('settings'), { projectID: SCOPED_PROJECT, ready: true });
     await press(control(page.container, 'Save'));
@@ -438,11 +531,12 @@ describe('every project-scoped write sends it too', () => {
     expect(wrote('/api/settings/cloud/test', 'POST')).toHaveLength(1);
     expect(wrote('/api/settings/cloud', 'PUT').length).toBeGreaterThan(0);
     expect(wrote('/api/builds/submit', 'POST')).toHaveLength(1);
-    expect(scopeFailures(calls)).toEqual([]);
+    expect(scopeFailures(calls, identity.made())).toEqual([]);
   });
 
   it('revokes sessions from /settings in the project the rail names', async () => {
     vi.stubGlobal('confirm', () => true);
+    const identity = countIdentityAsks();
     const calls = captureRoutes(controlPlane);
     const page = await mount(pageFor('settings'), { projectID: SCOPED_PROJECT, ready: true });
     await press(control(page.container, 'Revoke'));
@@ -455,7 +549,7 @@ describe('every project-scoped write sends it too', () => {
     expect(
       calls.filter((call) => call.path.startsWith('/api/iam/sessions/revoke-all')),
     ).toHaveLength(1);
-    expect(scopeFailures(calls)).toEqual([]);
+    expect(scopeFailures(calls, identity.made())).toEqual([]);
   });
 });
 
@@ -711,6 +805,133 @@ describe('an expired session is announced, so the shell can act on it', () => {
     stop();
     await request('/api/status');
     expect(expired).toHaveBeenCalledTimes(2);
+  });
+});
+
+/* ---- the shape a rollup is declared to have ------------------------------ */
+
+/**
+ * Two answers whose declared type had stopped short of the handler writing it.
+ *
+ * These read like assertions about values and the values are the stub's own, so
+ * they cannot go red at run time. What they hold is the type: every field
+ * reached below is reached through the declared answer of an `api.*` call, so a
+ * shared type that stops short again stops `tsc --noEmit` — which is the build
+ * — instead of being found by a reader of /monitor wondering why a card says
+ * zero. Reverting either declaration turns both of these into compile errors.
+ */
+describe('a rollup is typed as the document its handler actually writes', () => {
+  it('reads /api/runtime-metadata/status as the envelope, not the document inside it', async () => {
+    // handlers_runtime_metadata.go, the branch that answers 200: the counts
+    // hang off `status`, and `enabled`/`ok` are the envelope's own.
+    captureRoutes(() => ({
+      enabled: true,
+      ok: true,
+      status: {
+        live_infra: 2,
+        cleanup_failed_infra: 0,
+        published_artifacts: 41,
+        staged_artifacts: 1,
+        factory_runs: 3,
+        missing_artifacts: 0,
+        corrupt_artifacts: 0,
+        orphaned_artifacts: 0,
+      },
+    }));
+    const outcome = await api.runtimeMetadataStatus();
+    expect(outcome.kind).toBe('ok');
+    if (outcome.kind !== 'ok') {
+      return;
+    }
+    expect(outcome.value.enabled).toBe(true);
+    expect(outcome.value.ok).toBe(true);
+    expect(outcome.value.status?.live_infra).toBe(2);
+    // Absent here, and absent on both failure branches, which is how "the
+    // ledger could not be asked" stays different from "the ledger answered".
+    expect(outcome.value.error).toBeUndefined();
+  });
+
+  it('reads the durable half of /api/scheduler/status under the names Go sends', async () => {
+    // internal/builder/manager.go: SchedulerRuntimeStatus unmarshalled over the
+    // in-memory map, so `builders` survives beside the durable keys.
+    captureRoutes(() => ({
+      authority: 'postgresql',
+      builders: [],
+      queued_tasks: 3,
+      running_tasks: 1,
+      healthy: true,
+      unschedulable_tasks: 0,
+      active_leases: 2,
+      expired_leases: 1,
+      registered_workers: 4,
+      active_workers: 3,
+      capability_workers: 3,
+      stale_workers: 1,
+      attempts_last_hour: 12,
+      lease_expiries: {
+        attempt_requeued: 1,
+        attempt_failed: 0,
+        attempt_canceled: 0,
+        admission_requeued: 0,
+        admission_failed: 0,
+        admission_canceled: 0,
+        phase_reclaimed: 5,
+      },
+      fairness: {
+        enabled: true,
+        eligible_projects: 2,
+        starved_projects: 1,
+        admission_dispatches: 9,
+        phase_dispatches: 14,
+        max_queue_wait_seconds: 61,
+      },
+      worker_scoring: { decisions_last_hour: 12, multi_candidate_last_hour: 4 },
+      target_history: {
+        projection: {
+          valid: true,
+          state: 'fresh',
+          observed_at: '2026-08-01T12:00:00Z',
+          source_watermark_present: true,
+          lag_seconds: 3,
+          alert_threshold_seconds: 30,
+        },
+      },
+      autoscaler: {
+        mode: 'on',
+        active_slots: 4,
+        busy_slots: 4,
+        backlog: 0,
+        unschedulable_backlog: 0,
+        desired_slots: 4,
+        recommendation: 'hold',
+        actuator: {
+          open_actions: 1,
+          failed_actions: 0,
+          provisioning_instances: 1,
+          active_instances: 3,
+          draining_instances: 0,
+          deleting_instances: 0,
+        },
+      },
+    }));
+    const outcome = await api.schedulerStatus();
+    expect(outcome.kind).toBe('ok');
+    if (outcome.kind !== 'ok') {
+      return;
+    }
+    // The four the in-memory authority sends, which both authorities carry.
+    expect(outcome.value.authority).toBe('postgresql');
+    expect(outcome.value.builders).toEqual([]);
+    // And the durable half, one reading out of each group /monitor renders.
+    expect(outcome.value.active_leases).toBe(2);
+    expect(outcome.value.attempts_last_hour).toBe(12);
+    expect(outcome.value.registered_workers).toBe(4);
+    expect(outcome.value.capability_workers).toBe(3);
+    expect(outcome.value.lease_expiries?.phase_reclaimed).toBe(5);
+    expect(outcome.value.fairness?.starved_projects).toBe(1);
+    expect(outcome.value.worker_scoring?.decisions_last_hour).toBe(12);
+    expect(outcome.value.target_history?.projection?.lag_seconds).toBe(3);
+    expect(outcome.value.autoscaler?.actuator?.active_instances).toBe(3);
   });
 });
 

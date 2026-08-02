@@ -103,7 +103,12 @@ export function SecurityPanel({ guard }: { guard: StepUpGuard }) {
     // again is one request, once, on a panel nobody opens by accident; the
     // alternative is a field on the shared identity context, which is in the
     // handoffs.
-    void api.iamMe({ projectID, signal: controller.signal }).then((outcome) => {
+    //
+    // Through the scoped entry point, not the chrome's: this panel has been
+    // given a project and asks in it, like every other request the page makes.
+    // The chrome's ask is the one that cannot carry a project, because its
+    // answer is what names them.
+    void api.iamMeInProject({ projectID, signal: controller.signal }).then((outcome) => {
       if (controller.signal.aborted) {
         return;
       }

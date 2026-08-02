@@ -392,6 +392,103 @@ func TestConsoleBootResolvesLanguageTheSameWayTheOldConsoleDoes(t *testing.T) {
 	}
 }
 
+// TestNoScriptNamesThePagesTheWayTheOldConsoleDoes holds the shell's <noscript>
+// copy against the catalogue it was taken from.
+//
+// The element exists for the reader whose browser will never run the bundle, so
+// the bundle's message catalogue cannot reach it and the server picks the words.
+// That is a second place words are chosen, and a second place is where a
+// language quietly diverges: two Chinese words for one page is the failure this
+// forecloses. webassets cannot read the catalogue itself — the dependency runs
+// the other way — so the five names are transcribed there and compared here,
+// which is the same arrangement the two route tables and the status vocabulary
+// are already held in.
+//
+// It also pins what is deliberately not translated. The two sentences have no
+// counterpart in the old console, which rendered on the server and so never had
+// to tell anyone what scripting off costs them. English in both languages is the
+// honest answer there and is what this asserts, so that "the noscript is English
+// only" cannot be closed by writing a Chinese sentence nobody translated.
+func TestNoScriptNamesThePagesTheWayTheOldConsoleDoes(t *testing.T) {
+	english := make(map[string]string, len(consoleNav))
+	for _, entry := range consoleNav {
+		english[entry.key] = entry.en
+	}
+
+	zh, en := webassets.NoScriptCopy("zh"), webassets.NoScriptCopy("en")
+	for _, named := range []struct {
+		key string
+		zh  string
+		en  string
+	}{
+		{"nav.overview", zh.Overview, en.Overview},
+		{"nav.builds", zh.Builds, en.Builds},
+		{"nav.packages", zh.Packages, en.Packages},
+		{"nav.docs", zh.Docs, en.Docs},
+		{"nav.status", zh.Status, en.Status},
+	} {
+		if want := zhCatalogue[named.key]; named.zh != want {
+			t.Errorf("%s: the noscript says %q and this console says %q",
+				named.key, named.zh, want)
+		}
+		if want := english[named.key]; named.en != want {
+			t.Errorf("%s: the noscript says %q and this console says %q",
+				named.key, named.en, want)
+		}
+	}
+
+	if zh.NeedsScript != en.NeedsScript || zh.StillServed != en.StillServed {
+		t.Error("the two noscript sentences have a Chinese value; ui.go has no equivalent " +
+			"sentence for either, so any value here was written rather than translated")
+	}
+	// An unresolved language is English, which is where resolveLanguage lands
+	// for the same input.
+	if webassets.NoScriptCopy("") != en {
+		t.Error("an unresolved language renders something other than the source strings")
+	}
+}
+
+// TestConsoleShellNoScriptSpeaksTheReaderLanguage reads the rendered shell,
+// because everything above this line would still pass if index.html carried the
+// English literals it used to and never named the template action.
+func TestConsoleShellNoScriptSpeaksTheReaderLanguage(t *testing.T) {
+	dashboard := New(&config.DashboardConfig{})
+	if dashboard.console == nil {
+		t.Skip("console bundle not built")
+	}
+	for _, testCase := range []struct {
+		name    string
+		accept  string
+		want    string
+		refused string
+	}{
+		{name: "chinese reader", accept: "zh-CN,zh;q=0.9", want: "总览", refused: "Overview"},
+		{name: "english reader", accept: "en-US", want: "Overview", refused: "总览"},
+	} {
+		request := httptest.NewRequest(http.MethodGet, "/ui/", nil)
+		request.Header.Set("Accept-Language", testCase.accept)
+		recorder := httptest.NewRecorder()
+		dashboard.Router().ServeHTTP(recorder, request)
+
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("%s: status %d", testCase.name, recorder.Code)
+		}
+		shell := recorder.Body.String()
+		if !strings.Contains(shell, testCase.want) {
+			t.Errorf("%s: the shell does not name %q", testCase.name, testCase.want)
+		}
+		if strings.Contains(shell, testCase.refused) {
+			t.Errorf("%s: the shell names %q, which is the other reader's language",
+				testCase.name, testCase.refused)
+		}
+		// The sentences carry no translation, so they are the same in both. A
+		// noscript that lost them renders a list of links introduced by nothing.
+		if !strings.Contains(shell, webassets.NoScriptCopy("en").NeedsScript) {
+			t.Errorf("%s: the shell does not say why the page is empty", testCase.name)
+		}
+	}
+}
+
 func TestConsoleRoutesReportAnUnbuiltBundleInsteadOf404(t *testing.T) {
 	dashboard := New(&config.DashboardConfig{})
 	if dashboard.console != nil {

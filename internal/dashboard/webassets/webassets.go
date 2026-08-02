@@ -275,12 +275,87 @@ type Boot struct {
 	AssetBase string `json:"asset_base"`
 }
 
-// indexData is what the shell template sees. HTMLLang and Lang are lifted out of
-// Boot because they are attributes on <html>, not payload: they have to be in
-// the markup itself for the browser to have them before any script runs.
+// NoScript is the copy inside the shell's <noscript>, resolved per request the
+// way HTMLLang beside it is.
+//
+// It is the one surface the bundle's catalogue cannot reach, and not by
+// oversight: the browser this element renders in is the browser that will never
+// run the bundle. The server has already resolved the reader's language for the
+// attribute on <html>, so it is also the only thing in a position to choose
+// these words.
+//
+// No Chinese is written here. Each page name is the string
+// internal/dashboard/ui.go already prints for that page — this element points
+// the reader at that console, so it should point in that console's own words —
+// and TestNoScriptNamesThePagesTheWayTheOldConsoleDoes compares the two. The
+// dashboard package is what imports this one, so the values cannot be read from
+// its catalogue directly; they are transcribed and then held against it, which
+// is the arrangement the route tables and the status vocabulary are already in.
+//
+// The two sentences have no counterpart in that catalogue. A console that
+// rendered on the server never had to tell anyone what scripting off costs
+// them, so there is nothing to carry over, and they stay English in both
+// languages rather than being invented here — which is what a Chinese reader
+// already gets for every key the translated catalogue has not caught up with.
+type NoScript struct {
+	// NeedsScript names which failure this is. A reader who sees a page with no
+	// content cannot tell a bundle that did not run from a server that is down,
+	// and only one of those is worth reporting.
+	NeedsScript string
+
+	// StillServed introduces the destinations below it: the old console renders
+	// on the server and answers every one of them without script.
+	StillServed string
+
+	// The five pages that console serves and this one links to, named rather
+	// than spelled as paths, because a name is what a reader recognises and the
+	// path is already in the href.
+	Overview string
+	Builds   string
+	Packages string
+	Docs     string
+	Status   string
+}
+
+// NoScriptCopy resolves the <noscript> strings for a resolved language.
+// Anything this console ships no strings for — including the empty string —
+// answers in English, which is where resolveLanguage ends up for the same
+// input.
+//
+// Exported because the check that keeps the Chinese honest lives in the
+// dashboard package, which is where the catalogue it was taken from lives.
+func NoScriptCopy(lang string) NoScript {
+	text := NoScript{
+		NeedsScript: "The operator console needs JavaScript. Nothing is wrong with the server " +
+			"— this page is a bundle, and with scripting disabled there is nothing to run.",
+		StillServed: "The previous console renders on the server and still answers:",
+		Overview:    "Overview",
+		Builds:      "Builds",
+		Packages:    "Packages",
+		Docs:        "Docs",
+		Status:      "Status",
+	}
+	if lang != "zh" {
+		return text
+	}
+	// zhCatalogue in internal/dashboard/ui.go, keys nav.overview, nav.builds,
+	// nav.packages, nav.docs and nav.status.
+	text.Overview = "总览"
+	text.Builds = "构建任务"
+	text.Packages = "软件包"
+	text.Docs = "文档"
+	text.Status = "服务状态"
+	return text
+}
+
+// indexData is what the shell template sees. HTMLLang, Lang and NoScript are
+// lifted out of Boot because they are read before any script runs — two of them
+// are attributes on <html>, and the third is for the reader who runs no script
+// at all — so they have to be in the markup rather than in the payload.
 type indexData struct {
 	HTMLLang string
 	Lang     string
+	NoScript NoScript
 	Boot     Boot
 }
 
@@ -296,7 +371,12 @@ type indexData struct {
 // end of the script.
 func (c *Console) RenderIndex(w http.ResponseWriter, boot Boot) error {
 	var page bytes.Buffer
-	data := indexData{HTMLLang: boot.HTMLLang, Lang: boot.Lang, Boot: boot}
+	data := indexData{
+		HTMLLang: boot.HTMLLang,
+		Lang:     boot.Lang,
+		NoScript: NoScriptCopy(boot.Lang),
+		Boot:     boot,
+	}
 	if err := c.index.Execute(&page, data); err != nil {
 		return fmt.Errorf("webassets: render shell: %w", err)
 	}
@@ -324,9 +404,13 @@ func (c *Console) AssetPaths() []string {
 
 // IndexHTML renders the shell with a zero payload, for tests that need to read
 // what the build produced rather than what a request would produce.
+//
+// The payload is zero; the copy is not. A shell rendered with an empty NoScript
+// is a document with an empty <noscript> in it, which is a worse thing for a
+// test to be reading than the English one every unresolved language gets.
 func (c *Console) IndexHTML() (string, error) {
 	var page bytes.Buffer
-	if err := c.index.Execute(&page, indexData{}); err != nil {
+	if err := c.index.Execute(&page, indexData{NoScript: NoScriptCopy("")}); err != nil {
 		return "", fmt.Errorf("webassets: render shell: %w", err)
 	}
 	return page.String(), nil
