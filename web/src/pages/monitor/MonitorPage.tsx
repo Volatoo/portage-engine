@@ -172,8 +172,19 @@ export function LedgerCard({ ledger }: { ledger: LedgerStatus }) {
             <Moment value={reconcile?.checked_at} />
           </span>
         </span>
+        {/* `last_error` is what is wrong now; `last_write_error` is what went
+            wrong, retained. The second is the one a non-zero count needs, and
+            the first is nearly always empty on a ledger still taking writes —
+            so both are offered and the same sentence is never printed twice. */}
         {ledger.last_error === undefined || ledger.last_error === '' ? null : (
           <span>{ledger.last_error}</span>
+        )}
+        {ledger.last_write_error === undefined ||
+        ledger.last_write_error === '' ||
+        ledger.last_write_error === ledger.last_error ? null : (
+          <span {...verdictAttributes(messages, 'failed')}>
+            {ledger.last_write_error} <Moment value={ledger.last_write_error_at} />
+          </span>
         )}
       </div>
     </article>

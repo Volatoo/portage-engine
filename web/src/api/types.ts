@@ -488,6 +488,14 @@ export interface LedgerStatus {
   last_write_at?: Timestamp;
   last_projection_at?: Timestamp;
   last_error?: string;
+  /**
+   * The most recent write failure, retained. `last_error` above is cleared by
+   * the next successful write, so on a busy ledger it is empty whatever
+   * `write_errors` says — which left this card reporting a count nobody could
+   * act on. These two carry the diagnosis for as long as the number does.
+   */
+  last_write_error?: string;
+  last_write_error_at?: Timestamp;
   last_reconcile?: LedgerReconcileReport;
 }
 
