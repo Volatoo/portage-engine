@@ -305,6 +305,17 @@ func TestLegacyHighRiskWriteRequiresIndependentStepUp(t *testing.T) {
 		!strings.Contains(result.Body.String(), "step_up_required") {
 		t.Fatalf("missing step-up response=%d %s", result.Code, result.Body.String())
 	}
+	// The body names no method, and the console depends on that: a step-up
+	// refusal from here means "a fresh credential of whatever kind established
+	// this session", which only the session knows. web/src/app/stepup.ts reads
+	// the kind off principal.authentication for exactly this answer. Start
+	// sending a method and the console will honour it — but it must be a real
+	// one, because a wrong one sends a local operator on a full navigation to
+	// the login page and discards whatever form they were filling in.
+	if result := request(""); strings.Contains(result.Body.String(), `"method"`) {
+		t.Fatalf("the step-up refusal now names a method; web/src/app/stepup.ts "+
+			"resolves it from the session instead: %s", result.Body.String())
+	}
 	if result := request("primary-key"); result.Code != http.StatusPreconditionRequired {
 		t.Fatalf("reused primary credential status=%d", result.Code)
 	}

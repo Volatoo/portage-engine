@@ -96,9 +96,10 @@ export function SettingsPage(props: Partial<PageProps> = {}) {
   // successful PUT empties the four secret inputs, where an empty secret is the
   // wire spelling of "keep the stored one". So the panels take a guard and the
   // page owns the prompts, below the form.
-  const stepUp = useStepUp();
-  const connectionStepUp = useStepUp();
-  const sessionStepUp = useStepUp();
+  const authentication = props.boot?.principal?.authentication ?? '';
+  const stepUp = useStepUp(authentication);
+  const connectionStepUp = useStepUp(authentication);
+  const sessionStepUp = useStepUp(authentication);
   // Held in its own binding because it never changes identity, and the writer
   // below is built once and must not be rebuilt: a rebuilt writer comes back
   // with its in-flight flag clear.

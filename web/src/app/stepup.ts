@@ -26,6 +26,7 @@ import { createPortal } from 'react-dom';
 import { useHref, useLocation } from 'react-router';
 
 import type { ApiOutcome } from '../api/client';
+import type { StepUpMethod } from '../api/types';
 import { api } from '../api/endpoints';
 import { loginURL } from '../pages/login/urls';
 import { StepUpDialog } from './StepUpDialog';
@@ -40,6 +41,29 @@ export interface StepUpHandlers {
   elevate: () => Promise<boolean>;
   /** Hands the reader to the identity provider for a fresh session. */
   reauthenticate: () => void;
+  /**
+   * How THIS session was established, for the 428s that do not say.
+   *
+   * The control plane's own step-up refusal carries no `method`, so without
+   * this every deployment would be treated alike — and treating them alike is
+   * what a federated default did: a legacy or local operator lost a filled-in
+   * settings form to a navigation that only a provider round-trip needs.
+   */
+  sessionMethod: () => StepUpMethod;
+}
+
+/**
+ * The credential that can satisfy a step-up, given how the session was made.
+ *
+ * `principal.authentication` in internal/server/iam.go spells four kinds. Two
+ * of them are held by an identity provider and can only be refreshed there;
+ * the other two are held by this deployment and can be re-entered in place.
+ * internal/dashboard/ui.go:1712 split them the same way and on the same field.
+ */
+export function stepUpMethodFor(authentication: string): StepUpMethod {
+  return authentication === 'oidc' || authentication === 'federated-session'
+    ? 'federated'
+    : 'local';
 }
 
 /**
@@ -58,13 +82,14 @@ export async function withStepUp<T>(
   if (first.kind !== 'step-up') {
     return first;
   }
-  if (first.method === 'unavailable') {
+  const method = first.method === 'unstated' ? handlers.sessionMethod() : first.method;
+  if (method === 'unavailable') {
     // Not a failure to authenticate: the deployment holds no credential that
     // could satisfy this. Asking for one would be asking for something that
     // cannot work, so the server's own sentence is all there is.
     return first;
   }
-  if (first.method === 'federated') {
+  if (method === 'federated') {
     handlers.reauthenticate();
     return first;
   }
@@ -102,7 +127,7 @@ export interface StepUp {
  * in-flight flag clear, which is the second activation the flag exists to
  * discard. Everything that does change is read through a ref.
  */
-export function useStepUp(): StepUp {
+export function useStepUp(authentication: string): StepUp {
   const fieldID = useId();
   const loginPath = useHref('/login');
   const here = useHref(useLocation());
@@ -112,9 +137,9 @@ export function useStepUp(): StepUp {
   const [failed, setFailed] = useState(false);
   /** Resolves the promise `elevate` is waiting on: true elevated, false declined. */
   const answer = useRef<((elevated: boolean) => void) | null>(null);
-  const target = useRef({ loginPath, here });
+  const target = useRef({ loginPath, here, authentication });
   useEffect(() => {
-    target.current = { loginPath, here };
+    target.current = { loginPath, here, authentication };
   });
 
   const settle = useCallback((elevated: boolean) => {
@@ -134,6 +159,7 @@ export function useStepUp(): StepUp {
             setFailed(false);
             setAsking(true);
           }),
+        sessionMethod: () => stepUpMethodFor(target.current.authentication),
         reauthenticate: () => {
           // prompt=login at the provider and then back to the page the write was
           // made from, so the reader lands where they were rather than on an
