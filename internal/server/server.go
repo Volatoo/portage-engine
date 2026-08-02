@@ -76,9 +76,16 @@ type Server struct {
 	ledgerWG             sync.WaitGroup
 	ledgerPruneOnce      sync.Once
 	ledgerStaleAfter     time.Duration
-	binhostStop          chan struct{}
-	trustedProxies       []netip.Prefix
-	settingsMu           sync.Mutex // serializes settings updates + persistence
+	// The read-only ledger consistency check and its schedule. The mutex covers
+	// the whole run rather than just the due time, because the boot-time check
+	// and the reconciler goroutine can reach it at once and a second concurrent
+	// compare would only produce a second answer to the same question.
+	ledgerConsistencyMu    sync.Mutex
+	ledgerConsistencyEvery time.Duration
+	ledgerConsistencyNext  time.Time
+	binhostStop            chan struct{}
+	trustedProxies         []netip.Prefix
+	settingsMu             sync.Mutex // serializes settings updates + persistence
 }
 
 // trustedProxyPrefixes parses TRUSTED_PROXY_CIDRS once. A malformed entry is
@@ -852,6 +859,13 @@ func (s *Server) initPersistence() error {
 		}
 		s.builder.SyncLedgerJobs(durableJobs)
 		s.pruneLedgerOnce()
+		// The first compare runs here rather than on the first tick, immediately
+		// after the projection it is about to judge was installed. Running it any
+		// earlier would compare the durable rows against an empty map and call
+		// every job in the ledger extra; running it only from the ticker would
+		// leave readiness withholding a consistency verdict it does not have for
+		// the first interval after boot.
+		s.checkLedgerConsistency(time.Now())
 		log.Printf("PostgreSQL is the sole job read/write authority; legacy JSON job persistence is disabled")
 		return nil
 	}
@@ -911,6 +925,7 @@ func (s *Server) startLedgerReconciler(interval time.Duration) {
 	// second. Six missed refreshes tolerate a slow query without hiding a
 	// projection that has stopped advancing.
 	s.ledgerStaleAfter = interval * 6
+	s.ledgerConsistencyEvery = ledgerConsistencyInterval(s.config)
 	s.ledgerStop = make(chan struct{})
 	s.ledgerWG.Add(1)
 	go func() {
@@ -932,9 +947,72 @@ func (s *Server) startLedgerReconciler(interval time.Duration) {
 				}
 				s.builder.SyncLedgerJobs(jobs)
 				s.pruneLedgerOnce()
+				s.checkLedgerConsistency(time.Now())
 			}
 		}
 	}()
+}
+
+// ledgerConsistencyInterval resolves the configured cadence. Zero or negative
+// turns the check off, which an operator running a single replica against a
+// ledger they already trust may reasonably want; checkLedgerHealth then stops
+// claiming the ledger was compared rather than quietly claiming it was.
+func ledgerConsistencyInterval(cfg *config.ServerConfig) time.Duration {
+	if cfg == nil || cfg.Database.LedgerConsistencyIntervalSeconds <= 0 {
+		return 0
+	}
+	return time.Duration(cfg.Database.LedgerConsistencyIntervalSeconds) * time.Second
+}
+
+// checkLedgerConsistency compares the in-memory projection with the durable
+// rows when the compare is due, and only ever reports what it finds.
+//
+// It deliberately does not call Reconcile. Reconcile repairs by writing the
+// in-memory status back into build_jobs, which was the right direction exactly
+// once — migrating off the legacy JSON store. Under DB-4 the durable rows are
+// the authority and the map is derived from them, so a scheduled repair would
+// let the derived copy overwrite its own source. SyncLedgerJobs also merges
+// forward the signing and promotion facts this replica established but has not
+// persisted yet, so a difference here is as likely to be memory running a
+// moment ahead as it is to be a ledger that is actually wrong. Telling those
+// apart is an operator's judgement, and a silent scheduled repair would make
+// the first of them durable before anyone was asked.
+func (s *Server) checkLedgerConsistency(now time.Time) {
+	if s.jobLedger == nil || s.ledgerConsistencyEvery <= 0 {
+		return
+	}
+	s.ledgerConsistencyMu.Lock()
+	defer s.ledgerConsistencyMu.Unlock()
+	if now.Before(s.ledgerConsistencyNext) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	report := s.jobLedger.InspectLedger(ctx, s.builder.GetJobsSnapshot())
+	cancel()
+	if report.Error != "" || !report.Consistent {
+		log.Printf(
+			"Warning: PostgreSQL job ledger consistency check found missing=%d mismatched=%d extra=%d error=%q",
+			report.Missing, report.Mismatched, report.Extra, report.Error,
+		)
+	}
+	s.ledgerConsistencyNext = nextLedgerConsistencyCheck(now, s.ledgerConsistencyEvery, report)
+}
+
+// nextLedgerConsistencyCheck decides when to compare again.
+//
+// A compare that disagreed is retried on the next projection tick instead of at
+// the next interval. Its verdict gates readiness until something replaces it,
+// and the rows and the snapshot it judges are read milliseconds apart — a job
+// created in that gap is a difference the very next sync resolves. A ledger that
+// has genuinely diverged is still diverged five seconds later; a race is not,
+// and must not hold a replica out of rotation for a whole interval.
+func nextLedgerConsistencyCheck(
+	now time.Time, every time.Duration, report persistence.LedgerReconcileReport,
+) time.Time {
+	if report.Error != "" || !report.Consistent {
+		return now
+	}
+	return now.Add(every)
 }
 
 // Shutdown gracefully shuts down the server components.
@@ -1380,7 +1458,7 @@ func (s *Server) checkLedgerHealth() (bool, map[string]interface{}) {
 	}
 	status := s.jobLedger.Status()
 	reconcile := status.LastReconcile
-	ok := status.LastError == "" && (reconcile.CheckedAt.IsZero() || reconcile.Consistent)
+	ok := status.LastError == ""
 	// A projection that never loaded, or stopped advancing, is not observable
 	// through LastError: every successful write clears it. The bound is only
 	// installed once the reconciler owns the refresh.
@@ -1388,15 +1466,33 @@ func (s *Server) checkLedgerHealth() (bool, map[string]interface{}) {
 		(status.LastProjectionAt.IsZero() ||
 			time.Since(status.LastProjectionAt) > s.ledgerStaleAfter)
 	ok = ok && !stale
+	// Whether the durable rows and the in-memory projection were ever compared.
+	// This used to read `reconcile.CheckedAt.IsZero() || reconcile.Consistent`,
+	// which passed an unchecked ledger as healthy — and since nothing called the
+	// compare, that was the only branch anything ever took: `ok` was reporting
+	// whether the last write had succeeded, under the name of ledger health. Now
+	// that the compare runs, a scheduled check that has never run or has stopped
+	// running is a missing answer, not a green one, and the field is allowed to
+	// mean what it is called. Three intervals tolerate one slow query without
+	// tolerating a check that has stopped.
+	checked := !reconcile.CheckedAt.IsZero()
+	consistencyStale := s.ledgerConsistencyEvery > 0 &&
+		(!checked || time.Since(reconcile.CheckedAt) > 3*s.ledgerConsistencyEvery)
+	ok = ok && !consistencyStale
+	// A check that ran must agree, whether or not it is still scheduled: a stored
+	// divergence is a fact about this ledger until a later compare replaces it.
+	ok = ok && (!checked || reconcile.Consistent)
 	return ok, map[string]interface{}{
-		"enabled":           true,
-		"ok":                ok,
-		"projection_stale":  stale,
-		"authority":         status.Authority,
-		"writes":            status.Writes,
-		"write_errors":      status.WriteErrors,
-		"projection_errors": status.ProjectionErrors,
-		"last_write_at":     status.LastWriteAt,
+		"enabled":             true,
+		"ok":                  ok,
+		"projection_stale":    stale,
+		"consistency_checked": checked,
+		"consistency_stale":   consistencyStale,
+		"authority":           status.Authority,
+		"writes":              status.Writes,
+		"write_errors":        status.WriteErrors,
+		"projection_errors":   status.ProjectionErrors,
+		"last_write_at":       status.LastWriteAt,
 		// Reported next to write_errors so a non-zero count is a fact an
 		// operator can act on rather than one they have to go and reproduce.
 		"last_write_error":    status.LastWriteError,
@@ -1430,6 +1526,13 @@ func (s *Server) handleReadyz(w http.ResponseWriter, _ *http.Request) {
 			reason, _ := ledgerStatus["last_error"].(string)
 			if stale, _ := ledgerStatus["projection_stale"].(bool); stale && reason == "" {
 				reason = "PostgreSQL job projection is stale"
+			}
+			// Distinguished from a divergence because they call for opposite
+			// actions: a stale check means nobody has compared the ledger lately
+			// and the operator should find out why the check stopped, while an
+			// inconsistent one means the comparison ran and disagreed.
+			if stale, _ := ledgerStatus["consistency_stale"].(bool); stale && reason == "" {
+				reason = "PostgreSQL job ledger consistency check has not run"
 			}
 			if reason == "" {
 				reason = "job ledger reconciliation is inconsistent"

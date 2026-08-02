@@ -145,7 +145,7 @@ const BOOT: BootPayload = {
   local_login_enabled: true,
   identity_providers: [],
   principal: null,
-  route: { name: 'overview', path: '/ui/overview', job_id: '', instance_id: '', user_code: '' },
+  route: { name: 'overview', path: '/overview', job_id: '', instance_id: '', user_code: '' },
   asset_base: '/static/ui/',
 };
 
@@ -197,9 +197,9 @@ describe('capability gating fails closed', () => {
     // The three admin destinations are absent from the first paint. Never
     // rendered-then-removed: that is a destination an operator can see, click,
     // and be refused by.
-    expect(markup).not.toContain('/ui/monitor');
-    expect(markup).not.toContain('/ui/image-factory');
-    expect(markup).not.toContain('/ui/settings');
+    expect(markup).not.toContain('/monitor');
+    expect(markup).not.toContain('/image-factory');
+    expect(markup).not.toContain('/settings');
     // The ungated ones are there, so the rail is not simply empty.
     expect(markup).toContain('/overview');
     expect(markup).toContain('/builds');
@@ -531,13 +531,13 @@ describe('nothing the console can be asked for renders an empty document', () =>
 
   it('answers an address no route matches with a page and a way somewhere', async () => {
     answering(503, { error: 'identity store unavailable' });
-    const container = await mountApp('/ui/no-such-page');
+    const container = await mountApp('/no-such-page');
     expect(container.textContent).toContain('No such page');
     // Under the public bar, because a reader who mistyped an address may hold no
     // session, and sending them through sign-in to be told the page does not
     // exist is two wrong answers where there was one.
-    expect(destinations(container)).toContain('/ui/docs');
-    expect(destinations(container)).toContain('/ui/status');
+    expect(destinations(container)).toContain('/docs');
+    expect(destinations(container)).toContain('/status');
   });
 
   it('answers a parameter route with no parameter, which the server used to serve', async () => {
@@ -545,7 +545,7 @@ describe('nothing the console can be asked for renders an empty document', () =>
     // the router spells that route /build/:jobID and matches nothing without an
     // id. The server 404s it now, and this is the second half of the same fact.
     answering(503, { error: 'identity store unavailable' });
-    for (const path of ['/ui/build/', '/ui/logs/', '/ui/shell/']) {
+    for (const path of ['/build/', '/logs/', '/shell/']) {
       const container = await mountApp(path);
       expect(container.textContent, path).toContain('No such page');
     }
@@ -555,7 +555,7 @@ describe('nothing the console can be asked for renders an empty document', () =>
 describe('a capability gates the route and not only the link to it', () => {
   it('refuses a deep link to an admin page rather than rendering it', async () => {
     const asked = answering(503, { error: 'identity store unavailable' });
-    const container = await mountApp('/ui/settings');
+    const container = await mountApp('/settings');
     const text = container.textContent ?? '';
     expect(text).toContain('Not available to you');
     // Named, because an operator told only "not available" opens a ticket and
@@ -568,7 +568,7 @@ describe('a capability gates the route and not only the link to it', () => {
 
   it('renders the page for the reader IAM granted it', async () => {
     const asked = answering(200, GRANTED);
-    const container = await mountApp('/ui/settings');
+    const container = await mountApp('/settings');
     expect(container.textContent).not.toContain('Not available to you');
     expect(asked.length).toBeGreaterThan(1);
   });
@@ -578,7 +578,7 @@ describe('a capability gates the route and not only the link to it', () => {
     // for as long as a round trip takes, is the rendered-then-removed defect in
     // the other direction.
     answeringNever();
-    const container = await mountApp('/ui/settings');
+    const container = await mountApp('/settings');
     expect(container.textContent).not.toContain('Not available to you');
   });
 });
@@ -723,8 +723,11 @@ describe('the shell says what it needs before it can say anything', () => {
     ).toEqual([]);
     // …and names the console that still answers without it, for as long as both
     // are mounted.
+    // /legacy, not the bare paths: those belong to this bundle now, which is
+    // the one thing this reader cannot run. ui.go renders on the server and is
+    // kept mounted for exactly this.
     for (const path of ['/overview', '/builds', '/packages', '/docs', '/status']) {
-      expect(said).toContain(`href="${path}"`);
+      expect(said).toContain(`href="/legacy${path}"`);
     }
   });
 });

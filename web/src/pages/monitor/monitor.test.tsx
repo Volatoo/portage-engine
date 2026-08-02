@@ -84,7 +84,9 @@ describe('a write-error count comes with something to act on', () => {
   it('says it once when both fields carry the same sentence', () => {
     const said = 'insert build_jobs: deadlock detected';
     const markup = paint(
-      <LedgerCard ledger={ledgerWith({ write_errors: 19, last_error: said, last_write_error: said })} />,
+      <LedgerCard
+        ledger={ledgerWith({ write_errors: 19, last_error: said, last_write_error: said })}
+      />,
     );
     expect(markup.split(said)).toHaveLength(2);
   });

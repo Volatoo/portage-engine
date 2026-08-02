@@ -30,7 +30,7 @@ function boot(): BootPayload {
     principal: null,
     route: {
       name: 'shell',
-      path: '/ui/shell/i-42',
+      path: '/shell/i-42',
       job_id: '',
       instance_id: 'i-42',
       user_code: '',
@@ -42,7 +42,7 @@ function boot(): BootPayload {
 function paint(lang: Language): string {
   return renderToStaticMarkup(
     <MessagesProvider lang={lang}>
-      <MemoryRouter initialEntries={['/ui/shell/i-42']} basename={CONSOLE_BASE}>
+      <MemoryRouter initialEntries={['/shell/i-42']} basename={CONSOLE_BASE}>
         <ShellPage route={SHELL_ROUTE} boot={boot()} onLanguageChange={() => undefined} />
       </MemoryRouter>
     </MessagesProvider>,
@@ -97,7 +97,7 @@ describe('the socket is gated on the preflight, not opened into a refusal', () =
 describe('the head is reachable and the screen is contained', () => {
   it('renders Back and the instance before anything has been authorized', () => {
     const markup = paint('en');
-    expect(markup).toContain('href="/ui/monitor"');
+    expect(markup).toContain('href="/monitor"');
     expect(markup).toContain('>Back<');
     expect(markup).toContain('i-42');
     // A node that carries the connection state and nothing else, so a state

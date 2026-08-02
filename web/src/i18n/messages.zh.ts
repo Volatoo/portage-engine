@@ -5,9 +5,16 @@
  * incomplete and a two-directional equality gate would go red on correct work;
  * what is gated instead is that every key here exists in the source, that the
  * placeholders match the source string's, and that the coverage number does not
- * fall. See i18n.test.ts, which also names the keys that have no value here.
+ * fall. It is complete today, and i18n.test.ts asserts that — an empty list of
+ * untranslated keys, so the next source string that arrives without one lands
+ * there by name.
  *
- * Extracted from internal/dashboard/ui.go; not retyped.
+ * Most of it was extracted from internal/dashboard/ui.go and not retyped. The
+ * thirty-one keys that console had no equivalent for are written here, each one
+ * carrying the reason it says what it says where the choice was not obvious, and
+ * naming the neighbouring key it took its words from where one existed. A second
+ * Chinese word for a thing this product already has a word for is the failure
+ * those notes exist to prevent.
  */
 
 import type { MessageKey } from './messages.en';
@@ -16,8 +23,20 @@ export const ZH: Partial<Record<MessageKey, string>> = {
   'brand.sub': 'Gentoo Binhost 控制台',
   'builds.cleanup': '清理失败任务',
   'builds.cleanup.confirm': '移除所有失败的任务记录?',
+  // 任务记录 is what builds.cleanup.confirm and detail.delete.confirm already
+  // call a job record, and 待 + verb is how the monitor labels a pending count
+  // (待完成命令, 待上传制品). Both are reused rather than re-worded, so the
+  // dialog and the button above it name the same thing.
+  'builds.cleanup.count': '待删除的失败任务记录:{count}',
   'builds.empty': '还没有构建任务。',
+  'builds.filter.clear': '清除筛选',
   'builds.h1': '构建任务',
+  // Not builds.empty: jobs exist and this query matches none of them, which is
+  // the same distinction packages.none draws for the package search.
+  'builds.none': '没有匹配此筛选的任务。',
+  'builds.truncated': '仅显示最新的 {limit} 个任务;列表接口不会返回更多。',
+  'common.cancel': '取消',
+  'common.expired': '会话已结束,正在返回登录页…',
   'common.loadfail': '加载失败:',
   'common.loading': '正在加载…',
   'common.never': '从未',
@@ -35,13 +54,29 @@ export const ZH: Partial<Record<MessageKey, string>> = {
   'detail.delete.confirm': '删除这条任务记录?',
   'detail.delete.fail': '删除失败:',
   'detail.duration': '耗时',
+  // 隔离策略 is already taken: mon.policyLabel binds it to a builder's isolation
+  // mode. The egress policy is a different thing about the same VM — which hosts
+  // it may reach at all — so it gets its own words rather than the same ones.
+  'detail.egress': '出网策略',
   'detail.error': '错误信息',
   'detail.failed': '构建失败',
   'detail.failed.stage': '构建在{stage}阶段失败',
   'detail.h1': '构建详情',
+  // mon.targets.sub has said 镜像代际 for an image generation since the Go
+  // catalogue; taken from there so the detail tile and the aggregation it rolls
+  // up into are one word.
+  'detail.image': '镜像代际',
   'detail.instance': '实例',
   'detail.livelog': '实时日志',
   'detail.logs': '查看日志',
+  // A state of its own, and said as one: the record could not be read, so the
+  // stage chips below have nothing behind them.
+  'detail.norecord': '无法读取这条任务记录,其构建流程状态无从得知。',
+  // Left in Latin on purpose, which is the decision this catalogue already made
+  // for the same word at packages.profile and factory.profiles. Profile names a
+  // Portage concept the operator types into binrepos.conf; translating it here
+  // would give the console a word the tooling does not have.
+  'detail.profile': 'Profile',
   'detail.remedy.env': '该项由部署环境设置,本控制台不持有:',
   'detail.remedy.where': '该项在本控制台设置:',
   'detail.retry': '重试任务',
@@ -88,10 +123,34 @@ export const ZH: Partial<Record<MessageKey, string>> = {
   'docs.manual.p': '也可以直接创建 binrepos.conf。把示例路径替换为软件包页面显示的 Binhost 路径：',
   'docs.sub': '无需登录即可完成 Binhost 选择、签名信任和 Portage 配置。',
   'docs.verify.note': '网页中的“已发布”只表示制品进入公开仓库，不能替代客户端签名校验。',
+  // The three screens the shell renders in place of a page. The console this
+  // replaces rendered on the server, so a failed page was a Go error page and a
+  // bad address was net/http's 404: there is no earlier Chinese to carry over
+  // for any of these seven, and all seven are written here rather than taken.
+  //
+  // 未对你开放 rather than 禁止访问: the identity service withheld a grant, which
+  // is not the same statement as a refusal, and the sentence under it names the
+  // grant so the reader can ask for it by name. 能力 is what the scheduler card
+  // already calls a capability (mon.scheduler.capability 能力执行槽,
+  // mon.scheduler.unschedulable 能力不匹配), and 你 rather than 您 is the register
+  // sec.revokeall.confirm already addresses the operator in.
+  'err.forbidden.h1': '此页面未对你开放',
+  'err.forbidden.hint':
+    '此页面需要 {capability} 能力,IAM 没有为本次会话授予该能力。它发出的每个请求都会被拒绝。',
+  'err.notfound.h1': '没有这个页面',
+  'err.notfound.hint': '控制台在这个地址上没有页面。可能是地址输错了,也可能是旧版本里的页面。',
+  'err.render.h1': '控制台无法渲染此页面',
+  'err.render.hint':
+    '这是控制台自身的故障,不是服务端的拒绝。重新加载;如果仍然出现,下面的信息就是要上报的内容。',
+  'err.render.reload': '重新加载控制台',
   'factory.action': '下一步',
   'factory.blockers': '阻塞项',
   'factory.bundles': '离线输入包',
   'factory.catalog': '已生效目录',
+  // The stat tile beside the heading, whose value is the catalogue version. The
+  // heading is 已生效目录 and the tile is the same noun without the qualifier;
+  // 目录 is the word ui.go's factory.notconfigured already uses for it.
+  'factory.catalog.stat': '目录',
   'factory.channel': '通道',
   'factory.completed': '完成于',
   'factory.default': '默认',
@@ -124,6 +183,10 @@ export const ZH: Partial<Record<MessageKey, string>> = {
   'filter.build': '构建',
   'filter.collect': '回收',
   'filter.deploy': '部署',
+  // The [policy] stage of a build log. Four characters where the other chips are
+  // two, because 策略 alone is already the desktop-strategy column's word and a
+  // chip that filters network-policy lines has to say which policy it means.
+  'filter.policy': '网络策略',
   'filter.provision': '供给',
   'filter.publish': '发布',
   'filter.queued': '排队',
@@ -213,6 +276,13 @@ export const ZH: Partial<Record<MessageKey, string>> = {
   'mon.gateway.phase.failed': '失败 ',
   'mon.gateway.phase.ready': '就绪 ',
   'mon.gateway.protocol': '执行协议 ',
+  // Deliberately the Latin letter, and present rather than absent so that is a
+  // decision on the record instead of a gap the fallback happens to cover. This
+  // is not a word, it is the sigil a version number wears: the line renders as
+  // 执行协议 v3, and 版本 in its place would produce a label followed by a second
+  // label. The catalogue already keeps the Latin spelling wherever the thing is
+  // an identifier rather than prose — Profile, binhost, Builder, watermark.
+  'mon.gateway.protocol.version': 'v',
   'mon.gateway.provider': '签发提供商 ',
   'mon.gateway.provider.error': '签发错误 ',
   'mon.gateway.provider.failure': '最近签发失败 ',
@@ -268,6 +338,17 @@ export const ZH: Partial<Record<MessageKey, string>> = {
   'mon.scheduler.fair.maxwait': '已观测最长等待 ',
   'mon.scheduler.fair.projects': '公平队列项目 ',
   'mon.scheduler.fair.starved': '反饥饿提升 ',
+  // The card's three groups, kept as questions because that is what they are:
+  // an operator arrives at /monitor with one of these three and reads the badge
+  // beside the heading, not the forty numbers under it. A heading rewritten as a
+  // noun (容量, 阻塞) would name the metrics again and answer nothing.
+  'mon.scheduler.group.budget': '有什么超出预算了吗?',
+  // Every noun here is the one the rows under the disclosure already use:
+  // 容量池 from mon.scheduler.autoscale.pool, Worker 决策 from
+  // mon.scheduler.score.worker, 执行器 from mon.scheduler.actuator.
+  'mon.scheduler.group.detail': '容量池、Worker 决策与执行器明细',
+  'mon.scheduler.group.flow': '任务在流动吗?',
+  'mon.scheduler.group.stuck': '有什么卡住了吗?',
   'mon.scheduler.healthy': '健康',
   'mon.scheduler.instance': '容量实例 ',
   'mon.scheduler.instances': '常驻实例 创建中/活跃/排空/删除 ',
@@ -280,6 +361,10 @@ export const ZH: Partial<Record<MessageKey, string>> = {
   'mon.scheduler.score.worker': 'Worker 决策 ',
   'mon.scheduler.stale': '过期执行槽 ',
   'mon.scheduler.unschedulable': '能力不匹配 ',
+  // 槽位 and not 执行槽: this meter reads busy against active off the autoscaler,
+  // which is the same pair mon.scheduler.autoscale.slots already labels 槽位,
+  // and the two sit within a card of each other. 繁忙 is status.token.busy.
+  'mon.scheduler.utilisation': '槽位 繁忙/活跃 ',
   'mon.scheduler.workers': '活跃执行槽 ',
   'mon.shell': '终端',
   'mon.sub': '静态 builder 与云实例',
@@ -305,9 +390,14 @@ export const ZH: Partial<Record<MessageKey, string>> = {
   'nav.builds': '构建任务',
   'nav.docs': '文档',
   'nav.factory': '镜像工厂',
+  // The two landmark labels. They are aria-labels, so nobody reading the screen
+  // ever sees them and only a Chinese reader on a screen reader hears them —
+  // which is exactly why they were the pair left in English.
+  'nav.main': '主导航',
   'nav.monitor': '构建节点',
   'nav.overview': '总览',
   'nav.packages': '软件包',
+  'nav.public': '公开导航',
   'nav.settings': '设置',
   'nav.signout': '退出登录',
   'nav.status': '服务状态',
@@ -332,7 +422,14 @@ export const ZH: Partial<Record<MessageKey, string>> = {
   'packages.profile': 'Profile',
   'packages.search': '搜索',
   'packages.search.ph': '包名、版本或 Profile',
+  'packages.signature': '签名',
+  // A state and not a sentence, in the shape the catalogue's other states take
+  // (未签名, 未启用, 未开始). It says what the public catalogue reported, which
+  // is nothing — not that the artifact is unsigned, a claim this page is in no
+  // position to make. 报告 is factory.noBlockers' own verb for the same act.
+  'packages.signature.unreported': '未报告',
   'packages.sub': '搜索已经发布到公开 Binhost 的二进制包。',
+  'packages.sync': '同步路径',
   'pipe.build': '构建',
   'pipe.cleanup': '释放实例',
   'pipe.collect': '隔离回收',
@@ -479,6 +576,11 @@ export const ZH: Partial<Record<MessageKey, string>> = {
   'set.sec.ssh': 'SSH 密钥',
   'set.sec.upload': '产物上传',
   'set.secret': 'API Token Secret',
+  // The field's placeholder, which is the same statement as the two lines below
+  // it without the parenthesis they add. Taken from set.secret.external.set
+  // rather than re-worded: one key used to carry both strings, and the whole
+  // reason it was split is that the console said two things in one voice.
+  'set.secret.external.placeholder': '由部署环境提供',
   'set.secret.external.set': '由部署环境提供（已配置）',
   'set.secret.external.unset': '由部署环境提供（尚未配置）',
   'set.secret.ph': '••••••••(留空保持不变)',

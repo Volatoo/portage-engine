@@ -111,133 +111,49 @@ describe('the source catalogue is the key set', () => {
     // into a translator's task instead of a discovery. A Chinese value that
     // disappears still turns this red.
     //
-    // The anonymous surface then took it to 587/605. Three of its six new
-    // source strings have no Chinese value and are named below; the other three
-    // do, and are not translations written here — `status.token.operational` is
-    // the value `status.state.operational` has carried since the Go catalogue,
-    // for the same word from the same handler.
+    // The anonymous surface then took it to 587/605, /monitor's regrouped
+    // scheduler card to 587/610, the restored shared runtime to 587/611, and
+    // promoting the three fallback screens out of the private table they used
+    // to live in to 587/618 — thirty-one source strings the port added or
+    // uncovered and left for a translator, every one of them named below.
     //
-    // /monitor's scheduler card then took it to 587/610. Its five new source
-    // strings are the three questions the card is grouped by, the disclosure
-    // holding the per-pool evidence, and the one reading on it that is a
-    // proportion rather than a count. All five are named below and none is
-    // translated here: web-ui rule #21 — a value from a file this port does not
-    // write is reported, not edited into compliance — and the translated
-    // catalogue is a translator's file.
-    //
-    // Restoring the shared runtime took it to 587/611. It added exactly one
-    // source string — what a surface says for the moment between a 401 and the
-    // sign-in page it is being sent to — and it moved four: the step-up
-    // credential strings are no longer the shell's, because six controls on
-    // three other routes now raise the same prompt. The move carried the
-    // Chinese values with it, so only the new key is untranslated, and it is
-    // named below.
-    //
-    // Promoting the three fallback screens then took it to 587/618. Their seven
-    // strings are not new copy: they were already on screen, out of a private
-    // table shaped like this catalogue and sitting outside it, where no key
-    // scan reached them and — an absent key cannot be reported missing —
-    // neither did this number. Counting them is what turns the console's error
-    // screens from a surface nobody could see into seven named lines below.
+    // The translator has now written all thirty-one, so the floor is 618/618.
+    // It stays a floor and not an equality: the statement worth making here is
+    // still "this cannot get worse", and a source catalogue that grows faster
+    // than the translation is a translator's backlog rather than a broken
+    // build. What forbids a silent gap is the list below, which is the check
+    // that names the missing key rather than merely counting it.
     //
     // Written as the fraction rather than as a rounded literal so the floor and
     // the two counts it comes from stay one statement.
-    expect(coverage).toBeGreaterThanOrEqual((587 / 618) * 100);
+    expect(coverage).toBeGreaterThanOrEqual((618 / 618) * 100);
   });
 
   /**
-   * The keys with no Chinese value, named rather than machine-translated.
+   * The keys with no Chinese value. There are none, and that is the assertion.
    *
-   * Five are strings the old console never translated at all.
+   * This list held thirty-one for the length of the port, each one named rather
+   * than machine-translated so it read as a translator's task instead of a
+   * discovery. The tasks were done: the console's three error screens, the
+   * scheduler card's three questions, both navigation landmarks, the two keys
+   * that had been split because one Chinese value was being rendered at two
+   * call sites saying two different things, and the rest.
    *
-   * Two are keys that each carried two different English strings at two call
-   * sites — `Managed by deployment environment` against `… (configured)`, and
-   * `Catalog` against `Active Catalog` — so the single Chinese value was
-   * rendered in both places and said the wrong thing in one of them. Splitting
-   * the key is what makes that visible.
+   * An empty expectation is a stronger statement than a populated one and much
+   * stronger than deleting the check. A new source string with no translation
+   * lands here by name on the next run, which is the whole reason the list was
+   * ever written out — and it now says the console has no English left on a
+   * Chinese screen, rather than saying which English is left and why.
    *
-   * Two are the navigation landmarks, whose `aria-label` was an English literal
-   * in the markup: a Chinese reader on a Chinese page heard "Main navigation".
-   * An aria-label is the copy-bearing attribute nobody sees on screen, which is
-   * why it is also the one that goes untranslated.
-   *
-   * Six arrived with the ported build pages, which say things the console this
-   * replaces never said: that a filter matched nothing (as opposed to nothing
-   * existing), that the filter can be cleared, that the list endpoint answers
-   * with a bounded page and there are older jobs behind it, how many records a
-   * bulk delete is about to remove, that a dialog can be dismissed without
-   * running it, and that a job's record could not be read at all.
-   *
-   * Three arrived with the ported anonymous surface, which now states two facts
-   * the old public pages left in a `title` attribute or left out entirely: the
-   * sync path an operator copies into binrepos.conf, and whether the public
-   * catalogue reports a signature for an artifact at all. The third is the word
-   * it uses when the catalogue reports nothing — `publicPackage` in
-   * handlers_binhost.go carries no signature field today, and "not reported" is
-   * what the page says rather than inferring "signed" from the deployment
-   * holding a signing key.
-   *
-   * Five arrived with /monitor's regrouped scheduler card. Four are structural
-   * — the three questions an operator arrives with, written as headings, and
-   * the disclosure that holds the per-pool and per-decision evidence for them —
-   * and the fifth names the slot utilisation reading, which is the one figure on
-   * that card that can be over its own limit rather than merely large. The
-   * answers beside the three headings need no strings: they are status badges,
-   * and STATUS_VOCABULARY already carries those words in both languages.
-   *
-   * One arrived with the shared runtime: the sentence a surface carries for the
-   * moment between a 401 and the sign-in page the shell is sending the reader
-   * to. It exists because the transport's own word for that outcome —
-   * `unauthorized` — was reaching the screen as an English literal from outside
-   * the catalogue, which no key check could see.
-   *
-   * Seven arrived with the three screens the shell renders in place of a page:
-   * a render that threw, an address the router matches nothing for, and a route
-   * whose capability this session was not granted. The console this replaces
-   * has none of them — it rendered on the server, so a page that failed was a
-   * Go error page and a bad address was a 404 from net/http — which is why
-   * there is no Chinese to carry over for any of the seven.
-   *
-   * Supplying a value for any of the thirty-one is a translator's job, not
-   * this port's. They are named here so that is a task rather than a discovery.
+   * The comparison stays a whole-array equality for the same reason it always
+   * was one: a count, or a `toHaveLength(0)`, reports that something is missing
+   * without reporting what.
    */
-  it('names every untranslated key, so a new one cannot arrive unnoticed', () => {
+  it('holds no untranslated key, and names any that arrives', () => {
     const untranslated = Object.keys(EN)
       .filter((key) => !(key in ZH))
       .sort();
-    expect(untranslated).toEqual([
-      'builds.cleanup.count',
-      'builds.filter.clear',
-      'builds.none',
-      'builds.truncated',
-      'common.cancel',
-      'common.expired',
-      'detail.egress',
-      'detail.image',
-      'detail.norecord',
-      'detail.profile',
-      'err.forbidden.h1',
-      'err.forbidden.hint',
-      'err.notfound.h1',
-      'err.notfound.hint',
-      'err.render.h1',
-      'err.render.hint',
-      'err.render.reload',
-      'factory.catalog.stat',
-      'filter.policy',
-      'mon.gateway.protocol.version',
-      'mon.scheduler.group.budget',
-      'mon.scheduler.group.detail',
-      'mon.scheduler.group.flow',
-      'mon.scheduler.group.stuck',
-      'mon.scheduler.utilisation',
-      'nav.main',
-      'nav.public',
-      'packages.signature',
-      'packages.signature.unreported',
-      'packages.sync',
-      'set.secret.external.placeholder',
-    ]);
+    expect(untranslated).toEqual([]);
   });
 });
 
@@ -312,23 +228,47 @@ describe('plurals', () => {
 
 describe('lookup and degradation', () => {
   it('falls back to the source string for an untranslated key', () => {
-    const zh = messagesFor('zh');
-    expect(zh.t('detail.profile')).toBe(EN['detail.profile']);
+    // `ZH[key] ?? EN[key]` is what keeps an incomplete translated catalogue safe
+    // to ship, and every key has a Chinese value now, so nothing left in the
+    // tree exercises that branch. It is exercised against a hole opened here and
+    // closed in a `finally`: the lookup reads ZH at call time rather than at
+    // build time, so removing one value is enough — and a hole left open would
+    // hand a short catalogue to every test that runs after this one.
+    const borrowed = ZH['builds.h1'];
+    if (borrowed === undefined) {
+      throw new Error('builds.h1 has no Chinese value; this check borrows one that has');
+    }
+    try {
+      delete ZH['builds.h1'];
+      expect(messagesFor('zh').t('builds.h1')).toBe(EN['builds.h1']);
+    } finally {
+      ZH['builds.h1'] = borrowed;
+    }
+    expect(messagesFor('zh').t('builds.h1')).toBe(borrowed);
   });
 
-  it('degrades the three fallback screens to their source string, slot and all', () => {
+  it('renders the three fallback screens in Chinese, slot and all', () => {
     // The screens that state a render fault, a bad address and a missing grant
-    // are read through the same lookup as every other surface now, which is
-    // what makes their absence from the translated catalogue a reported gap
-    // rather than a private decision. A Chinese reader sees the English today;
-    // on the day a translator supplies a value, the screens change without
-    // being edited.
+    // are read through the same lookup as every other surface, which is what
+    // turned their absence from the translated catalogue into a reported gap
+    // rather than a private decision — and then into copy, without either
+    // screen being edited.
+    //
+    // The two headings are transcribed here, the way STATUS_VOCABULARY is
+    // transcribed further down: a heading reworded in one file has to be
+    // reworded in two, and an error screen is the one surface nobody opens
+    // deliberately to notice it went back to English.
     const zh = messagesFor('zh');
-    expect(zh.t('err.render.h1')).toBe(EN['err.render.h1']);
-    expect(zh.t('err.notfound.hint')).toBe(EN['err.notfound.hint']);
-    expect(zh.t('err.forbidden.hint', { capability: 'system-admin' })).toBe(
-      EN['err.forbidden.hint'].replace('{capability}', 'system-admin'),
-    );
+    expect(zh.t('err.render.h1')).toBe('控制台无法渲染此页面');
+    expect(zh.t('err.notfound.h1')).toBe('没有这个页面');
+    expect(zh.t('err.notfound.hint')).not.toBe(EN['err.notfound.hint']);
+    // The forbidden screen names the grant it wants. A translated sentence that
+    // dropped or renamed the slot would read as a correct sentence with the one
+    // fact worth reporting missing from it.
+    const forbidden = zh.t('err.forbidden.hint', { capability: 'system-admin' });
+    expect(forbidden).toContain('system-admin');
+    expect(forbidden).not.toContain('{capability}');
+    expect(forbidden).not.toBe(EN['err.forbidden.hint'].replace('{capability}', 'system-admin'));
   });
 
   it('fills the named slots and leaves an unfilled one standing', () => {

@@ -290,25 +290,15 @@ func (d *Dashboard) handleLanguagePreference(w http.ResponseWriter, r *http.Requ
 func (d *Dashboard) Router() http.Handler {
 	mux := http.NewServeMux()
 
-	// Web interface
-	mux.HandleFunc("/", d.handleLanding)
-	mux.HandleFunc("/login", d.handleLoginRoute)
+	// Web interface. The pages are the ported console's now — it answers every
+	// path its route table names, out of the catch-all registered last — so what
+	// is left here is the handful of top-level routes that are not pages: the
+	// session endpoints, which both consoles reach by absolute path.
 	mux.HandleFunc("/logout", d.handleLogout)
-	mux.HandleFunc("/device", d.handleDeviceAuthorizationPage)
 	mux.HandleFunc("/auth/oidc/start", d.handleOIDCStart)
 	mux.HandleFunc("/auth/oidc/callback", d.handleOIDCCallback)
 	mux.HandleFunc("/auth/provider/", d.handleIdentityProviderRoute)
 	mux.HandleFunc("/auth/step-up", d.handleLocalStepUp)
-	mux.HandleFunc("/overview", d.handleOverview)
-	mux.HandleFunc("/builds", d.handleBuildsPage)
-	mux.HandleFunc("/build/", d.handleBuildDetail)
-	mux.HandleFunc("/logs/", d.handleBuildLogs)
-	mux.HandleFunc("/monitor", d.handleBuildersMonitor)
-	mux.HandleFunc("/image-factory", d.handleImageFactoryPage)
-	mux.HandleFunc("/settings", d.handleSettingsPage)
-	mux.HandleFunc("/packages", d.handlePackagesPage)
-	mux.HandleFunc("/docs", d.handleDocs)
-	mux.HandleFunc("/status", d.handlePublicStatusPage)
 
 	// API endpoints
 	mux.HandleFunc("/api/status", d.handleStatus)
@@ -357,8 +347,8 @@ func (d *Dashboard) Router() http.Handler {
 	// from the detail page without direct server access).
 	mux.HandleFunc("/binpkgs/", d.handleBinpkgProxy)
 
-	// Web shell: page + websocket bridge to the server's SSH session.
-	mux.HandleFunc("/shell/", d.handleShellPage)
+	// Web shell: the page is a console route; this is the websocket bridge to the
+	// server's SSH session, which both consoles open by absolute path.
 	mux.HandleFunc("/api/shell", d.handleShellProxy)
 	mux.HandleFunc("/api/shell/preflight", d.handleShellPreflight)
 	mux.HandleFunc("/static/xterm.js", func(w http.ResponseWriter, _ *http.Request) {
@@ -384,15 +374,41 @@ func (d *Dashboard) Router() http.Handler {
 		w.Header().Set("ETag", appleCSSETag)
 		http.ServeContent(w, r, "apple.css", time.Time{}, strings.NewReader(appleCSS))
 	})
-	// The ported console. It is mounted beside the old one rather than over it:
-	// /ui/... serves the Vite bundle's shell, /static/ui/... serves its hashed
-	// assets. The longer pattern wins in ServeMux, so /static/ui/ is answered
-	// here and never falls through to the on-disk static handler below.
+	// The ported console's hashed assets. The longer pattern wins in ServeMux, so
+	// /static/ui/ is answered here and never falls through to the on-disk static
+	// handler below.
 	mux.Handle(consoleAssetPrefix, d.consoleAssetHandler())
-	mux.HandleFunc(consoleBase, d.handleConsole)
-	mux.HandleFunc(consoleBase+"/", d.handleConsole)
 
 	mux.HandleFunc("/static/", d.handleStatic)
+
+	// The console this replaces, kept reachable for a release. Deleting it in the
+	// same change that promotes its replacement would leave an operator whose new
+	// console misbehaves with nothing to diagnose it from; moving it means the
+	// promotion is undone by the three registrations below rather than by a
+	// revert of the port.
+	//
+	// The subtree pattern and no bare one: ServeMux already answers /legacy with
+	// its own redirect to /legacy/, and registering the bare path here would hand
+	// the stripped handler an empty path — which it cleans to "/" and redirects
+	// to, sending a reader who asked for the old console to the new one's landing
+	// page.
+	mux.Handle(legacyBase+"/", d.legacyRouter())
+
+	// Where the console used to be. Forwarded rather than dropped: links to /ui
+	// exist in the deployment and in whatever bookmarked it during the port.
+	mux.HandleFunc(consolePreviewBase, d.handleConsoleMoved)
+	mux.HandleFunc(consolePreviewBase+"/", d.handleConsoleMoved)
+
+	// The ported console, at the top level. Registered last and as the catch-all
+	// because its route table is the vocabulary of every remaining page: a path
+	// the table names serves the shell, and a path it does not name 404s. Every
+	// pattern above is longer and so still wins, which is what keeps /api/...,
+	// /static/... and the two mounts above out of the console's hands.
+	//
+	// /login is the exception. It is a page and a credential endpoint at the same
+	// address, and only the page half moved.
+	mux.HandleFunc("/login", d.handleConsoleLogin)
+	mux.HandleFunc(consoleBase, d.handleConsole)
 
 	// Apply middleware
 	var handler http.Handler = mux
@@ -1522,9 +1538,7 @@ func (d *Dashboard) fetchClusterStatus(r *http.Request) (*ClusterStatus, error) 
 func (d *Dashboard) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Public: community pages and their intentionally narrow read APIs.
-		if r.URL.Path == "/" || r.URL.Path == "/login" || r.URL.Path == "/logout" ||
-			r.URL.Path == "/packages" || r.URL.Path == "/docs" ||
-			r.URL.Path == "/status" ||
+		if r.URL.Path == "/logout" ||
 			r.URL.Path == "/api/public/binhosts" ||
 			r.URL.Path == "/api/public/packages" ||
 			r.URL.Path == "/api/public/status" ||
@@ -1534,9 +1548,13 @@ func (d *Dashboard) authMiddleware(next http.Handler) http.Handler {
 			strings.HasPrefix(r.URL.Path, "/auth/provider/") ||
 			strings.HasPrefix(r.URL.Path, "/binpkgs/") ||
 			strings.HasPrefix(r.URL.Path, "/static/") ||
-			// The ported console's community pages. The answer comes from the
-			// route table in console.go, so this list and that one cannot come
-			// to disagree about which pages a reader without a session may see.
+			// The community pages, on every mount that serves them: the console's
+			// own, the old console's /legacy, and the /ui that forwards to the
+			// first. The answer comes from the route table in console.go rather
+			// than from the five paths this used to spell out beside it, so the
+			// three mounts cannot come to disagree about which pages a reader
+			// without a session may see. Sign-out is not one of them: it is the
+			// one public route that is not a page in either console's table.
 			consolePathIsPublic(r.URL.Path) {
 			next.ServeHTTP(w, r)
 			return
