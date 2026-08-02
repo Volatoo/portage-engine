@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/slchris/portage-engine/internal/iac"
@@ -222,6 +223,21 @@ func (s *Server) updateCloudSettings(w http.ResponseWriter, r *http.Request) {
 
 	// An empty secret means "keep the stored one" so the UI never has to
 	// round-trip (or even see) the real secrets.
+	//
+	// Deliberately NOT bound to the stored endpoint the way the test handler's
+	// backfill is, though the two blocks look alike. That one lends the stored
+	// credential to a host the caller names and changes nothing, which turns
+	// "can call this route" into "can read a secret this API redacts". This one
+	// is a save: it takes the writer through containsCloudSettingSecrets above —
+	// so on a ledger deployment the operator cannot supply a replacement secret
+	// here at all, the values come from the deployment's secret provider — and
+	// it records the new settings, endpoint included, through SaveRuntimeSetting
+	// with an actor and a request id. An administrator who re-points the cluster
+	// does thereby direct the credential at the new endpoint; that is the power
+	// the role has, and the audit row is what makes it a decision rather than a
+	// disclosure. Binding this backfill to the endpoint would not remove that
+	// power — it would only make changing endpoints impossible wherever the
+	// secret provider is the only way to supply one.
 	cur := s.builder.CloudSettings()
 	if in.PVETokenSecret == "" {
 		in.PVETokenSecret = cur.PVETokenSecret
@@ -278,8 +294,9 @@ func (s *Server) updateCloudSettings(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleCloudSettingsTest validates PVE connectivity for the posted settings
-// (falling back to stored values for omitted fields, notably the secret) and
-// returns the cluster's nodes so the UI can show what the scheduler sees.
+// (falling back to stored values for omitted fields, notably the secret, as
+// long as the post still names the stored cluster) and returns the cluster's
+// nodes so the UI can show what the scheduler sees.
 func (s *Server) handleCloudSettingsTest(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -292,21 +309,39 @@ func (s *Server) handleCloudSettingsTest(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	cur := s.builder.CloudSettings()
+	// The stored credential belongs to the stored cluster. It may only be
+	// replayed to that host: the token secret and the password are deliberately
+	// unreadable through this API, so backfilling them for a caller-named
+	// endpoint would let anyone who can reach this route read the credential
+	// that creates and destroys VMs cluster-wide, simply by pointing the test at
+	// a host they control. Naming a different endpoint means bringing the
+	// credential for it. The identity halves (token ID, username) travel with
+	// their secret for the same reason — a stored username paired with a
+	// supplied password is a credential test the operator did not ask for, and
+	// half an API token only yields a confusing "credentials are required".
+	// Endpoints are compared the way the request URL is built, so a trailing
+	// slash is still the same cluster.
+	sameEndpoint := in.PVEEndpoint == "" ||
+		strings.TrimRight(in.PVEEndpoint, "/") == strings.TrimRight(cur.PVEEndpoint, "/")
 	if in.PVEEndpoint == "" {
 		in.PVEEndpoint = cur.PVEEndpoint
 	}
-	if in.PVETokenID == "" {
-		in.PVETokenID = cur.PVETokenID
+	if sameEndpoint {
+		if in.PVETokenID == "" {
+			in.PVETokenID = cur.PVETokenID
+		}
+		if in.PVETokenSecret == "" {
+			in.PVETokenSecret = cur.PVETokenSecret
+		}
+		if in.PVEUsername == "" {
+			in.PVEUsername = cur.PVEUsername
+		}
+		if in.PVEPassword == "" {
+			in.PVEPassword = cur.PVEPassword
+		}
 	}
-	if in.PVETokenSecret == "" {
-		in.PVETokenSecret = cur.PVETokenSecret
-	}
-	if in.PVEUsername == "" {
-		in.PVEUsername = cur.PVEUsername
-	}
-	if in.PVEPassword == "" {
-		in.PVEPassword = cur.PVEPassword
-	}
+	// The template name is only matched against the response, never sent, so it
+	// stays a convenience default.
 	if in.PVETemplate == "" {
 		in.PVETemplate = cur.PVETemplate
 	}
@@ -326,6 +361,12 @@ func (s *Server) handleCloudSettingsTest(w http.ResponseWriter, r *http.Request)
 	}
 	nodes, err := iac.PVEClusterNodes(in.PVEEndpoint, auth, in.PVETemplate)
 	if err != nil {
+		// The transport error is returned as-is: "test connection" exists to tell
+		// an operator whether the endpoint is wrong, the certificate is untrusted
+		// or the token was rejected, and a generic message makes the feature
+		// useless. What comes back is a status code or a dial/TLS error naming the
+		// caller's own endpoint — never a response body — and reaching here
+		// already requires a stepped-up system administrator.
 		writeJSON(w, testResponse{OK: false, Error: err.Error()})
 		return
 	}

@@ -154,7 +154,9 @@ func TestBrokerArtifactUploadIsDigestBoundAndOneShot(t *testing.T) {
 	if err := broker.Register(identity); err != nil {
 		t.Fatal(err)
 	}
-	destination := filepath.Join(t.TempDir(), "cat", "pkg.gpkg.tar")
+	spool := t.TempDir()
+	broker.SetUploadRoot(spool)
+	destination := filepath.Join(spool, "cat", "pkg.gpkg.tar")
 	uploadID, err := broker.PrepareUpload(identity, destination, 1024)
 	if err != nil {
 		t.Fatal(err)
@@ -206,19 +208,246 @@ func TestBrokerArtifactUploadIsConfinedToConfiguredRoot(t *testing.T) {
 	}
 }
 
+// durableAttemptBroker wires a Broker to the in-memory authority with one
+// authorized leaf, which is what a live build VM holds while its attempt runs.
+func durableAttemptBroker(t *testing.T, identity Identity) (*Broker, *memoryDurableStore) {
+	t.Helper()
+	store := newMemoryDurableStore()
+	broker := NewBroker(nil)
+	broker.SetDurableStore(store)
+	presented, err := CertificatePresentation(testLeaf(t, identity))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := broker.RegisterCertificate(
+		identity, testCertificateRecord(t, presented),
+	); err != nil {
+		t.Fatal(err)
+	}
+	return broker, store
+}
+
+func putArtifact(
+	t *testing.T, broker *Broker, identity Identity, uploadID string, data []byte,
+) *httptest.ResponseRecorder {
+	t.Helper()
+	sum := sha256.Sum256(data)
+	request := authenticatedRequest(
+		t, http.MethodPut, "/v1/uploads/"+uploadID, bytes.NewReader(data), identity,
+	)
+	request.ContentLength = int64(len(data))
+	request.Header.Set("X-Content-SHA256", hex.EncodeToString(sum[:]))
+	recorder := httptest.NewRecorder()
+	broker.Handler().ServeHTTP(recorder, request)
+	return recorder
+}
+
+// A build VM runs untrusted ebuild code and picks the artifact names in its
+// completion payload; the control plane joins each one onto the job's staging
+// directory. A Broker with no configured spool therefore has nothing left
+// standing between "../../.." in that name and the filesystem, so it must
+// refuse both the capability and any PUT that tries to redeem one.
+func TestBrokerWithoutUploadRootRefusesWorkerSteeredDestination(t *testing.T) {
+	identity := testIdentity(t)
+	broker, store := durableAttemptBroker(t, identity)
+
+	victim := t.TempDir()
+	spool := t.TempDir()
+	staging := filepath.Join(spool, "0f9c2ac1")
+	// The name the compromised worker reported, joined the way the collector
+	// joins it. It resolves cleanly out of the staging tree and out of the spool.
+	escaped := filepath.Join(staging, "..", "..", filepath.Base(victim),
+		".portage-engine-capability")
+	if filepath.Dir(escaped) != victim {
+		t.Fatalf("fixture does not escape into %q: %q", victim, escaped)
+	}
+
+	uploadID := uuid.NewString()
+	if _, err := broker.PrepareUploadID(identity, uploadID, escaped, 1024); err == nil {
+		t.Fatal("a Broker without a spool root minted a capability outside every root")
+	}
+
+	// Even if the row already exists — written by a replica that did have a
+	// root, or by anything else with database access — the rootless replica
+	// serving the PUT must not carry it to the filesystem.
+	store.uploads[uploadID] = &UploadClaim{
+		ID: uploadID, Destination: escaped, MaxBytes: 1024,
+	}
+	recorder := putArtifact(t, broker, identity, uploadID, []byte("payload"))
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("rootless upload status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if _, err := os.Stat(escaped); !os.IsNotExist(err) {
+		t.Fatalf("rootless upload committed outside every spool: %v", err)
+	}
+}
+
+func TestBrokerWithoutUploadRootRefusesStandaloneUpload(t *testing.T) {
+	identity := testIdentity(t)
+	broker := NewBroker(nil)
+	if err := broker.Register(identity); err != nil {
+		t.Fatal(err)
+	}
+	destination := filepath.Join(t.TempDir(), "pkg.gpkg.tar")
+	if _, err := broker.PrepareUpload(identity, destination, 1024); err == nil {
+		t.Fatal("standalone Broker without a spool root minted an unconfined capability")
+	}
+	// Under the working directory, specifically. An unset root resolves to ".",
+	// so every containment question a rootless Broker is asked becomes "is this
+	// under the directory the control plane happens to have been started in" —
+	// which a destination like this one answers yes to. Refusing an unset root
+	// outright is the only reading of it that does not depend on where the
+	// process was launched.
+	working, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	inside := filepath.Join(working, "pe-rootless-upload-probe.gpkg.tar")
+	if _, err := broker.PrepareUpload(identity, inside, 1024); err == nil {
+		t.Fatalf("a rootless Broker accepted %s, which is confined to nothing but the "+
+			"directory this process was started in", inside)
+	}
+}
+
+// plantSpoolSymlink builds a spool whose "app-misc" category is a symlink
+// pointing out of it, and returns the destination the collector would compute
+// for an artifact in that category. The lexical prefix check is a string
+// comparison, so this destination satisfies it while resolving elsewhere.
+func plantSpoolSymlink(t *testing.T, absolute bool) (spool, victim, destination string) {
+	t.Helper()
+	victim = t.TempDir()
+	spool = t.TempDir()
+	target := victim
+	if !absolute {
+		relative, err := filepath.Rel(spool, victim)
+		if err != nil {
+			t.Fatal(err)
+		}
+		target = relative
+	}
+	if err := os.Symlink(target, filepath.Join(spool, "app-misc")); err != nil {
+		t.Fatal(err)
+	}
+	destination = filepath.Join(spool, "app-misc", "jq-1.8-1.gpkg.tar")
+	if _, err := confinedUploadDestination(spool, destination); err != nil {
+		t.Fatalf("fixture must satisfy the lexical check to be interesting: %v", err)
+	}
+	return spool, victim, destination
+}
+
+func assertSpoolSymlinkWasNotFollowed(
+	t *testing.T, recorder *httptest.ResponseRecorder, victim string,
+) {
+	t.Helper()
+	if recorder.Code == http.StatusOK {
+		t.Fatalf("upload through a spool symlink succeeded: %s", recorder.Body.String())
+	}
+	entries, err := os.ReadDir(victim)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("symlink target was written to: entries=%v err=%v", entries, err)
+	}
+}
+
+// The spool is a directory on a shared filesystem, not a private namespace.
+// A symlink planted anywhere under it satisfies the prefix check while sending
+// the write somewhere else, so the write itself has to refuse to leave.
+func TestBrokerDurableUploadDoesNotFollowSymlinkOutOfSpool(t *testing.T) {
+	for name, absolute := range map[string]bool{
+		"relative-symlink": false, "absolute-symlink": true,
+	} {
+		t.Run(name, func(t *testing.T) {
+			identity := testIdentity(t)
+			broker, _ := durableAttemptBroker(t, identity)
+			spool, victim, destination := plantSpoolSymlink(t, absolute)
+			broker.SetUploadRoot(spool)
+			uploadID, err := broker.PrepareUploadID(
+				identity, uuid.NewString(), destination, 1024,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertSpoolSymlinkWasNotFollowed(
+				t, putArtifact(t, broker, identity, uploadID, []byte("payload")), victim,
+			)
+		})
+	}
+}
+
+func TestBrokerStandaloneUploadDoesNotFollowSymlinkOutOfSpool(t *testing.T) {
+	for name, absolute := range map[string]bool{
+		"relative-symlink": false, "absolute-symlink": true,
+	} {
+		t.Run(name, func(t *testing.T) {
+			identity := testIdentity(t)
+			broker := NewBroker(nil)
+			if err := broker.Register(identity); err != nil {
+				t.Fatal(err)
+			}
+			spool, victim, destination := plantSpoolSymlink(t, absolute)
+			broker.SetUploadRoot(spool)
+			uploadID, err := broker.PrepareUpload(identity, destination, 1024)
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertSpoolSymlinkWasNotFollowed(
+				t, putArtifact(t, broker, identity, uploadID, []byte("payload")), victim,
+			)
+		})
+	}
+}
+
+// PostgreSQL matches a uuid column against every spelling of the same value,
+// so the id in the request line has to be pinned to the one form the control
+// plane emits before it can become part of a filename.
+func TestBrokerUploadIDMustBeCanonicalBeforeTheStoreIsConsulted(t *testing.T) {
+	identity := testIdentity(t)
+	broker, store := durableAttemptBroker(t, identity)
+	spool := t.TempDir()
+	broker.SetUploadRoot(spool)
+	uploadID, err := broker.PrepareUploadID(
+		identity, uuid.NewString(), filepath.Join(spool, "pkg.gpkg.tar"), 1024,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, spelling := range []string{
+		"{" + uploadID + "}",
+		"urn:uuid:" + uploadID,
+		strings.ToUpper(uploadID),
+		strings.ReplaceAll(uploadID, "-", ""),
+	} {
+		recorder := putArtifact(t, broker, identity, spelling, []byte("payload"))
+		if recorder.Code != http.StatusBadRequest {
+			t.Fatalf("upload id %q status = %d", spelling, recorder.Code)
+		}
+	}
+	claim, err := store.ClaimWorkerUpload(
+		context.Background(), identity, uploadID, time.Minute,
+	)
+	if err != nil || claim.Fence != 1 {
+		t.Fatalf("alternate spellings consumed a generation: claim=%+v err=%v", claim, err)
+	}
+}
+
 func TestRecoverCompletedUploadRequiresFencedGenerationDigest(t *testing.T) {
 	data := []byte("artifact-generation")
 	sum := sha256.Sum256(data)
+	spool := t.TempDir()
 	claim := UploadClaim{
-		ID: uuid.NewString(), Destination: filepath.Join(t.TempDir(), "pkg.gpkg.tar"),
+		ID: uuid.NewString(), Destination: filepath.Join(spool, "pkg.gpkg.tar"),
 		Fence: 2, Digest: hex.EncodeToString(sum[:]), Size: int64(len(data)),
 		Completed: true,
 	}
-	generation := durableUploadGeneration(claim)
+	target, err := openUploadTarget(spool, claim.Destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer target.close()
+	generation := claim.Destination + uploadGenerationSuffix(claim)
 	if err := os.WriteFile(generation, data, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := recoverCompletedUpload(claim); err != nil {
+	if err := recoverCompletedUpload(target, claim); err != nil {
 		t.Fatal(err)
 	}
 	if got, err := os.ReadFile(claim.Destination); err != nil ||
@@ -231,8 +460,180 @@ func TestRecoverCompletedUploadRequiresFencedGenerationDigest(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
-	if err := recoverCompletedUpload(claim); err == nil {
+	if err := recoverCompletedUpload(target, claim); err == nil {
 		t.Fatal("same-size corrupt destination was accepted without its fenced generation")
+	}
+}
+
+// completedUploadReplay is one artifact driven all the way through the durable
+// upload path, so the store holds a row that is genuinely completed carrying the
+// digest and size the broker itself recorded. A worker repeats its PUT whenever
+// it loses the response, and that retry is served entirely from the row: the
+// body is never read again, and the only thing the spool is touched with is the
+// destination string recorded at prepare time. The spool is a shared directory
+// the build VM also writes to, so between the commit and the retry that string
+// can come to mean something else.
+type completedUploadReplay struct {
+	broker      *Broker
+	identity    Identity
+	uploadID    string
+	victim      string
+	destination string
+	generation  string
+	outside     string
+	data        []byte
+}
+
+func newCompletedUploadReplay(t *testing.T) *completedUploadReplay {
+	t.Helper()
+	identity := testIdentity(t)
+	broker, _ := durableAttemptBroker(t, identity)
+	spool, victim := t.TempDir(), t.TempDir()
+	broker.SetUploadRoot(spool)
+	destination := filepath.Join(spool, "app-misc", "jq-1.8-1.gpkg.tar")
+	uploadID, err := broker.PrepareUploadID(
+		identity, uuid.NewString(), destination, 1024,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := []byte("jq-1.8-1 gpkg bytes")
+	if recorder := putArtifact(t, broker, identity, uploadID, data); recorder.Code != http.StatusOK {
+		t.Fatalf("first upload status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	return &completedUploadReplay{
+		broker: broker, identity: identity, uploadID: uploadID,
+		victim: victim, destination: destination,
+		generation: destination + uploadGenerationSuffix(UploadClaim{
+			ID: uploadID, Fence: 1,
+		}),
+		outside: filepath.Join(victim, "worker-controlled.gpkg.tar"),
+		data:    data,
+	}
+}
+
+// rewindToFencedGeneration puts the spool back the way a replica that died
+// between CompleteWorkerUpload and the rename would have left it: the row is
+// committed, the bytes are still under the fenced generation name, and the
+// destination name is free. Finishing that commit is what the replay is for.
+func (f *completedUploadReplay) rewindToFencedGeneration(t *testing.T) {
+	t.Helper()
+	if err := os.Rename(f.destination, f.generation); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// plantWorkerControlledCopy writes the committed bytes to a file outside the
+// spool. It is a copy of what the worker uploaded, so it satisfies the digest
+// and the size the row recorded — a worker picks the artifact bytes, so it
+// knows in advance which content any check against the row will accept.
+func (f *completedUploadReplay) plantWorkerControlledCopy(t *testing.T) {
+	t.Helper()
+	if err := os.WriteFile(f.outside, f.data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func (f *completedUploadReplay) replay(t *testing.T) *httptest.ResponseRecorder {
+	t.Helper()
+	return putArtifact(t, f.broker, f.identity, f.uploadID, f.data)
+}
+
+// The retry of a completed upload must finish the commit with the generation
+// that is inside the spool, whatever the destination name has been made to
+// point at in the meantime. Renaming onto the planted link replaces it, so the
+// artifact the collector later reads is the one the broker hashed, and stays
+// that way after the worker changes the file the link pointed to.
+func TestBrokerCompletedUploadReplayCommitsInsideSpoolOverPlantedSymlink(t *testing.T) {
+	fixture := newCompletedUploadReplay(t)
+	fixture.rewindToFencedGeneration(t)
+	fixture.plantWorkerControlledCopy(t)
+	if err := os.Symlink(fixture.outside, fixture.destination); err != nil {
+		t.Fatal(err)
+	}
+
+	recorder := fixture.replay(t)
+	var result CollectResult
+	sum := sha256.Sum256(fixture.data)
+	if recorder.Code != http.StatusOK ||
+		json.Unmarshal(recorder.Body.Bytes(), &result) != nil ||
+		result.SHA256 != hex.EncodeToString(sum[:]) ||
+		result.Size != int64(len(fixture.data)) {
+		t.Fatalf("replay status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	info, err := os.Lstat(fixture.destination)
+	if err != nil || info.Mode()&os.ModeSymlink != 0 {
+		t.Fatalf("replay left the destination pointing out of the spool: mode=%v err=%v",
+			info.Mode(), err)
+	}
+	// Matching bytes once is not the property under test. The destination has to
+	// name a file inside the spool, so swapping what the link pointed at must be
+	// invisible to everything that reads the artifact afterwards.
+	if err := os.WriteFile(
+		fixture.outside, []byte("swapped after the broker vouched for it"), 0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(fixture.destination)
+	if err != nil || !bytes.Equal(got, fixture.data) {
+		t.Fatalf("committed artifact = %q err=%v, want the bytes the broker hashed", got, err)
+	}
+}
+
+// With no generation left in the spool there is nothing the replay can honestly
+// recover, and the only file that answers to the destination is the copy the
+// worker kept outside. Reporting that upload as committed would hand the
+// collector a path whose contents the worker can still change at will, so the
+// replay has to fail instead of reading through the link.
+func TestBrokerCompletedUploadReplayRefusesBytesOutsideSpool(t *testing.T) {
+	fixture := newCompletedUploadReplay(t)
+	if err := os.Remove(fixture.destination); err != nil {
+		t.Fatal(err)
+	}
+	fixture.plantWorkerControlledCopy(t)
+	if err := os.Symlink(fixture.outside, fixture.destination); err != nil {
+		t.Fatal(err)
+	}
+
+	if recorder := fixture.replay(t); recorder.Code == http.StatusOK {
+		t.Fatalf("replay vouched for bytes it could only reach by leaving the spool: %s",
+			recorder.Body.String())
+	}
+	if got, err := os.ReadFile(fixture.outside); err != nil || !bytes.Equal(got, fixture.data) {
+		t.Fatalf("replay wrote through the link: %q err=%v", got, err)
+	}
+}
+
+// The escape does not have to be the last component. A worker that swaps the
+// whole category directory for a link, and leaves a generation with the right
+// digest on the other side of it, turns the recovery rename into a write
+// outside the spool — the destination still spells out a path under the root
+// the entire time.
+func TestBrokerCompletedUploadReplayDoesNotCommitThroughSymlinkedCategory(t *testing.T) {
+	fixture := newCompletedUploadReplay(t)
+	fixture.rewindToFencedGeneration(t)
+	planted := filepath.Join(fixture.victim, filepath.Base(fixture.generation))
+	if err := os.Rename(fixture.generation, planted); err != nil {
+		t.Fatal(err)
+	}
+	category := filepath.Dir(fixture.destination)
+	if err := os.RemoveAll(category); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(fixture.victim, category); err != nil {
+		t.Fatal(err)
+	}
+
+	recorder := fixture.replay(t)
+	committed := filepath.Join(fixture.victim, filepath.Base(fixture.destination))
+	if _, err := os.Stat(committed); !os.IsNotExist(err) {
+		t.Fatalf("replay wrote the artifact outside the spool at %s: %v", committed, err)
+	}
+	if got, err := os.ReadFile(planted); err != nil || !bytes.Equal(got, fixture.data) {
+		t.Fatalf("replay moved the planted generation: %q err=%v", got, err)
+	}
+	if recorder.Code == http.StatusOK {
+		t.Fatalf("replay committed through a symlinked category: %s", recorder.Body.String())
 	}
 }
 
@@ -582,7 +983,9 @@ func TestBrokerDurableStoreDeliversCommandAndUpload(t *testing.T) {
 		t.Fatal("durable dispatch did not observe its completion")
 	}
 
-	destination := filepath.Join(t.TempDir(), "cat", "pkg.gpkg.tar")
+	spool := t.TempDir()
+	broker.SetUploadRoot(spool)
+	destination := filepath.Join(spool, "cat", "pkg.gpkg.tar")
 	uploadID, err := broker.PrepareUploadID(identity, uuid.NewString(), destination, 1024)
 	if err != nil {
 		t.Fatal(err)
@@ -641,7 +1044,9 @@ func TestBrokerDurableUploadCancelsClaimOnDigestMismatch(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
-	destination := filepath.Join(t.TempDir(), "pkg.gpkg.tar")
+	spool := t.TempDir()
+	broker.SetUploadRoot(spool)
+	destination := filepath.Join(spool, "pkg.gpkg.tar")
 	uploadID, err := broker.PrepareUploadID(identity, uuid.NewString(), destination, 1024)
 	if err != nil {
 		t.Fatal(err)
@@ -664,8 +1069,8 @@ func TestBrokerDurableUploadCancelsClaimOnDigestMismatch(t *testing.T) {
 	if _, err := os.Stat(destination); !os.IsNotExist(err) {
 		t.Fatalf("mismatched artifact was committed: %v", err)
 	}
-	if _, err := os.Stat(durableUploadGeneration(UploadClaim{
-		ID: uploadID, Destination: destination, Fence: 1,
+	if _, err := os.Stat(destination + uploadGenerationSuffix(UploadClaim{
+		ID: uploadID, Fence: 1,
 	})); !os.IsNotExist(err) {
 		t.Fatalf("rejected upload generation was left behind: %v", err)
 	}
@@ -685,7 +1090,9 @@ func TestBrokerDurableStoreRejectsUnauthorizedCertificate(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
-	destination := filepath.Join(t.TempDir(), "pkg.gpkg.tar")
+	spool := t.TempDir()
+	broker.SetUploadRoot(spool)
+	destination := filepath.Join(spool, "pkg.gpkg.tar")
 	uploadID, err := broker.PrepareUploadID(identity, uuid.NewString(), destination, 1024)
 	if err != nil {
 		t.Fatal(err)

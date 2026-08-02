@@ -313,15 +313,12 @@ func setupHTTPHandlers(bldr *builder.LocalBuilder) *http.ServeMux {
 			return
 		}
 
-		// Get file info for headers
-		fileInfo, err := os.Stat(artifactPath) // #nosec G703 -- builder path confinement resolves and verifies this artifact path.
-		if err != nil {
-			http.Error(w, "Failed to get file info", http.StatusInternalServerError)
-			return
-		}
-
-		// Open the file
-		file, err := os.Open(artifactPath) // #nosec G304,G703 -- builder path confinement resolves and verifies this artifact path.
+		// The job's recorded artifact names decide *which* file is offered; the
+		// builder's artifact directory decides which files exist to offer. This
+		// endpoint streams to whoever asked, and in the shipped configuration
+		// that can be an unauthenticated peer, so the file is opened through the
+		// builder's confinement rather than by the name the request supplied.
+		file, fileInfo, err := bldr.OpenArtifact(artifactPath)
 		if err != nil {
 			http.Error(w, "Failed to open artifact file", http.StatusInternalServerError)
 			return

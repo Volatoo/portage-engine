@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -63,7 +64,7 @@ func TestEnsurePVEVMAbsentDeletesTaggedResidualAfterLockClears(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	err := EnsurePVEVMAbsent(ctx, server.URL,
-		PVEAuth{TokenID: "cleanup@pve!test", TokenSecret: "secret"},
+		PVEAuth{TokenID: "cleanup@pve!test", TokenSecret: "secret", Insecure: true},
 		"pve01", "portage-builder-amd64-123")
 	if err != nil {
 		t.Fatal(err)
@@ -82,7 +83,7 @@ func TestEnsurePVEVMAbsentRefusesUnexpectedResourceName(t *testing.T) {
 	defer server.Close()
 
 	err := EnsurePVEVMAbsent(context.Background(), server.URL,
-		PVEAuth{TokenID: "cleanup@pve!test", TokenSecret: "secret"},
+		PVEAuth{TokenID: "cleanup@pve!test", TokenSecret: "secret", Insecure: true},
 		"pve01", "production-database")
 	if err == nil || !strings.Contains(err.Error(), "refusing PVE cleanup") {
 		t.Fatalf("error = %v", err)
@@ -134,7 +135,7 @@ func TestEnsurePVEVMAbsentUsesPasswordCSRFForDelete(t *testing.T) {
 	defer server.Close()
 
 	err := EnsurePVEVMAbsent(context.Background(), server.URL,
-		PVEAuth{Username: "cleanup@pve", Password: "password"},
+		PVEAuth{Username: "cleanup@pve", Password: "password", Insecure: true},
 		"pve01", "portage-builder-amd64-456")
 	if err != nil {
 		t.Fatal(err)
@@ -181,7 +182,7 @@ func TestWaitForPVEGuestHostKeyBindsKeyThroughQGA(t *testing.T) {
 	}))
 	defer server.Close()
 
-	key, err := WaitForPVEGuestHostKey(server.URL, PVEAuth{TokenID: "smoke@pve!gate", TokenSecret: "secret"}, "pve01", "900", 5*time.Second)
+	key, err := WaitForPVEGuestHostKey(server.URL, PVEAuth{TokenID: "smoke@pve!gate", TokenSecret: "secret", Insecure: true}, "pve01", "900", 5*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -227,7 +228,7 @@ func TestSelectPVENode_PicksLeastLoadedTemplateNode(t *testing.T) {
 
 	// No candidate list: restrict to nodes hosting the template (pve1, pve2).
 	// pve2 has far more free memory and must win; offline pve3 is ignored.
-	node, err := SelectPVENode(srv.URL, PVEAuth{TokenID: "root@pam!terraform", TokenSecret: "s3cr3t"}, nil, "debian-12-cloudinit-template")
+	node, err := SelectPVENode(srv.URL, PVEAuth{TokenID: "root@pam!terraform", TokenSecret: "s3cr3t", Insecure: true}, nil, "debian-12-cloudinit-template")
 	if err != nil {
 		t.Fatalf("SelectPVENode: %v", err)
 	}
@@ -243,7 +244,7 @@ func TestSelectPVENode_CandidateListWins(t *testing.T) {
 	srv, _ := fakeCluster(t)
 
 	// Explicit candidates override the template restriction: only pve1 allowed.
-	node, err := SelectPVENode(srv.URL, PVEAuth{TokenID: "root@pam!t", TokenSecret: "s"}, []string{"pve1"}, "debian-12-cloudinit-template")
+	node, err := SelectPVENode(srv.URL, PVEAuth{TokenID: "root@pam!t", TokenSecret: "s", Insecure: true}, []string{"pve1"}, "debian-12-cloudinit-template")
 	if err != nil {
 		t.Fatalf("SelectPVENode: %v", err)
 	}
@@ -255,22 +256,126 @@ func TestSelectPVENode_CandidateListWins(t *testing.T) {
 func TestSelectPVENode_TemplateMissing(t *testing.T) {
 	srv, _ := fakeCluster(t)
 
-	if _, err := SelectPVENode(srv.URL, PVEAuth{TokenID: "root@pam!t", TokenSecret: "s"}, nil, "no-such-template"); err == nil {
-		t.Fatal("expected an error when no node hosts the template")
+	_, err := SelectPVENode(srv.URL, PVEAuth{TokenID: "root@pam!t", TokenSecret: "s", Insecure: true}, nil, "no-such-template")
+	if err == nil || !strings.Contains(err.Error(), "hosts a template named") {
+		t.Fatalf("expected an error when no node hosts the template, got %v", err)
 	}
 }
 
 func TestSelectPVENode_AllEligibleOffline(t *testing.T) {
 	srv, _ := fakeCluster(t)
 
-	if _, err := SelectPVENode(srv.URL, PVEAuth{TokenID: "root@pam!t", TokenSecret: "s"}, []string{"pve3"}, ""); err == nil {
-		t.Fatal("expected an error when every eligible node is offline")
+	_, err := SelectPVENode(srv.URL, PVEAuth{TokenID: "root@pam!t", TokenSecret: "s", Insecure: true}, []string{"pve3"}, "")
+	if err == nil || !strings.Contains(err.Error(), "is online") {
+		t.Fatalf("expected an error when every eligible node is offline, got %v", err)
 	}
 }
 
 func TestSelectPVENode_RequiresTokenAuth(t *testing.T) {
 	if _, err := SelectPVENode("https://pve:8006", PVEAuth{}, nil, "tpl"); err == nil {
 		t.Fatal("expected an error without token credentials")
+	}
+}
+
+// TestValidatePVEEndpointRefusesCredentialRedirection covers the forms that
+// would put the token header or the ticket password somewhere other than the
+// PVE API of the named host.
+func TestValidatePVEEndpointRefusesCredentialRedirection(t *testing.T) {
+	for _, rejected := range []struct {
+		name     string
+		endpoint string
+		insecure bool
+	}{
+		{"empty", "", false},
+		{"blank", "   ", false},
+		{"query swallows the API path", "https://pve.internal:8006/?x=", false},
+		{"bare query swallows the API path", "https://pve.internal:8006/?", false},
+		{"fragment swallows the API path", "https://pve.internal:8006#", false},
+		{"path prefix", "https://pve.internal:8006/api2/json", false},
+		{"userinfo smuggles a second credential", "https://attacker:pw@pve.internal:8006", false},
+		{"plain HTTP without the insecure opt-in", "http://10.31.0.200:8006", false},
+		{"no host", "https://", true},
+		{"not a URL", "://pve.internal", false},
+		{"non-HTTP scheme", "file:///etc/passwd", true},
+		{"scheme-relative", "//pve.internal:8006", true},
+	} {
+		if err := validatePVEEndpoint(rejected.endpoint, rejected.insecure); err == nil {
+			t.Errorf("%s: %q was accepted", rejected.name, rejected.endpoint)
+		}
+	}
+
+	// What the operator-owned callers legitimately pass must keep working:
+	// manager.go and capacity/pve.go hand over CLOUD_PVE_ENDPOINT verbatim and
+	// image-factory strips "/api2/json" off the site-local proxmox_url.
+	for _, accepted := range []struct {
+		endpoint string
+		insecure bool
+	}{
+		{"https://pve.internal:8006", false},
+		{"https://pve.internal:8006/", false},
+		{"https://pve.internal", false},
+		{"http://10.31.0.200:8006", true},
+		{"https://[fd00::1]:8006", false},
+	} {
+		if err := validatePVEEndpoint(accepted.endpoint, accepted.insecure); err != nil {
+			t.Errorf("%q was rejected: %v", accepted.endpoint, err)
+		}
+	}
+}
+
+// TestPVETicketRefusesQuerySuffixedEndpoint is the wire-level half: a query on
+// the endpoint used to turn the appended "/api2/json/access/ticket" into a
+// query value, so the account password was POSTed as a form body to "/" of the
+// named host. Nothing may reach the network at all.
+func TestPVETicketRefusesQuerySuffixedEndpoint(t *testing.T) {
+	var received atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		received.Add(1)
+		body, _ := io.ReadAll(r.Body)
+		t.Errorf("credential reached %s %s?%s with body %q",
+			r.Method, r.URL.Path, r.URL.RawQuery, string(body))
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	auth := PVEAuth{Username: "root@pam", Password: "cleartext-password", Insecure: true}
+	if _, err := pveTicket(server.URL+"/?probe=", auth); err == nil {
+		t.Fatal("a query-suffixed endpoint was accepted")
+	}
+	// EnsurePVEVMAbsent and the cluster-resources reader take the same endpoint
+	// through two other doors; neither may open one.
+	if err := EnsurePVEVMAbsent(context.Background(), server.URL+"/?probe=", auth,
+		"pve01", "portage-builder-amd64-1"); err == nil {
+		t.Fatal("newPVEAPIClient accepted a query-suffixed endpoint")
+	}
+	if _, err := PVEClusterNodes(server.URL+"/?probe=", auth, "tpl"); err == nil {
+		t.Fatal("the cluster-resources reader accepted a query-suffixed endpoint")
+	}
+	if got := received.Load(); got != 0 {
+		t.Fatalf("%d request(s) carrying the credential left the process", got)
+	}
+}
+
+// TestFetchPVEClusterResourcesRefusesUserinfoEndpoint guards the token path,
+// which reaches the network without passing through pveLogin: userinfo in the
+// endpoint makes Go attach a second, endpoint-chosen Authorization header
+// alongside the cluster's API token.
+func TestFetchPVEClusterResourcesRefusesUserinfoEndpoint(t *testing.T) {
+	var received atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		received.Add(1)
+		t.Errorf("API token reached %s with authorization %q", r.URL.Path, r.Header.Get("Authorization"))
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	endpoint := strings.Replace(server.URL, "http://", "http://smuggled:pw@", 1)
+	auth := PVEAuth{TokenID: "root@pam!terraform", TokenSecret: "s3cr3t", Insecure: true}
+	if _, err := PVEClusterNodes(endpoint, auth, "tpl"); err == nil {
+		t.Fatal("an endpoint carrying userinfo was accepted")
+	}
+	if got := received.Load(); got != 0 {
+		t.Fatalf("%d request(s) carrying the API token left the process", got)
 	}
 }
 

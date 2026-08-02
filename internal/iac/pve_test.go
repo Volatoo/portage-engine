@@ -649,3 +649,240 @@ func TestPVEProvisioner_GenerateMainTF_NoPlaintextTokenSecret(t *testing.T) {
 		t.Errorf("AuthEnv = %v, want [TF_VAR_pve_token_secret=%s]", env, secret)
 	}
 }
+
+// hostilePVEEndpointCases are the endpoints the Go API client in
+// pve_scheduler.go already refuses. Terraform is the other way the same
+// credential leaves this process — GenerateMainTF writes the endpoint into
+// pm_api_url next to pm_api_token_secret, and GenerateVariablesTF repeats it as
+// the pve_endpoint default — so the provisioner has to refuse them too, and
+// refuse them at construction, before any generator can be called.
+func hostilePVEEndpointCases() []struct {
+	name     string
+	endpoint string
+	insecure bool
+} {
+	return []struct {
+		name     string
+		endpoint string
+		insecure bool
+	}{
+		{"attacker host over plain http", "http://attacker.example.net:8006", false},
+		{"userinfo smuggles a second credential", "https://root@pam!x:leak@attacker.example.net:8006", false},
+		{"path swallows the appended api2/json", "https://attacker.example.net/collect", false},
+		{"query swallows the appended api2/json", "https://attacker.example.net:8006/?x=", false},
+		{"fragment truncates the request target", "https://attacker.example.net:8006/#", false},
+		{"non-http scheme", "file:///etc/passwd", false},
+		{"scheme relative", "//attacker.example.net:8006", false},
+		{"blank endpoint", "   ", false},
+		// Still hostile with the operator's plaintext opt-in set: insecure
+		// relaxes the scheme and nothing else.
+		{"userinfo with insecure set", "http://root:leak@attacker.example.net:8006", true},
+		{"path with insecure set", "http://10.31.0.200:8006/collect", true},
+	}
+}
+
+// TestNewPVEProvisioner_RejectsHostileEndpointBeforeGeneratingHCL is the attack:
+// a provisioner built on an endpoint the Go client would refuse must fail to
+// construct, so the PVE token never reaches a generated provider block pointed
+// at an attacker.
+func TestNewPVEProvisioner_RejectsHostileEndpointBeforeGeneratingHCL(t *testing.T) {
+	t.Parallel()
+
+	const secret = "super-secret-token-value"
+
+	for _, tc := range hostilePVEEndpointCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			config := &PVEConfig{
+				Endpoint:    tc.endpoint,
+				Node:        "pve-node1",
+				TokenID:     "root@pam!terraform",
+				TokenSecret: secret,
+				Insecure:    tc.insecure,
+				StateDir:    t.TempDir(),
+			}
+
+			provisioner, err := NewPVEProvisioner(config)
+			if err != nil {
+				return
+			}
+
+			// Constructed anyway: show exactly what terraform would have been
+			// handed, so the failure names the leak rather than the rule.
+			mainTF := provisioner.GenerateMainTF(nil, "test-builder")
+			variablesTF := provisioner.GenerateVariablesTF(nil)
+			t.Errorf("NewPVEProvisioner accepted hostile endpoint %q (insecure=%t);\n"+
+				"generated main.tf carries pm_api_url pointed at it alongside pm_api_token_secret: %v\n"+
+				"generated variables.tf carries it as the pve_endpoint default: %v",
+				tc.endpoint, tc.insecure,
+				strings.Contains(mainTF, tc.endpoint),
+				strings.Contains(variablesTF, tc.endpoint))
+		})
+	}
+}
+
+// TestNewPVEProvisioner_EndpointCannotEscapeGeneratedHCLString covers the
+// injection that is separate from where the credential is delivered: net/url
+// accepts a double quote as an ordinary host character, so an endpoint carrying
+// one clears the SSRF gate and then closes pm_api_url's string literal early.
+func TestNewPVEProvisioner_EndpointCannotEscapeGeneratedHCLString(t *testing.T) {
+	t.Parallel()
+
+	for _, endpoint := range []string{
+		`https://pve.example.com:8006"`,
+		`https://pve.example.com"`,
+		`https://a"b:8006`,
+		`https://pve.example.com:8006'`,
+		`https://pve.example.com:8006$`,
+		`https://pve.example.com:8006<`,
+	} {
+		t.Run(endpoint, func(t *testing.T) {
+			t.Parallel()
+
+			config := &PVEConfig{
+				Endpoint:    endpoint,
+				Node:        "pve-node1",
+				TokenID:     "root@pam!terraform",
+				TokenSecret: "super-secret-token-value",
+				StateDir:    t.TempDir(),
+			}
+
+			provisioner, err := NewPVEProvisioner(config)
+			if err != nil {
+				return
+			}
+
+			mainTF := provisioner.GenerateMainTF(nil, "test-builder")
+			line := pveGeneratedLine(t, mainTF, "pm_api_url")
+			t.Errorf("NewPVEProvisioner accepted endpoint %q; generated provider line is %s",
+				endpoint, line)
+		})
+	}
+}
+
+// TestPVEProvisioner_GeneratedEndpointStaysInsideOneHCLLiteral is the sink-side
+// half of the same claim: whatever survives construction must still sit inside
+// exactly one quoted literal on each line that carries it.
+func TestPVEProvisioner_GeneratedEndpointStaysInsideOneHCLLiteral(t *testing.T) {
+	t.Parallel()
+
+	provisioner, err := NewPVEProvisioner(&PVEConfig{
+		Endpoint:    "https://pve.example.com:8006",
+		Node:        "pve-node1",
+		TokenID:     "root@pam!terraform",
+		TokenSecret: "super-secret-token-value",
+		StateDir:    t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("NewPVEProvisioner failed: %v", err)
+	}
+
+	for _, tc := range []struct {
+		what   string
+		body   string
+		anchor string
+	}{
+		{"main.tf", provisioner.GenerateMainTF(nil, "test-builder"), "pm_api_url"},
+		{"variables.tf", provisioner.GenerateVariablesTF(nil), `default     = "https`},
+	} {
+		line := pveGeneratedLine(t, tc.body, tc.anchor)
+		if quotes := strings.Count(line, `"`); quotes != 2 {
+			t.Errorf("%s line %q has %d quotes, want 2 — the endpoint escaped its literal",
+				tc.what, line, quotes)
+		}
+	}
+}
+
+// pveGeneratedLine returns the single generated line containing anchor.
+func pveGeneratedLine(t *testing.T, body, anchor string) string {
+	t.Helper()
+	for _, line := range strings.Split(body, "\n") {
+		if strings.Contains(line, anchor) {
+			return line
+		}
+	}
+	t.Fatalf("generated config has no %q line:\n%s", anchor, body)
+	return ""
+}
+
+// TestNewPVEProvisioner_InsecureOptInGovernsPlainHTTP pins the endpoint gate to
+// the provisioner's own plaintext opt-in — the same flag it emits as
+// pm_tls_insecure — rather than to a hardcoded answer in either direction.
+// http://10.31.0.200:8006 is a real trusted-LAN deployment and must keep
+// building; the identical endpoint without the opt-in must not.
+func TestNewPVEProvisioner_InsecureOptInGovernsPlainHTTP(t *testing.T) {
+	t.Parallel()
+
+	const lanEndpoint = "http://10.31.0.200:8006"
+
+	provisioner, err := NewPVEProvisioner(&PVEConfig{
+		Endpoint:    lanEndpoint,
+		Node:        "pve01",
+		TokenID:     "root@pam!terraform",
+		TokenSecret: "super-secret-token-value",
+		Insecure:    true,
+		StateDir:    t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("trusted-LAN endpoint %q with the insecure opt-in must build: %v", lanEndpoint, err)
+	}
+	if tf := provisioner.GenerateMainTF(nil, "test-builder"); !strings.Contains(tf, `pm_api_url      = "`+lanEndpoint+`/api2/json"`) {
+		t.Errorf("generated main.tf lost the LAN endpoint:\n%s", tf)
+	}
+
+	if _, err := NewPVEProvisioner(&PVEConfig{
+		Endpoint:    lanEndpoint,
+		Node:        "pve01",
+		TokenID:     "root@pam!terraform",
+		TokenSecret: "super-secret-token-value",
+		Insecure:    false,
+		StateDir:    t.TempDir(),
+	}); err == nil {
+		t.Errorf("plain HTTP endpoint %q was accepted without the insecure opt-in", lanEndpoint)
+	}
+}
+
+// TestNewPVEProvisioner_AcceptsEndpointsTheSystemProduces guards the gate
+// against over-tightening: these are the shapes the deploy configs, the LAN
+// cluster and the image factory (proxmox_url minus /api2/json) actually hand in.
+func TestNewPVEProvisioner_AcceptsEndpointsTheSystemProduces(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		endpoint string
+		insecure bool
+	}{
+		{"https://pve.example.com:8006", false},
+		{"https://pve.example.internal:8006", false},
+		{"https://pve-node1.lan", false},
+		{"https://pve.internal:8006/", false},
+		{"https://[fd00::1]:8006", false},
+		{"http://10.31.0.200:8006", true},
+	} {
+		t.Run(tc.endpoint, func(t *testing.T) {
+			t.Parallel()
+
+			provisioner, err := NewPVEProvisioner(&PVEConfig{
+				Endpoint:    tc.endpoint,
+				Node:        "pve01",
+				TokenID:     "root@pam!terraform",
+				TokenSecret: "super-secret-token-value",
+				Insecure:    tc.insecure,
+				StateDir:    t.TempDir(),
+			})
+			if err != nil {
+				t.Fatalf("legitimate endpoint %q was rejected: %v", tc.endpoint, err)
+			}
+			// The trailing slash is dropped so the generated URL matches the one
+			// the Go client builds instead of becoming host//api2/json.
+			want := strings.TrimRight(tc.endpoint, "/")
+			if tf := provisioner.GenerateMainTF(nil, "test-builder"); !strings.Contains(tf, `pm_api_url      = "`+want+`/api2/json"`) {
+				t.Errorf("generated main.tf does not carry %q:\n%s", want, tf)
+			}
+			if vars := provisioner.GenerateVariablesTF(nil); !strings.Contains(vars, `default     = "`+want+`"`) {
+				t.Errorf("generated variables.tf does not carry %q:\n%s", want, vars)
+			}
+		})
+	}
+}

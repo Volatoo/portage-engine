@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -329,7 +330,12 @@ func executePullAction(
 		if err != nil {
 			return nil, err
 		}
-		return uploadPullArtifact(ctx, clients.transfer, baseURL, request.UploadID, path)
+		file, info, err := local.OpenArtifact(path)
+		if err != nil {
+			return nil, err
+		}
+		defer func() { _ = file.Close() }()
+		return uploadPullArtifact(ctx, clients.transfer, baseURL, request.UploadID, file, info)
 	default:
 		return nil, fmt.Errorf("unsupported worker action %q", task.Action)
 	}
@@ -344,20 +350,64 @@ func decodePullPayload(payload []byte, target any) error {
 	return nil
 }
 
+// OpenArtifact opens one produced artifact for delivery off this worker,
+// confined to the builder's artifact directory.
+//
+// Both ways an artifact leaves a worker — the collect task above and the
+// /api/v1/artifacts/download endpoint — reach the file by asking the job for a
+// recorded relative path. That list is an allowlist of names, not a guarantee
+// about the filesystem: it is assembled by walking a directory that the build's
+// own ebuild code writes into as root, and it is reloaded verbatim from
+// jobs.json on restart. Neither source is entitled to decide which file the
+// worker hands to a remote peer, so the containment is enforced here, against
+// the real directory, rather than assumed from the shape of the name. Opening
+// through os.Root also refuses a component that is a symlink out of the tree,
+// which a name check alone cannot see.
+func (lb *LocalBuilder) OpenArtifact(path string) (*os.File, os.FileInfo, error) {
+	return openConfinedArtifact(lb.artifactDir, path)
+}
+
+func openConfinedArtifact(artifactDir, path string) (*os.File, os.FileInfo, error) {
+	root, err := os.OpenRoot(artifactDir)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer func() { _ = root.Close() }()
+	base, err := filepath.Abs(artifactDir)
+	if err != nil {
+		return nil, nil, err
+	}
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	relative, err := filepath.Rel(base, absolute)
+	if err != nil {
+		return nil, nil, fmt.Errorf("artifact %q is outside the builder artifact directory", path)
+	}
+	file, err := root.Open(relative)
+	if err != nil {
+		return nil, nil, fmt.Errorf("open artifact %q: %w", path, err)
+	}
+	info, err := file.Stat()
+	if err != nil {
+		_ = file.Close()
+		return nil, nil, err
+	}
+	if !info.Mode().IsRegular() {
+		_ = file.Close()
+		return nil, nil, fmt.Errorf("artifact %q is not a regular file", path)
+	}
+	return file, info, nil
+}
+
 func uploadPullArtifact(
 	ctx context.Context,
 	client *http.Client,
-	baseURL, uploadID, path string,
+	baseURL, uploadID string,
+	file *os.File,
+	info os.FileInfo,
 ) (json.RawMessage, error) {
-	file, err := os.Open(path) // #nosec G304 -- path was resolved against the builder's recorded artifact list.
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = file.Close() }()
-	info, err := file.Stat()
-	if err != nil {
-		return nil, err
-	}
 	hash := sha256.New()
 	if _, err := io.Copy(hash, file); err != nil {
 		return nil, err

@@ -499,3 +499,63 @@ func TestAuthMiddleware(t *testing.T) {
 		t.Errorf("empty token: expected 200 (auth disabled), got %d", w.Code)
 	}
 }
+
+// TestArtifactDownloadEndpointConfinesPathsToTheArtifactDir drives the path
+// injection through the real handler. The job store is the reachable end of the
+// chain: builds run emerge as root on this host, so a compromised build can
+// rewrite jobs.json, and the builder rehydrates the job verbatim on the next
+// start. The endpoint is unauthenticated in the shipped configuration, so a
+// poisoned store would turn a local compromise of a disposable VM into an
+// arbitrary file read for any peer that can reach :9090.
+//
+// The two requests are two different roads to the same file. "?path=" goes
+// through the recorded-artifact list; the bare request goes through the job's
+// recorded artifact URL, which is stored as an absolute path and is never
+// matched against that list at all.
+func TestArtifactDownloadEndpointConfinesPathsToTheArtifactDir(t *testing.T) {
+	root := t.TempDir()
+	secret := filepath.Join(root, "server-api-key")
+	if err := os.WriteFile(secret, []byte("SERVER_API_KEY=super-secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dataDir := filepath.Join(root, "data")
+	artifactDir := filepath.Join(root, "artifacts")
+	for _, dir := range []string{dataDir, artifactDir} {
+		if err := os.MkdirAll(dir, 0o750); err != nil {
+			t.Fatal(err)
+		}
+	}
+	poisoned := `{"jobs":{"poisoned":{"id":"poisoned","status":"success",` +
+		`"artifact_url":"` + secret + `",` +
+		`"artifacts":["../server-api-key"]}}}`
+	if err := os.WriteFile(filepath.Join(dataDir, "jobs.json"), []byte(poisoned), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	bldr := builder.NewLocalBuilder(0, &config.BuilderConfig{
+		Workers:            0,
+		NativeJobPolicy:    "unsafe-reuse",
+		DataDir:            dataDir,
+		WorkDir:            filepath.Join(root, "work"),
+		ArtifactDir:        artifactDir,
+		PersistenceEnabled: true,
+	})
+	t.Cleanup(bldr.Shutdown)
+	handler := setupHTTPHandlers(bldr)
+
+	for name, target := range map[string]string{
+		"recorded traversal": "/api/v1/artifacts/download/poisoned?path=../server-api-key",
+		"recorded url":       "/api/v1/artifacts/download/poisoned",
+	} {
+		t.Run(name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, httptest.NewRequest(http.MethodGet, target, nil))
+			if strings.Contains(w.Body.String(), "super-secret") {
+				t.Fatalf("download served a file outside the artifact dir: %d %s", w.Code, w.Body.String())
+			}
+			if w.Code == http.StatusOK {
+				t.Fatalf("download of %s returned 200", target)
+			}
+		})
+	}
+}

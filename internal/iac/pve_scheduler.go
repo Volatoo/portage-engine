@@ -191,6 +191,48 @@ func pveHTTPClient(insecure bool) *http.Client {
 	return pveSecureClient
 }
 
+// validatePVEEndpoint constrains the base URL before any credential is put on
+// the wire. Every caller here appends its own "/api2/json/..." suffix and
+// attaches either the API token header or — on the ticket path — the account
+// password as a cleartext form body, so the endpoint alone decides where that
+// credential is delivered. It must therefore name a host and nothing else:
+// userinfo would smuggle a second set of credentials into the request, and a
+// path, query or fragment would swallow the appended suffix, so
+// "https://pve.internal:8006/?x=" quietly turns the cluster-resources call into
+// a request for "/" with the API path riding in the query string. Plain HTTP is
+// accepted only together with the operator's explicit insecure opt-in, because
+// a trusted-LAN Proxmox such as http://10.31.0.200:8006 is a real deployment
+// while an unannounced downgrade to cleartext is not.
+func validatePVEEndpoint(endpoint string, insecure bool) error {
+	trimmed := strings.TrimRight(endpoint, "/")
+	if strings.TrimSpace(trimmed) == "" {
+		return fmt.Errorf("PVE endpoint is required")
+	}
+	parsed, err := url.Parse(trimmed)
+	if err != nil {
+		return fmt.Errorf("PVE endpoint %q is not a valid URL: %w", endpoint, err)
+	}
+	switch {
+	case parsed.Scheme == "https":
+	case parsed.Scheme == "http" && insecure:
+	case parsed.Scheme == "http":
+		return fmt.Errorf("PVE endpoint %q uses plain HTTP; enable the insecure option to allow it on a trusted LAN", endpoint)
+	default:
+		return fmt.Errorf("PVE endpoint %q must use https (or http with the insecure option)", endpoint)
+	}
+	if parsed.Hostname() == "" {
+		return fmt.Errorf("PVE endpoint %q names no host", endpoint)
+	}
+	// The reconstruction is the real invariant: it also rejects the bare "?" and
+	// "#" that url.Parse records as an empty query or fragment while the string
+	// still captures everything appended after it.
+	if parsed.User != nil || parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" ||
+		trimmed != parsed.Scheme+"://"+parsed.Host {
+		return fmt.Errorf("PVE endpoint %q must be a bare scheme://host[:port] without userinfo, path, query, or fragment", endpoint)
+	}
+	return nil
+}
+
 // pveTicket exchanges username+password for an auth ticket (the PVE cookie
 // auth flow — API tokens don't need this).
 func pveTicket(endpoint string, auth PVEAuth) (string, error) {
@@ -199,6 +241,9 @@ func pveTicket(endpoint string, auth PVEAuth) (string, error) {
 }
 
 func pveLogin(ctx context.Context, endpoint string, auth PVEAuth) (string, string, error) {
+	if err := validatePVEEndpoint(endpoint, auth.Insecure); err != nil {
+		return "", "", err
+	}
 	form := url.Values{}
 	form.Set("username", auth.Username)
 	form.Set("password", auth.Password)
@@ -244,8 +289,8 @@ type pveAPIClient struct {
 }
 
 func newPVEAPIClient(ctx context.Context, endpoint string, auth PVEAuth) (*pveAPIClient, error) {
-	if strings.TrimSpace(endpoint) == "" {
-		return nil, fmt.Errorf("PVE endpoint is required")
+	if err := validatePVEEndpoint(endpoint, auth.Insecure); err != nil {
+		return nil, err
 	}
 	if !auth.valid() {
 		return nil, fmt.Errorf("PVE credentials are required")
@@ -431,6 +476,9 @@ func waitPVEInterval(ctx context.Context, interval time.Duration) error {
 // fetchPVEClusterResources reads the cluster resource list, authenticating
 // with an API token when available, else a username/password ticket.
 func fetchPVEClusterResources(endpoint string, auth PVEAuth) ([]pveClusterResource, error) {
+	if err := validatePVEEndpoint(endpoint, auth.Insecure); err != nil {
+		return nil, err
+	}
 	reqURL := strings.TrimRight(endpoint, "/") + "/api2/json/cluster/resources"
 	req, err := http.NewRequest(http.MethodGet, reqURL, nil)
 	if err != nil {
@@ -471,6 +519,9 @@ func fetchPVEClusterResources(endpoint string, auth PVEAuth) ([]pveClusterResour
 // frequently empty right after apply (the agent hasn't reported yet), so the
 // IP is resolved here instead of failing the deployment on an empty address.
 func WaitForPVEGuestIP(endpoint string, auth PVEAuth, node string, vmid string, timeout time.Duration, sink func(string)) (string, error) {
+	if err := validatePVEEndpoint(endpoint, auth.Insecure); err != nil {
+		return "", err
+	}
 	deadline := time.Now().Add(timeout)
 	reqURL := fmt.Sprintf("%s/api2/json/nodes/%s/qemu/%s/agent/network-get-interfaces",
 		strings.TrimRight(endpoint, "/"), node, vmid)
@@ -546,6 +597,9 @@ func PVEGuestExec(ctx context.Context, endpoint string, auth PVEAuth, node, vmid
 	}
 	if node == "" || vmid == "" || len(command) == 0 {
 		return "", fmt.Errorf("PVE guest exec requires node, VMID, and command")
+	}
+	if err := validatePVEEndpoint(endpoint, auth.Insecure); err != nil {
+		return "", err
 	}
 	values := url.Values{}
 	for _, argument := range command {
