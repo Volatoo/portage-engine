@@ -1,8 +1,7 @@
-import { useEffect, useRef } from 'react';
-
 import { busyAttributes, isCompositionEnter } from '../api/write';
 import { useMessages } from '../i18n/context';
 import { formField } from '../pages/login/formWriter';
+import { useModalDialog } from './useModalDialog';
 
 /**
  * The administrator credential a step-up refusal asks for.
@@ -47,44 +46,11 @@ export function StepUpDialog({
   onCancel,
 }: StepUpDialogProps) {
   const messages = useMessages();
-  const ref = useRef<HTMLDialogElement>(null);
-
-  useEffect(() => {
-    const node = ref.current;
-    if (node === null || !open) {
-      return undefined;
-    }
-    // Read before the dialog opens, because opening it moves focus inside: this
-    // is the control the reader activated, and it is where they have to be put
-    // back. Every dismissal path runs through the cleanup below — confirmed,
-    // cancelled, or Escape — because all three of them unmount this component
-    // rather than re-rendering it with `open` false.
-    const opener = document.activeElement;
-    // showModal is what makes the rest of the page inert. Guarded because a
-    // test renderer may implement the element without it, and a dialog that
-    // opens non-modally is still a dialog.
-    if (typeof node.showModal === 'function') {
-      node.showModal();
-    } else {
-      node.setAttribute('open', '');
-    }
-    return () => {
-      // Closed rather than merely removed. A modal that is unmounted while open
-      // takes the reading position down with it — the browser restores focus on
-      // close and has nothing to restore it from once the element is gone — and
-      // the reader lands on <body>, four Tab presses from where they were.
-      if (typeof node.close === 'function') {
-        node.close();
-      } else {
-        node.removeAttribute('open');
-      }
-      // And stated outright, not left to the close: the fallback path above
-      // never opened a top-layer dialog, so nothing is coming back on its own.
-      if (opener instanceof HTMLElement && opener.isConnected) {
-        opener.focus();
-      }
-    };
-  }, [open]);
+  // Opening the prompt and putting the reader back afterwards is the shared
+  // rule, not this dialog's: the confirmation carries the same one, and a
+  // second copy of it here would be a second place for a dismissal path to be
+  // left out.
+  const ref = useModalDialog(open);
 
   return (
     <dialog

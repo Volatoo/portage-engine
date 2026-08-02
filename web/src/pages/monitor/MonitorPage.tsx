@@ -101,14 +101,13 @@ async function loadRollups(scope: Scope): Promise<Rollups> {
     // The three that answer 503 with the document the card is about.
     ledger: tolerateDegraded(ledger),
     cache: tolerateDegraded(cache),
-    // endpoints.ts types this call as the inner document; the handler answers
-    // the envelope `{enabled, ok, status}`, and the difference is the whole
-    // distinction between "the ledger could not be asked" and "the ledger
-    // answered and six artifacts are missing". Corrected here, and named in the
-    // handoffs so the shared type stops disagreeing with its own handler.
-    metadata: tolerateDegraded(metadata as unknown as ApiOutcome<RuntimeMetadataEnvelope>),
-    // The scheduler's durable half is thirty fields the shared type stops short
-    // of; see ./wire.ts for the transcription and why every one is optional.
+    // The metadata document is the `status` inside the envelope; `enabled` and
+    // `ok` are the envelope's own, and both of its failure branches carry no
+    // document at all — which is the distinction between "the ledger could not
+    // be asked" and "the ledger answered and six artifacts are missing".
+    metadata: tolerateDegraded(metadata),
+    // The scheduler's durable half is thirty fields; see src/api/types.ts for
+    // the transcription and why every one of them is optional.
     scheduler: scheduler as unknown as ApiOutcome<MonitorSchedulerStatus>,
     gateway,
     identities,

@@ -36,7 +36,7 @@ import type {
   PublicKey,
   PublicPackageList,
   PublicServiceStatus,
-  RuntimeMetadataStatus,
+  RuntimeMetadataEnvelope,
   SchedulerStatus,
   SessionsRevoked,
   ShellPreflight,
@@ -50,6 +50,25 @@ export interface Scope {
   projectID?: string;
   signal?: AbortSignal;
 }
+
+/**
+ * A context with no project in it, and no way to acquire one.
+ *
+ * For the routes that are answered outside every project. Spelling it as a type
+ * rather than as a convention is what keeps a caller of one of those routes from
+ * quietly starting to send a selector — and, on `/api/iam/me`, what keeps the
+ * two callers of one path apart.
+ */
+export type Unscoped = Omit<Scope, 'projectID'>;
+
+/**
+ * A context that names a project, required rather than optional.
+ *
+ * For a surface that has already been handed one: `api.thing({})` on a route
+ * declared this way does not compile, so the scope cannot be dropped by
+ * shortening the call.
+ */
+export type ProjectScoped = Scope & { projectID: string };
 
 function scoped(scope: Scope, extra: RequestOptions = {}): RequestOptions {
   return {
@@ -123,7 +142,16 @@ export const api = {
   ledgerStatus: (scope: Scope = {}): Promise<ApiOutcome<LedgerStatus>> =>
     request('/api/ledger/status', scoped(scope)),
 
-  runtimeMetadataStatus: (scope: Scope = {}): Promise<ApiOutcome<RuntimeMetadataStatus>> =>
+  /**
+   * The envelope, not the document inside it.
+   *
+   * handleRuntimeMetadataStatus answers `{enabled, ok, status?, error?}` on
+   * every branch it has, and two of the three carry no document at all — a
+   * ledger that is switched off and a ledger that could not be reached. A
+   * caller typed on the document reads `.live_infra` off the envelope, gets
+   * `undefined`, and renders it as a zero.
+   */
+  runtimeMetadataStatus: (scope: Scope = {}): Promise<ApiOutcome<RuntimeMetadataEnvelope>> =>
     request('/api/runtime-metadata/status', scoped(scope)),
 
   cacheStatus: (scope: Scope = {}): Promise<ApiOutcome<CacheStatus>> =>
@@ -144,11 +172,34 @@ export const api = {
   /* ---- identity -------------------------------------------------------- */
 
   /**
+   * Who the reader is, asked outside every project.
+   *
    * The only source of a capability. The boot payload carries identity and never
    * authority, so a gated destination stays hidden until this answers — an IAM
    * outage leaves it hidden rather than revealing it and taking it back.
+   *
+   * Unscoped, and typed so it cannot become otherwise: this is the question
+   * whose answer NAMES the projects, so at the moment it is asked there is no
+   * project to ask it in, and a selector on it would name one the reader may not
+   * hold. Every caller that asks it for that reason — the chrome, the build
+   * pages gating a destructive control, the device-approval page — comes here.
    */
-  iamMe: (scope: Scope = {}): Promise<ApiOutcome<IAMMe>> => request('/api/iam/me', scoped(scope)),
+  iamMe: (scope: Unscoped = {}): Promise<ApiOutcome<IAMMe>> =>
+    request('/api/iam/me', scoped(scope)),
+
+  /**
+   * The same route, asked by a surface that has already been given a project.
+   *
+   * One path, two callers, two different right answers — and until they were
+   * separated the difference lived in an argument list, where dropping it left
+   * the request looking exactly like the identity ask above. It is a separate
+   * entry point so the two are told apart in the source rather than on the wire,
+   * where they are identical, and it requires the project rather than defaulting
+   * it so that shortening the call is a compile error instead of a silent
+   * unscoped request.
+   */
+  iamMeInProject: (scope: ProjectScoped): Promise<ApiOutcome<IAMMe>> =>
+    request('/api/iam/me', scoped(scope)),
 
   iamSessions: (scope: Scope = {}): Promise<ApiOutcome<IAMSessions>> =>
     request('/api/iam/sessions', scoped(scope)),

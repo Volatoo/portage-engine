@@ -121,6 +121,27 @@ export const EN = {
     'Choose a binhost, establish signing trust, and configure Portage without signing in.',
   'docs.verify.note':
     '“Published” in the web catalog does not replace client-side signature verification.',
+  // The three screens the shell renders in place of a page. They were written in
+  // a private table beside the components, shaped like this one and outside it,
+  // which made the console's error screens the single surface no i18n check
+  // reached: not the key scan, not the placeholder parity check, and — because
+  // an absent key cannot be counted as missing — not the coverage report either.
+  // A surface that is invisible to the report is a surface that stays
+  // untranslated without anyone deciding to leave it so.
+  'err.forbidden.h1': 'Not available to you',
+  // The capability is named rather than hinted at: an operator told only "not
+  // available" opens a ticket, and one told which grant is missing asks for it.
+  'err.forbidden.hint':
+    'This page needs the {capability} capability, which the identity service has not granted this session. Every request it made would be refused.',
+  'err.notfound.h1': 'No such page',
+  'err.notfound.hint':
+    'The console serves no page at this address. It may have been mistyped, or it may have been a page in an earlier version.',
+  'err.render.h1': 'The console could not render this page',
+  // Which of the two it is, because the reader cannot tell them apart from a
+  // blank page and only one of them is worth reporting.
+  'err.render.hint':
+    'This is a fault in the console itself, not a refusal by the server. Reload; if it keeps happening, the message below is what to report.',
+  'err.render.reload': 'Reload the console',
   'factory.action': 'Next',
   'factory.blockers': 'Blockers',
   'factory.bundles': 'Offline bundles',

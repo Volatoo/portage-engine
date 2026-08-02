@@ -70,6 +70,32 @@ describe('the source catalogue is the key set', () => {
     expect(Object.keys(ZH).filter((key) => !(key in EN))).toEqual([]);
   });
 
+  it('holds every message table, so no second one can render strings unseen', () => {
+    // What src/app/fallbackCopy.ts was: seven English strings in a file shaped
+    // exactly like this catalogue, sitting outside it, with its own copy of the
+    // `{name}` interpolator, feeding the three screens the shell renders in
+    // place of a page. Nothing in this file could see it. The key scan reads
+    // `t(` calls, placeholder parity reads `EN` against `ZH`, and the coverage
+    // number counts what `ZH` is missing — which cannot count a string that was
+    // never in `EN`. So the console's error screens were untranslated and also
+    // unreportable, and the report is the only thing that would have said so.
+    //
+    // The shape is what is banned, not the strings: a quoted dotted key against
+    // a string value is what a catalogue looks like, and the two files that may
+    // hold one are in this directory.
+    const catalogueLine = /^\s*'[a-z][A-Za-z0-9]*(?:\.[A-Za-z0-9]+)+':\s*(?:'|"|$)/m;
+    const offenders = sourceFiles(SOURCE_ROOT)
+      .filter((path) => !path.startsWith(join(SOURCE_ROOT, 'i18n')))
+      .filter((path) =>
+        catalogueLine.test(
+          readFileSync(path, 'utf8')
+            .replace(/\/\*[\s\S]*?\*\//g, '')
+            .replace(/^\s*\/\/.*$/gm, ''),
+        ),
+      );
+    expect(offenders).toEqual([]);
+  });
+
   it('keeps Chinese coverage above the floor it shipped at', () => {
     const coverage = (Object.keys(ZH).length / Object.keys(EN).length) * 100;
     // Reported, and floored — never gated on equality. A translated catalogue is
@@ -106,7 +132,17 @@ describe('the source catalogue is the key set', () => {
     // three other routes now raise the same prompt. The move carried the
     // Chinese values with it, so only the new key is untranslated, and it is
     // named below.
-    expect(coverage).toBeGreaterThanOrEqual(96.07);
+    //
+    // Promoting the three fallback screens then took it to 587/618. Their seven
+    // strings are not new copy: they were already on screen, out of a private
+    // table shaped like this catalogue and sitting outside it, where no key
+    // scan reached them and — an absent key cannot be reported missing —
+    // neither did this number. Counting them is what turns the console's error
+    // screens from a surface nobody could see into seven named lines below.
+    //
+    // Written as the fraction rather than as a rounded literal so the floor and
+    // the two counts it comes from stay one statement.
+    expect(coverage).toBeGreaterThanOrEqual((587 / 618) * 100);
   });
 
   /**
@@ -155,7 +191,14 @@ describe('the source catalogue is the key set', () => {
    * `unauthorized` — was reaching the screen as an English literal from outside
    * the catalogue, which no key check could see.
    *
-   * Supplying a value for any of the twenty-four is a translator's job, not
+   * Seven arrived with the three screens the shell renders in place of a page:
+   * a render that threw, an address the router matches nothing for, and a route
+   * whose capability this session was not granted. The console this replaces
+   * has none of them — it rendered on the server, so a page that failed was a
+   * Go error page and a bad address was a 404 from net/http — which is why
+   * there is no Chinese to carry over for any of the seven.
+   *
+   * Supplying a value for any of the thirty-one is a translator's job, not
    * this port's. They are named here so that is a task rather than a discovery.
    */
   it('names every untranslated key, so a new one cannot arrive unnoticed', () => {
@@ -173,6 +216,13 @@ describe('the source catalogue is the key set', () => {
       'detail.image',
       'detail.norecord',
       'detail.profile',
+      'err.forbidden.h1',
+      'err.forbidden.hint',
+      'err.notfound.h1',
+      'err.notfound.hint',
+      'err.render.h1',
+      'err.render.hint',
+      'err.render.reload',
       'factory.catalog.stat',
       'filter.policy',
       'mon.gateway.protocol.version',
@@ -264,6 +314,21 @@ describe('lookup and degradation', () => {
   it('falls back to the source string for an untranslated key', () => {
     const zh = messagesFor('zh');
     expect(zh.t('detail.profile')).toBe(EN['detail.profile']);
+  });
+
+  it('degrades the three fallback screens to their source string, slot and all', () => {
+    // The screens that state a render fault, a bad address and a missing grant
+    // are read through the same lookup as every other surface now, which is
+    // what makes their absence from the translated catalogue a reported gap
+    // rather than a private decision. A Chinese reader sees the English today;
+    // on the day a translator supplies a value, the screens change without
+    // being edited.
+    const zh = messagesFor('zh');
+    expect(zh.t('err.render.h1')).toBe(EN['err.render.h1']);
+    expect(zh.t('err.notfound.hint')).toBe(EN['err.notfound.hint']);
+    expect(zh.t('err.forbidden.hint', { capability: 'system-admin' })).toBe(
+      EN['err.forbidden.hint'].replace('{capability}', 'system-admin'),
+    );
   });
 
   it('fills the named slots and leaves an unfilled one standing', () => {

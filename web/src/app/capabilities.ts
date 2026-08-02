@@ -106,6 +106,12 @@ function projectsOf(value: unknown): readonly ProjectAccess[] {
  * with auth off had no project to put in `X-Project-ID` and nothing to write on
  * the identity line. What the flag decides is the floor under `granted`, not
  * whether the question gets asked.
+ *
+ * Asked through `api.iamMe`, whose parameter type carries no project — this is
+ * the question whose answer names them, so there is none to send yet. The same
+ * route asked by a surface that already has one goes through
+ * `api.iamMeInProject` instead, and src/app/runtime.test.tsx drives the two
+ * separately and holds each to what it puts on the wire.
  */
 export function useIdentity(authEnabled: boolean): IdentityContext {
   const [answer, setAnswer] = useState<IdentityContext>(UNRESOLVED_IDENTITY);
