@@ -111,7 +111,9 @@ func (r *JobRepository) ClaimPhaseWork(
 		}
 	}
 	var claim *PhaseWorkClaim
-	err = r.db.WithTx(ctx, pgx.TxOptions{}, func(q Querier) error {
+	err = r.db.WithTx(ctx, pgx.TxOptions{}, withDeferredLeaseExpiries(ctx, func(
+		q Querier, leaseExpiries map[leaseExpiryKey]int64,
+	) error {
 		workerID, err := registerCapabilityWorker(ctx, q, owner, capabilities)
 		if err != nil {
 			return err
@@ -128,11 +130,9 @@ func (r *JobRepository) ClaimPhaseWork(
 			return fmt.Errorf("recover expired phase work: %w", err)
 		}
 		if tag.RowsAffected() > 0 {
-			if err := recordLeaseExpiry(
-				ctx, q, "phase", "reclaimed", tag.RowsAffected(),
-			); err != nil {
-				return err
-			}
+			leaseExpiries[leaseExpiryKey{
+				leaseKind: "phase", result: "reclaimed",
+			}] += tag.RowsAffected()
 		}
 
 		fairness, found, err := selectFairPhaseProject(
@@ -372,7 +372,7 @@ func (r *JobRepository) ClaimPhaseWork(
 		}
 		claim = &item
 		return nil
-	})
+	}))
 	r.recordWrite(err)
 	return claim, err
 }

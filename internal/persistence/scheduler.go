@@ -841,6 +841,30 @@ func flushLeaseExpiries(
 	return nil
 }
 
+// withDeferredLeaseExpiries adapts a transaction body that tallies lease
+// expiries into one that applies them last.
+//
+// The order only holds if every writer keeps it. ClaimPhaseWork used to reclaim
+// expired phase leases and update the counter at the top of its transaction,
+// before it locked any phase_work_items row, while the recovery loop locks
+// phase_work_items first — the cancel path rewrites them — and the counters at
+// the end. That is the same lock cycle stated above with the rows swapped, so
+// the two paths could deadlock on the pair even though each was internally
+// ordered. Routing both through this wrapper is what makes "counters last" a
+// property of the package rather than of one function.
+func withDeferredLeaseExpiries(
+	ctx context.Context,
+	body func(q Querier, tally map[leaseExpiryKey]int64) error,
+) func(Querier) error {
+	return func(q Querier) error {
+		tally := make(map[leaseExpiryKey]int64, 1)
+		if err := body(q, tally); err != nil {
+			return err
+		}
+		return flushLeaseExpiries(ctx, q, tally)
+	}
+}
+
 // validLeaseExpiryCounter reports whether the pair names one of the fixed rows.
 func validLeaseExpiryCounter(leaseKind, result string) bool {
 	if leaseKind == "phase" {
