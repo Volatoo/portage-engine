@@ -66,6 +66,24 @@ authority 为 schema v30，迁移顺序固定为 00027 → 00028 → 00029 → 0
   - 中文目录改用中文标点，`set.binsha` 三条字符串进入消息目录，`quota.shadow`
     补上译文。新增两条门禁：中文串里禁止出现紧贴汉字的半角标点，以及译文与原文
     逐字相同的键必须在白名单内。
+- [x] 复核上一条的每一条门禁能否真的变红，补掉五条只有断言没有覆盖的：
+  - 公网 edge 的 frame-ancestors 只落在 `${PORTAGE_PUBLIC_HOST}` 一个 vhost。
+    metrics vhost 完全没有 CSP 与 `X-Frame-Options`，API vhost 的三个 IAM
+    location 各写一套 `add_header`，按 nginx 语义替换掉 server 级那套。
+    `check_frame_protection` 只读公开 vhost，因此校验的正是唯一正确的那个。
+    现在遍历每个做反向代理的 server 块及其自带 header 的 location。
+  - `ClaimPhaseWork` 在事务开头就取 phase 计数器行，再去锁 `phase_work_items`；
+    恢复循环的取消路径先锁 `phase_work_items`、最后取计数器。两条路径各自有序，
+    合起来仍是环。`withDeferredLeaseExpiries` 把计数器写入统一推到事务末尾，
+    并以 AST 门禁断言 `recordLeaseExpiry` 只有 `flushLeaseExpiries` 一个调用方。
+  - 中文标点门禁的字符类不含括号，八条字符串因此带着半角括号通过，其中
+    `set.cicustom` 与 `set.hostkey` 正是上一轮改过逗号、留下括号的那两条。
+  - `/readyz` 的结构门禁只守 `handleReadyz`/`handleLivez`/`refuseReadiness`，
+    而真正推导对外 reason 的 `readyzLedgerReason` 不在其中，把它的返回值改成
+    `last_error` 两条用例照样全绿。现在连同调用点实参与非 `Encode` 的写体一起守。
+  - `portage_distcc_slots_total` 是 gauge 却留着 counter 后缀，与上一轮改名要修的
+    是同一个缺陷；它声明在 `writeSchedulerPrometheus`，逐条点名的断言够不到。
+    门禁改为对处理器输出的每一条 distcc gauge 成立。
 - [x] 在干净树上重新生成 `evidence/public-beta/repository-gate.json`。上一份的
   `repository_head` 不在本分支历史里，`working_tree_dirty` 为 true，且其后 nginx
   模板又被改过两次。当前这份 10 项全 pass，`working_tree_dirty` 为 false，
