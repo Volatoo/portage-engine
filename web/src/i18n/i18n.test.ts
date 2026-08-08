@@ -206,8 +206,18 @@ describe('Chinese punctuation', () => {
    * Bounded to marks that touch a Chinese character on either side, so an
    * English clause, a URL, `sha256:`, an `10.0.0.10:8080` and a `{count}`
    * placeholder are all left alone.
+   *
+   * Parentheses count. The first version of this check listed only the marks
+   * that separate clauses, and eight strings kept their half-width brackets
+   * through the sweep that normalized every comma around them \u2014 two of them
+   * edited by that sweep \u2014 so the catalogue still read as two authors while the
+   * check reported none. The Chinese class covers the full-width forms as well,
+   * because a half-width mark following `\uff09` touches no character in the CJK
+   * ideograph range and was invisible for the same reason.
    */
-  const ADJACENT = /[\u3400-\u9fff][,;:?!]|[,;:?!][\u3400-\u9fff]/;
+  const CHINESE = '[\\u3400-\\u9fff\\uff01-\\uff65]';
+  const HALF_WIDTH = '[,;:?!()]';
+  const ADJACENT = new RegExp(`${CHINESE}${HALF_WIDTH}|${HALF_WIDTH}${CHINESE}`);
 
   it('uses full-width marks inside Chinese sentences', () => {
     const offenders = Object.entries(ZH)
