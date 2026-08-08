@@ -18,25 +18,6 @@
  * this function.
  */
 
-/**
- * The three strings on this page the message layer does not carry.
- *
- * The builder-binary digest field is the only one of the forty-five whose
- * label, hint and placeholder were written straight into the Go markup with no
- * `data-i18n` attribute, so they rendered in English on the Chinese page of the
- * console this replaces too. Keeping them is parity; retyping them into forty
- * translated siblings without saying so would not be. They are gathered here,
- * in one block, so moving them into `src/i18n/messages.en.ts` and
- * `messages.zh.ts` is a cut and a paste — the keys they want are named in the
- * handoffs as `set.binsha`, `set.binsha.hint` and `set.binsha.placeholder`.
- */
-export const UNTRANSLATED = {
-  binsha: 'Builder binary SHA-256',
-  binshaHint:
-    'Required when using a URL; the instance verifies it before installing or running the binary',
-  binshaPlaceholder: '64 lowercase hexadecimal characters',
-} as const;
-
 const ENTITIES: Readonly<Record<string, string>> = {
   '&amp;': '&',
   '&lt;': '<',

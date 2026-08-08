@@ -39,5 +39,5 @@ export const ZH_PLURALS: Partial<Record<PluralKey, Partial<Record<PluralCategory
   'builds.count': { other: '共 {count} 个任务' },
   'packages.count': { other: '共 {count} 个已发布软件包' },
   'logs.lines': { other: '{count} 行' },
-  'set.testok': { other: '连接成功,发现 {count} 个节点' },
+  'set.testok': { other: '连接成功，发现 {count} 个节点' },
 };

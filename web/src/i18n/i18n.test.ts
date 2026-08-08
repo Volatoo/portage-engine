@@ -155,6 +155,71 @@ describe('the source catalogue is the key set', () => {
       .sort();
     expect(untranslated).toEqual([]);
   });
+
+  /**
+   * The keys whose Chinese value is the English one, character for character.
+   *
+   * Key parity cannot see this and the coverage floor counts it as translated:
+   * the key is present and has a value, and the value is English. That is how
+   * `quota.shadow` shipped as ` shadow ` next to a translated `活跃`, in the one
+   * line of the project quota card that names two readings side by side.
+   *
+   * The nine below are the ones that are meant to be identical — product names,
+   * a Gentoo term the rest of this catalogue also leaves in English, and three
+   * abbreviations no reader expands differently in Chinese. A whole-array
+   * equality rather than a count, for the same reason as the check above: a new
+   * one lands here by name.
+   */
+  it('leaves English in place only where English is the term', () => {
+    const identical = Object.keys(EN)
+      .filter((key) => key in ZH && ZH[key as MessageKey] === EN[key as MessageKey])
+      .filter((key) => /[A-Za-z]/.test(EN[key as MessageKey]))
+      .sort();
+    expect(identical).toEqual([
+      'detail.profile',
+      'mon.gateway',
+      'mon.gateway.protocol.version',
+      'packages.profile',
+      'quota.cpu',
+      'set.aws',
+      'set.gcp',
+      'set.pve',
+      'th.ip',
+    ]);
+  });
+});
+
+describe('Chinese punctuation', () => {
+  /**
+   * Chinese sentences take Chinese punctuation.
+   *
+   * This is not a preference: a half-width comma against a Chinese character
+   * renders without the space the glyph is designed to carry, so `实例,本控制台`
+   * sets tighter than the `，` beside it and the catalogue reads as two authors.
+   * Sixty-three strings were written this way against a hundred-odd that were
+   * not, which is what makes it a defect rather than a house style.
+   *
+   * Bounded to marks that touch a Chinese character on either side, so an
+   * English clause, a URL, `sha256:`, an `10.0.0.10:8080` and a `{count}`
+   * placeholder are all left alone.
+   */
+  const ADJACENT = /[\u3400-\u9fff][,;:?!]|[,;:?!][\u3400-\u9fff]/;
+
+  it('uses full-width marks inside Chinese sentences', () => {
+    const offenders = Object.entries(ZH)
+      .filter(([, value]) => ADJACENT.test(value))
+      .map(([key]) => key)
+      .sort();
+    expect(offenders).toEqual([]);
+  });
+
+  it('uses them in the plural catalogue too', () => {
+    const offenders = Object.entries(ZH_PLURALS)
+      .filter(([, forms]) => Object.values(forms).some((form) => ADJACENT.test(form ?? '')))
+      .map(([key]) => key)
+      .sort();
+    expect(offenders).toEqual([]);
+  });
 });
 
 describe('placeholder parity', () => {
