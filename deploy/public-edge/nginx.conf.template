@@ -73,10 +73,21 @@ server {
     add_header X-Content-Type-Options nosniff always;
     add_header Referrer-Policy no-referrer always;
     add_header Permissions-Policy "camera=(), geolocation=(), microphone=()" always;
+    # /device approves a pending CLI code with one click and mints a session with
+    # the approver's acr and amr. The control plane sends these itself; they are
+    # repeated here so an edge in front of an older build still refuses framing.
+    add_header Content-Security-Policy "frame-ancestors 'none'" always;
+    add_header X-Frame-Options DENY always;
 
     # Public Beta intentionally has no browser or API route to WebShell.
+    #
+    # The prefix matches, not exact ones: the old console moved under /legacy
+    # (internal/dashboard/console.go) and kept its own /shell/ page there, and
+    # /api/shell gained a /preflight sibling. An exact `= /api/shell` left both
+    # of those reachable while this block still read as complete.
     location ^~ /shell/ { return 404; }
-    location = /api/shell { return 404; }
+    location ^~ /legacy/shell/ { return 404; }
+    location ^~ /api/shell { return 404; }
     location = /api/v1/instances/shell { return 404; }
     location ^~ /verify-binhost/ { return 404; }
     location = /metrics { return 404; }
@@ -117,11 +128,16 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Request-ID $request_id;
         proxy_cookie_flags ~ secure httponly samesite=lax;
+        # Repeated, not inherited: one add_header in a location replaces the whole
+        # server-level set, so anything missing from this list is missing from
+        # every /auth/ response.
         add_header Cache-Control "no-store" always;
         add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
         add_header X-Content-Type-Options nosniff always;
         add_header Referrer-Policy no-referrer always;
         add_header Permissions-Policy "camera=(), geolocation=(), microphone=()" always;
+        add_header Content-Security-Policy "frame-ancestors 'none'" always;
+        add_header X-Frame-Options DENY always;
     }
 
     location / {
@@ -156,6 +172,8 @@ server {
     add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
     add_header X-Content-Type-Options nosniff always;
     add_header Referrer-Policy no-referrer always;
+    add_header Content-Security-Policy "frame-ancestors 'none'" always;
+    add_header X-Frame-Options DENY always;
 
     location = /api/v1/instances/shell { return 404; }
     location ^~ /verify-binhost/ { return 404; }

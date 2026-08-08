@@ -1310,6 +1310,53 @@ func TestShellPreflightReportsAnUnsatisfiableRoute(t *testing.T) {
 	}
 }
 
+// TestEveryResponseRefusesToBeFramed: /device approves a pending CLI code with
+// one click and mints a session carrying the approver's acr and amr, so a page
+// that can be framed is a page where an overlay borrows an operator's identity
+// from one mis-aimed click. Asserted on the signed-out redirect as well, because
+// a login page that can be framed is the same surface one navigation earlier.
+func TestEveryResponseRefusesToBeFramed(t *testing.T) {
+	cfg := &config.DashboardConfig{
+		ServerURL: "http://localhost:8080", AuthEnabled: true,
+		JWTSecret: "test-secret-that-is-at-least-32-chars-long",
+		AdminUser: "admin", AdminPassword: "password",
+	}
+	dashboard := New(cfg)
+	session, err := signToken(cfg.JWTSecret, "admin", time.Now(), time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct {
+		name    string
+		path    string
+		session bool
+	}{
+		{"the device approval page", "/device?user_code=ABCD-EFGH", true},
+		{"the sign-in page", "/login", false},
+		{"a signed-out page, which answers with a redirect", "/settings", false},
+		{"the legacy console", "/legacy/overview", true},
+		{"a path no route claims", "/not-a-route", true},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodGet, testCase.path, nil)
+			if testCase.session {
+				request.AddCookie(&http.Cookie{Name: sessionCookie, Value: session})
+			}
+			recorder := httptest.NewRecorder()
+			dashboard.Router().ServeHTTP(recorder, request)
+			header := recorder.Result().Header
+			if got := header.Get("X-Frame-Options"); got != "DENY" {
+				t.Errorf("X-Frame-Options=%q, want DENY (status %d)", got, recorder.Code)
+			}
+			if got := header.Get("Content-Security-Policy"); got != "frame-ancestors 'none'" {
+				t.Errorf("Content-Security-Policy=%q, want frame-ancestors 'none'", got)
+			}
+		})
+	}
+}
+
 func TestBinpkgProxyStreamsPastTheControlPlaneDeadline(t *testing.T) {
 	const payload = "GENTOO-BINARY-PACKAGE-BODY"
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
