@@ -72,10 +72,14 @@ type Server struct {
 	publicStatusMu       sync.Mutex
 	publicStatusCache    publicServiceStatus
 	publicStatusUntil    time.Time
-	ledgerStop           chan struct{}
-	ledgerWG             sync.WaitGroup
-	ledgerPruneOnce      sync.Once
-	ledgerStaleAfter     time.Duration
+	// The last private readiness detail written to the log, so a probe running
+	// every few seconds through an outage does not reprint the same line.
+	readyzMu         sync.Mutex
+	readyzLastDetail string
+	ledgerStop       chan struct{}
+	ledgerWG         sync.WaitGroup
+	ledgerPruneOnce  sync.Once
+	ledgerStaleAfter time.Duration
 	// The read-only ledger consistency check and its schedule. The mutex covers
 	// the whole run rather than just the due time, because the boot-time check
 	// and the reconciler goroutine can reach it at once and a second concurrent
@@ -1503,56 +1507,108 @@ func (s *Server) checkLedgerHealth() (bool, map[string]interface{}) {
 	}
 }
 
+// readyzReasons is the complete vocabulary /readyz may publish, and the only
+// strings the handler is allowed to put in a response body.
+//
+// The probe is anonymous by design — publicControlPlanePath lets a load
+// balancer and a container runtime reach it without a credential — so every
+// byte it writes is public. It used to write databaseHealth.Reason and
+// err.Error() straight through, and those carry the pgx connection string's
+// host, user and database name, so an unreachable database published the
+// internal topology to anyone who asked. A probe only has to say whether to
+// route traffic here and which subsystem to go and look at; the detail that
+// identifies the actual failure belongs to the operator, and reaches them
+// through the process log and the authenticated /api/v1/health.
+//
+// readyzGateTestVocabulary in server_test.go asserts this list is exhaustive.
+var readyzReasons = struct {
+	storage, database, projection, ledgerWrite,
+	notCompared, inconsistent, metadata string
+}{
+	storage:      "storage unavailable",
+	database:     "database unavailable",
+	projection:   "job projection is stale",
+	ledgerWrite:  "job ledger write failed",
+	notCompared:  "job ledger consistency check has not run",
+	inconsistent: "job ledger is inconsistent",
+	metadata:     "artifact metadata integrity check failed",
+}
+
+// readyzLedgerReason names which of checkLedgerHealth's four independent
+// failures is being reported.
+//
+// The order is by how much of the ledger each one invalidates rather than by
+// how it reads: a projection that stopped refreshing makes every other verdict
+// a statement about data nobody is loading any more, and a write that failed
+// makes the comparison that follows it a comparison against rows that were
+// never written. The unreported causes are not lost — they are all in the
+// status map the authenticated /api/v1/health returns.
+func readyzLedgerReason(status map[string]interface{}) string {
+	if stale, _ := status["projection_stale"].(bool); stale {
+		return readyzReasons.projection
+	}
+	if lastError, _ := status["last_error"].(string); lastError != "" {
+		return readyzReasons.ledgerWrite
+	}
+	if stale, _ := status["consistency_stale"].(bool); stale {
+		return readyzReasons.notCompared
+	}
+	return readyzReasons.inconsistent
+}
+
+// refuseReadiness answers the probe with a public reason and keeps the private
+// detail for the log.
+//
+// The log write is deduplicated on the detail itself rather than rate-limited
+// by time: a probe runs every few seconds for as long as an outage lasts, and
+// the second identical line tells an operator nothing the first did not. A
+// detail that changes — a ping failure becoming a schema mismatch — is a
+// different fact and is written the moment it appears.
+func (s *Server) refuseReadiness(w http.ResponseWriter, reason, detail string) {
+	if detail != "" && detail != reason {
+		s.readyzMu.Lock()
+		changed := detail != s.readyzLastDetail
+		s.readyzLastDetail = detail
+		s.readyzMu.Unlock()
+		if changed {
+			log.Printf("Readiness refused (%s): %s", reason, detail)
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusServiceUnavailable)
+	_ = json.NewEncoder(w).Encode(map[string]string{"status": "not ready", "reason": reason})
+}
+
 // handleReadyz checks if the server is ready to accept traffic.
 // Returns 200 if ready, 503 if not.
 func (s *Server) handleReadyz(w http.ResponseWriter, _ *http.Request) {
 	storageOK := s.checkStorageHealth()
 	if !storageOK {
-		w.WriteHeader(http.StatusServiceUnavailable)
-		_ = json.NewEncoder(w).Encode(map[string]string{"status": "not ready", "reason": "storage unavailable"})
+		s.refuseReadiness(w, readyzReasons.storage, "")
 		return
 	}
 	if s.config.Database.Required || s.jobLedger != nil {
 		databaseHealth := s.checkDatabaseHealth()
 		if !databaseHealth.OK {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusServiceUnavailable)
-			_ = json.NewEncoder(w).Encode(map[string]string{"status": "not ready", "reason": databaseHealth.Reason})
+			s.refuseReadiness(w, readyzReasons.database, databaseHealth.Reason)
 			return
 		}
 	}
 	if s.jobLedger != nil {
 		if ledgerOK, ledgerStatus := s.checkLedgerHealth(); !ledgerOK {
-			reason, _ := ledgerStatus["last_error"].(string)
-			if stale, _ := ledgerStatus["projection_stale"].(bool); stale && reason == "" {
-				reason = "PostgreSQL job projection is stale"
-			}
-			// Distinguished from a divergence because they call for opposite
-			// actions: a stale check means nobody has compared the ledger lately
-			// and the operator should find out why the check stopped, while an
-			// inconsistent one means the comparison ran and disagreed.
-			if stale, _ := ledgerStatus["consistency_stale"].(bool); stale && reason == "" {
-				reason = "PostgreSQL job ledger consistency check has not run"
-			}
-			if reason == "" {
-				reason = "job ledger reconciliation is inconsistent"
-			}
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusServiceUnavailable)
-			_ = json.NewEncoder(w).Encode(map[string]string{"status": "not ready", "reason": reason})
+			detail, _ := ledgerStatus["last_error"].(string)
+			s.refuseReadiness(w, readyzLedgerReason(ledgerStatus), detail)
 			return
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		metadata, err := s.jobLedger.RuntimeMetadataStatus(ctx)
 		cancel()
 		if err != nil || metadata.MissingArtifacts > 0 || metadata.CorruptArtifacts > 0 {
-			reason := "artifact metadata integrity check failed"
+			detail := ""
 			if err != nil {
-				reason = err.Error()
+				detail = err.Error()
 			}
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusServiceUnavailable)
-			_ = json.NewEncoder(w).Encode(map[string]string{"status": "not ready", "reason": reason})
+			s.refuseReadiness(w, readyzReasons.metadata, detail)
 			return
 		}
 	}
