@@ -142,6 +142,12 @@ type Metrics struct {
 	// System metrics
 	goroutines *expvar.Int
 	startTime  time.Time
+
+	// The last value published for each scrape-derived counter series, so a
+	// failed read republishes it instead of a zero Prometheus would read as a
+	// counter reset. See raiseSeries.
+	counterFloorMu sync.Mutex
+	counterFloor   map[string]int64
 }
 
 // SetSchedulerProvider installs a low-cardinality scrape-time snapshot. The
@@ -188,6 +194,7 @@ func New(cfg *Config) *Metrics {
 			httpLatencies:     new(expvar.Map),
 			goroutines:        new(expvar.Int),
 			startTime:         time.Now(),
+			counterFloor:      make(map[string]int64, 8),
 		}
 		registry.enabled.Store(cfg.Enabled)
 
@@ -594,12 +601,12 @@ func (m *Metrics) PrometheusHandler() http.Handler {
 		_, _ = fmt.Fprintf(w, "portage_uptime_seconds %.2f\n", time.Since(m.startTime).Seconds())
 
 		if schedulerProvider != nil {
-			writeSchedulerPrometheus(w, scheduler)
+			m.writeSchedulerPrometheus(w, scheduler)
 		}
 	})
 }
 
-func writeSchedulerPrometheus(
+func (m *Metrics) writeSchedulerPrometheus(
 	w http.ResponseWriter,
 	snapshot SchedulerSnapshot,
 ) {
@@ -647,14 +654,45 @@ func writeSchedulerPrometheus(
 		_, _ = fmt.Fprintf(w, "# TYPE %s gauge\n", gauge.name)
 		_, _ = fmt.Fprintf(w, "%s %d\n", gauge.name, gauge.value)
 	}
-	writeLeaseExpiryPrometheus(w, snapshot)
+	m.writeLeaseExpiryPrometheus(w, snapshot)
 	if snapshot.ProjectionConfigured {
 		writeMonitorProjectionPrometheus(w, snapshot)
 	}
 	writeDistCCPrometheus(w, snapshot)
 }
 
-func writeLeaseExpiryPrometheus(
+// raiseSeries returns the value to publish for a scrape-derived counter series,
+// never below what this process published for it before.
+//
+// The lease expiry counters are read at scrape time from
+// scheduler_lease_expiry_counters, and every read that fails yields the zero
+// value: GetSchedulerStatus returns a status map with no lease_expiries key
+// once RuntimeStatus hits its two-second timeout, and metricInt64 of a missing
+// key is 0. Published as-is, a single slow query looks to Prometheus like a
+// process restart, and increase() over the restart re-counts the whole lifetime
+// total — which is what fired PortageEngineLeaseExpiry without a lease having
+// expired. Republishing the previous reading turns a failed read into no news,
+// which is what it is.
+//
+// The floor is per-process and dies with it, so a genuine reset — a restored
+// backup, a truncated counter table — is picked up by the next start rather
+// than pinned forever. This is the same trade raiseCounter makes for the build
+// census, for the same reason.
+func (m *Metrics) raiseSeries(series string, value int64) int64 {
+	m.counterFloorMu.Lock()
+	defer m.counterFloorMu.Unlock()
+	if m.counterFloor == nil {
+		// `silent`, the pre-New registry, is a bare struct literal.
+		m.counterFloor = make(map[string]int64, 8)
+	}
+	if floor, ok := m.counterFloor[series]; ok && floor > value {
+		return floor
+	}
+	m.counterFloor[series] = value
+	return value
+}
+
+func (m *Metrics) writeLeaseExpiryPrometheus(
 	w http.ResponseWriter,
 	snapshot SchedulerSnapshot,
 ) {
@@ -676,7 +714,8 @@ func writeLeaseExpiryPrometheus(
 		_, _ = fmt.Fprintf(
 			w,
 			"portage_scheduler_lease_expiries_total{lease=%q,result=%q} %d\n",
-			item.lease, item.result, item.value,
+			item.lease, item.result,
+			m.raiseSeries("lease/"+item.lease+"/"+item.result, item.value),
 		)
 	}
 }
@@ -704,7 +743,7 @@ func writeMonitorProjectionPrometheus(
 		w, "portage_monitor_projection_source_watermark_present %d\n",
 		boolMetric(snapshot.ProjectionSourcePresent),
 	)
-	_, _ = fmt.Fprintln(w, "# HELP portage_monitor_projection_lag_seconds How long the cached Monitor snapshot has been serving terminal events it does not contain; zero while current or empty, bounded above by the read-through cache TTL.")
+	_, _ = fmt.Fprintln(w, "# HELP portage_monitor_projection_lag_seconds Age of the cached Monitor snapshot being served, so terminal events newer than it are not in the reading; zero when freshly loaded or empty, bounded above by the read-through cache TTL.")
 	_, _ = fmt.Fprintln(w, "# TYPE portage_monitor_projection_lag_seconds gauge")
 	_, _ = fmt.Fprintf(
 		w, "portage_monitor_projection_lag_seconds %d\n",
@@ -712,35 +751,49 @@ func writeMonitorProjectionPrometheus(
 	)
 }
 
+// writeDistCCPrometheus publishes the compile observations as gauges over the
+// window they are actually read from.
+//
+// CompileMetrics sums compile_observations inside a one-hour window, so these
+// values fall on their own as observations age out of it. They carried a
+// _total suffix and a counter type, which told Prometheus the opposite: every
+// quiet hour read as a counter reset, rate() over one invented a spike out of
+// the drop, and a failed read — the same two-second timeout the lease counters
+// hit — read as a restart. A windowed reading is a gauge, and naming the window
+// in the series is what this file already does for
+// portage_scheduler_worker_decisions_last_hour and the _30d Monitor series.
+//
+// Renaming rather than raising is deliberate: the lease counters are lifetime
+// totals whose previous value is still true, and these are not.
 func writeDistCCPrometheus(
 	w http.ResponseWriter,
 	snapshot SchedulerSnapshot,
 ) {
-	counters := []struct {
+	gauges := []struct {
 		name, help string
 		value      int64
 	}{
-		{"portage_distcc_compile_local_total", "Observed local compiler invocations.", snapshot.DistCCLocalCompiles},
-		{"portage_distcc_compile_remote_total", "Observed remote compiler invocations.", snapshot.DistCCRemoteCompiles},
-		{"portage_distcc_hits_total", "Observed exact-pool compile-slot reservation hits.", snapshot.DistCCHits},
-		{"portage_distcc_fallback_total", "Observed controlled local fallbacks.", snapshot.DistCCFallbacks},
-		{"portage_distcc_network_bytes_total", "Observed distcc network bytes.", snapshot.DistCCNetworkBytes},
-		{"portage_distcc_queue_milliseconds_total", "Observed compile-slot queue milliseconds.", snapshot.DistCCQueueMillis},
+		{"portage_distcc_compile_local_last_hour", "Local compiler invocations observed during the last hour.", snapshot.DistCCLocalCompiles},
+		{"portage_distcc_compile_remote_last_hour", "Remote compiler invocations observed during the last hour.", snapshot.DistCCRemoteCompiles},
+		{"portage_distcc_hits_last_hour", "Exact-pool compile-slot reservation hits observed during the last hour.", snapshot.DistCCHits},
+		{"portage_distcc_fallback_last_hour", "Controlled local fallbacks observed during the last hour.", snapshot.DistCCFallbacks},
+		{"portage_distcc_network_bytes_last_hour", "Distcc network bytes observed during the last hour.", snapshot.DistCCNetworkBytes},
+		{"portage_distcc_queue_milliseconds_last_hour", "Compile-slot queue milliseconds observed during the last hour.", snapshot.DistCCQueueMillis},
 	}
-	for _, counter := range counters {
-		_, _ = fmt.Fprintf(w, "# HELP %s %s\n", counter.name, counter.help)
-		_, _ = fmt.Fprintf(w, "# TYPE %s counter\n", counter.name)
-		_, _ = fmt.Fprintf(w, "%s %d\n", counter.name, counter.value)
+	for _, gauge := range gauges {
+		_, _ = fmt.Fprintf(w, "# HELP %s %s\n", gauge.name, gauge.help)
+		_, _ = fmt.Fprintf(w, "# TYPE %s gauge\n", gauge.name)
+		_, _ = fmt.Fprintf(w, "%s %d\n", gauge.name, gauge.value)
 	}
-	_, _ = fmt.Fprintln(w, "# HELP portage_distcc_failures_total Observed distcc failures by bounded reason.")
-	_, _ = fmt.Fprintln(w, "# TYPE portage_distcc_failures_total counter")
+	_, _ = fmt.Fprintln(w, "# HELP portage_distcc_failures_last_hour Distcc failures observed during the last hour by bounded reason.")
+	_, _ = fmt.Fprintln(w, "# TYPE portage_distcc_failures_last_hour gauge")
 	for _, reason := range []string{
 		"capacity", "connect", "lease-expired", "lease-fenced",
 		"pool-mismatch", "remote-compile", "worker-stale", "policy",
 		"unknown",
 	} {
 		_, _ = fmt.Fprintf(w,
-			"portage_distcc_failures_total{reason=%q} %d\n",
+			"portage_distcc_failures_last_hour{reason=%q} %d\n",
 			reason, snapshot.DistCCFailures[reason],
 		)
 	}
