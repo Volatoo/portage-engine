@@ -117,7 +117,11 @@ describe('the source catalogue is the key set', () => {
     // to live in to 587/618 — thirty-one source strings the port added or
     // uncovered and left for a translator, every one of them named below.
     //
-    // The translator has now written all thirty-one, so the floor is 618/618.
+    // The translator has now written all thirty-one, so the floor is 618/618,
+    // and moving the builder-binary SHA-256 field's label, hint and placeholder
+    // out of the page and into the catalogue makes it 621/621 — three source
+    // strings that arrived translated, which is why the floor moved with them
+    // rather than the coverage dropping.
     // It stays a floor and not an equality: the statement worth making here is
     // still "this cannot get worse", and a source catalogue that grows faster
     // than the translation is a translator's backlog rather than a broken
@@ -126,7 +130,7 @@ describe('the source catalogue is the key set', () => {
     //
     // Written as the fraction rather than as a rounded literal so the floor and
     // the two counts it comes from stay one statement.
-    expect(coverage).toBeGreaterThanOrEqual((618 / 618) * 100);
+    expect(coverage).toBeGreaterThanOrEqual((621 / 621) * 100);
   });
 
   /**
