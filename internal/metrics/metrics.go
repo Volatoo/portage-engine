@@ -646,7 +646,7 @@ func (m *Metrics) writeSchedulerPrometheus(
 		{"portage_capacity_instances_draining", "Actuator-owned persistent executors draining live work.", snapshot.CapacityDraining},
 		{"portage_capacity_instances_deleting", "Actuator-owned persistent executors undergoing exact provider deletion.", snapshot.CapacityDeleting},
 		{"portage_distcc_workers_fresh", "Fresh credential-minimal compile workers.", snapshot.DistCCWorkersFresh},
-		{"portage_distcc_slots_total", "Fresh exact-pool compile slots.", snapshot.DistCCSlotsTotal},
+		{"portage_distcc_slots", "Fresh exact-pool compile slots.", snapshot.DistCCSlotsTotal},
 		{"portage_distcc_slots_leased", "Atomically leased compile slots.", snapshot.DistCCSlotsLeased},
 	}
 	for _, gauge := range gauges {
