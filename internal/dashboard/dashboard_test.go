@@ -1310,6 +1310,105 @@ func TestShellPreflightReportsAnUnsatisfiableRoute(t *testing.T) {
 	}
 }
 
+// TestProxiedStepUpRefusalNamesTheCredentialThatCanSatisfyIt: the control plane
+// writes `error` and `code` and stops — it answers CLI callers and browsers
+// alike, and which credential elevates a session is a property of how that
+// session reaches it. The dashboard knows, so it says so on the way through
+// rather than leaving the console to infer it from a payload that names no
+// principal for a federated session.
+func TestProxiedStepUpRefusalNamesTheCredentialThatCanSatisfyIt(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusPreconditionRequired)
+		_, _ = io.WriteString(w,
+			`{"error":"fresh step-up authentication required","code":"step_up_required"}`)
+	}))
+	defer backend.Close()
+
+	cases := []struct {
+		name               string
+		serverStepUpAPIKey string
+		want               string
+	}{
+		{"an independent step-up key is configured", "independent-step-up-key", "local"},
+		{"the deployment holds no step-up credential", "", "unavailable"},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			cfg := &config.DashboardConfig{
+				ServerURL: backend.URL, AuthEnabled: true,
+				JWTSecret:          "test-secret-that-is-at-least-32-chars-long",
+				AdminUser:          "admin",
+				AdminPassword:      "password",
+				ServerAPIKey:       "primary-key",
+				ServerStepUpAPIKey: testCase.serverStepUpAPIKey,
+			}
+			dashboard := New(cfg)
+			session, err := signToken(cfg.JWTSecret, "admin", time.Now(), time.Hour)
+			if err != nil {
+				t.Fatal(err)
+			}
+			request := httptest.NewRequest(http.MethodDelete,
+				"/api/builds/delete?job_id=00000000-0000-0000-0000-000000000000", nil)
+			request.AddCookie(&http.Cookie{Name: sessionCookie, Value: session})
+			recorder := httptest.NewRecorder()
+			dashboard.Router().ServeHTTP(recorder, request)
+
+			if recorder.Code != http.StatusPreconditionRequired {
+				t.Fatalf("status=%d body=%s, want the refusal relayed unchanged",
+					recorder.Code, recorder.Body.String())
+			}
+			var body map[string]any
+			if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
+				t.Fatalf("relayed body is not JSON: %v (%s)", err, recorder.Body.String())
+			}
+			if body["method"] != testCase.want {
+				t.Errorf("method=%v, want %q", body["method"], testCase.want)
+			}
+			// The control plane's own words survive the annotation: the console
+			// prints them when no credential can help.
+			if body["code"] != "step_up_required" {
+				t.Errorf("code=%v, want the upstream code preserved", body["code"])
+			}
+		})
+	}
+}
+
+// TestProxyLeavesAStatedStepUpMethodAlone: a refusal that already names a method
+// is authoritative. Overwriting it with the session's own answer would send a
+// reader to a credential the control plane has already ruled out.
+func TestProxyLeavesAStatedStepUpMethodAlone(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusPreconditionRequired)
+		_, _ = io.WriteString(w, `{"code":"step_up_required","method":"unavailable"}`)
+	}))
+	defer backend.Close()
+
+	cfg := &config.DashboardConfig{
+		ServerURL: backend.URL, AuthEnabled: true,
+		JWTSecret: "test-secret-that-is-at-least-32-chars-long",
+		AdminUser: "admin", AdminPassword: "password",
+		ServerAPIKey: "primary-key", ServerStepUpAPIKey: "independent-step-up-key",
+	}
+	dashboard := New(cfg)
+	session, err := signToken(cfg.JWTSecret, "admin", time.Now(), time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodDelete,
+		"/api/builds/delete?job_id=00000000-0000-0000-0000-000000000000", nil)
+	request.AddCookie(&http.Cookie{Name: sessionCookie, Value: session})
+	recorder := httptest.NewRecorder()
+	dashboard.Router().ServeHTTP(recorder, request)
+
+	var body map[string]any
+	_ = json.Unmarshal(recorder.Body.Bytes(), &body)
+	if body["method"] != "unavailable" {
+		t.Errorf("method=%v, want the stated unavailable preserved", body["method"])
+	}
+}
+
 // TestEveryResponseRefusesToBeFramed: /device approves a pending CLI code with
 // one click and mints a session carrying the approver's acr and amr, so a page
 // that can be framed is a page where an overlay borrows an operator's identity

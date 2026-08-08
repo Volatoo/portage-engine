@@ -28,6 +28,7 @@ function boot(userCode = 'ABCD-2345'): BootPayload {
     local_login_enabled: false,
     identity_providers: [],
     principal: null,
+    step_up_method: 'local',
     route: { name: 'device', path: '/ui/device', job_id: '', instance_id: '', user_code: userCode },
     asset_base: '/static/ui/',
   };

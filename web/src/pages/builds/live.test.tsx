@@ -378,6 +378,7 @@ const BOOT: BootPayload = {
   local_login_enabled: true,
   identity_providers: [],
   principal: null,
+  step_up_method: 'local',
   route: {
     name: 'build-detail',
     path: '/ui/build/j1',

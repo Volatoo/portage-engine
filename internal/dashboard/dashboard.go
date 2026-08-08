@@ -802,7 +802,8 @@ var shellUpgrader = websocket.Upgrader{
 // plain HTTP before the socket is opened.
 func (d *Dashboard) shellStepUpState(r *http.Request) (bool, string) {
 	session := sessionToken(r)
-	if isFederatedSession(session) {
+	switch method := d.stepUpMethod(r); method {
+	case "federated":
 		// Only the control plane can answer for a federated principal: its
 		// step-up is a property of the platform token's own auth_time, AMR and
 		// ACR, none of which the dashboard ever sees.
@@ -810,11 +811,11 @@ func (d *Dashboard) shellStepUpState(r *http.Request) (bool, string) {
 			strings.TrimRight(d.config.ServerURL, "/")+"/api/v1/iam/me", r,
 		)
 		if err != nil {
-			return false, "federated"
+			return false, method
 		}
 		defer func() { _ = resp.Body.Close() }()
 		if resp.StatusCode != http.StatusOK {
-			return false, "federated"
+			return false, method
 		}
 		var identity struct {
 			Principal struct {
@@ -823,9 +824,29 @@ func (d *Dashboard) shellStepUpState(r *http.Request) (bool, string) {
 		}
 		if err := json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).
 			Decode(&identity); err != nil {
-			return false, "federated"
+			return false, method
 		}
-		return identity.Principal.StepUp, "federated"
+		return identity.Principal.StepUp, method
+	case "unavailable":
+		return false, method
+	default:
+		return d.validLocalStepUp(r, session), method
+	}
+}
+
+// stepUpMethod names the credential that could satisfy a step-up for this
+// session — "federated", "local", or "unavailable" when this deployment holds
+// none — without asking the control plane whether one is already held.
+//
+// Separate from shellStepUpState because the two questions have different costs:
+// whether a federated session is already elevated needs an upstream round trip,
+// and which credential would elevate it needs nothing but the session's own
+// prefix. Every step-up refusal answers the second question, so it has to be
+// cheap; both callers read it from here so they cannot disagree.
+func (d *Dashboard) stepUpMethod(r *http.Request) string {
+	session := sessionToken(r)
+	if isFederatedSession(session) {
+		return "federated"
 	}
 	// A local session travels upstream as SERVER_API_KEY, whose step-up is the
 	// independent SERVER_STEP_UP_API_KEY the dashboard attaches for ten minutes
@@ -835,9 +856,9 @@ func (d *Dashboard) shellStepUpState(r *http.Request) (bool, string) {
 	// rather than leaving the reader with a socket that closes silently.
 	if d.config.ServerStepUpAPIKey == "" || session == "" ||
 		d.config.AdminUser == "" || d.config.AdminPassword == "" {
-		return false, "unavailable"
+		return "unavailable"
 	}
-	return d.validLocalStepUp(r, session), "local"
+	return "local"
 }
 
 // handleShellPreflight lets the shell page establish the step-up credential
@@ -976,6 +997,10 @@ func (d *Dashboard) proxyServerVia(
 	if ct := resp.Header.Get("Content-Type"); ct != "" {
 		w.Header().Set("Content-Type", ct)
 	}
+	if resp.StatusCode == http.StatusPreconditionRequired {
+		d.relayStepUpRefusal(w, r, resp)
+		return
+	}
 	w.WriteHeader(resp.StatusCode)
 	if strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream") {
 		if flusher, ok := w.(http.Flusher); ok {
@@ -984,6 +1009,42 @@ func (d *Dashboard) proxyServerVia(
 		}
 	}
 	_, _ = io.Copy(w, resp.Body)
+}
+
+// relayStepUpRefusal passes a 428 through, naming the credential that could
+// satisfy it when the control plane did not.
+//
+// internal/server/server.go writes `error` and `code` and stops there, because
+// the API server answers CLI callers and browsers alike and the credential is a
+// property of how THIS session reaches it. The console then had to infer the
+// method from the boot payload, and that payload names no principal for a
+// federated session — so an OIDC operator was offered the local administrator
+// password prompt, which their session can never satisfy, and Save, Test
+// Connection, Start Test Build, Delete Job, Clean Up Failed and Revoke All were
+// all unreachable. The dashboard knows the answer from the session prefix alone,
+// so it states it here and the inference is never reached.
+func (d *Dashboard) relayStepUpRefusal(
+	w http.ResponseWriter, r *http.Request, resp *http.Response,
+) {
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	if err != nil {
+		writeBackendError(w, err)
+		return
+	}
+	refusal := map[string]any{}
+	if json.Unmarshal(body, &refusal) != nil {
+		// Not an object this dashboard can add a field to. Relay it exactly as
+		// it arrived rather than inventing a shape the caller did not send.
+		w.WriteHeader(resp.StatusCode)
+		_, _ = w.Write(body)
+		return
+	}
+	if stated, ok := refusal["method"].(string); !ok || stated == "" {
+		refusal["method"] = d.stepUpMethod(r)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(resp.StatusCode)
+	_ = json.NewEncoder(w).Encode(refusal)
 }
 
 type flushingWriter struct {

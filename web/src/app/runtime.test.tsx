@@ -11,7 +11,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { onSessionExpired, request } from '../api/client';
 import { api } from '../api/endpoints';
-import type { ProjectPolicy } from '../api/types';
+import type { ProjectPolicy, StepUpMethod } from '../api/types';
 import type { BootPayload } from '../boot/payload';
 import { MessagesProvider } from '../i18n/context';
 import { ConfirmDialog } from '../pages/builds/parts';
@@ -21,7 +21,7 @@ import { PROJECT_STORAGE_KEY, ProjectScopeContext } from './project';
 import type { ProjectScope } from './project';
 import { CONSOLE_ROUTES } from './routes';
 import type { ConsoleRoute } from './routes';
-import { stepUpMethodFor, useStepUp, withStepUp } from './stepup';
+import { useStepUp, withStepUp } from './stepup';
 
 /**
  * The shared runtime, which is the layer every page consumes and therefore the
@@ -170,6 +170,7 @@ const BOOT: BootPayload = {
   local_login_enabled: true,
   identity_providers: [],
   principal: null,
+  step_up_method: 'local',
   route: { name: 'overview', path: '/ui/overview', job_id: '', instance_id: '', user_code: '' },
   asset_base: '/static/ui/',
 };
@@ -640,15 +641,37 @@ describe('a step-up refusal is satisfied where the write was made', () => {
     expect(reauthenticate).toHaveBeenCalledTimes(1);
   });
 
-  it('reads the session kind off the field the old console read it off', () => {
-    // internal/dashboard/ui.go:1712 sent exactly these two to the provider.
-    expect(stepUpMethodFor('oidc')).toBe('federated');
-    expect(stepUpMethodFor('federated-session')).toBe('federated');
-    expect(stepUpMethodFor('legacy-api-key')).toBe('local');
-    expect(stepUpMethodFor('local-session')).toBe('local');
-    // An unknown kind is asked in place rather than navigated away from: the
-    // dialog can be dismissed, a navigation cannot be undone.
-    expect(stepUpMethodFor('')).toBe('local');
+  it('offers no credential when neither the refusal nor the payload names one', async () => {
+    // The regression this replaces: the method used to be inferred from
+    // `principal.authentication`, and the server sends no principal for a
+    // federated session, so the inference returned 'local' and every OIDC
+    // operator was shown a password prompt their session cannot satisfy.
+    // 'unstated' now means unstated, and an unstated method asks for nothing.
+    const run = vi.fn(() => Promise.resolve(refusal));
+    const elevate = vi.fn(() => Promise.resolve(true));
+    const reauthenticate = vi.fn();
+    const outcome = await withStepUp(run, {
+      elevate,
+      reauthenticate,
+      sessionMethod: () => 'unstated',
+    });
+    expect(elevate).not.toHaveBeenCalled();
+    expect(reauthenticate).not.toHaveBeenCalled();
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(outcome).toEqual(refusal);
+  });
+
+  it('prefers the method the refusal states over the one the session carries', async () => {
+    // The dashboard names the method while relaying the control plane's 428
+    // (relayStepUpRefusal). When it has, the payload's answer is not consulted:
+    // a session that changed kind mid-page must not send the reader to a
+    // credential the refusal already ruled out.
+    const run = vi.fn(() => Promise.resolve({ ...refusal, method: 'federated' as const }));
+    const elevate = vi.fn(() => Promise.resolve(true));
+    const reauthenticate = vi.fn();
+    await withStepUp(run, { elevate, reauthenticate, sessionMethod: () => 'local' });
+    expect(elevate).not.toHaveBeenCalled();
+    expect(reauthenticate).toHaveBeenCalledTimes(1);
   });
 
   it('does neither when the deployment holds no step-up credential at all', async () => {
@@ -729,8 +752,10 @@ describe('answering the credential prompt writes only what was asked for', () =>
 /* ---- modality ------------------------------------------------------------ */
 
 /** A page with one control, which raises a credential prompt when activated. */
-function StepUpHarness({ authentication = 'local-session' }: { authentication?: string } = {}) {
-  const stepUp = useStepUp(authentication);
+function StepUpHarness({
+  sessionMethod = 'local',
+}: { sessionMethod?: StepUpMethod | 'unstated' } = {}) {
+  const stepUp = useStepUp(sessionMethod);
   return (
     <>
       <button

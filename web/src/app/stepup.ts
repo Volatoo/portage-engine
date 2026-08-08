@@ -42,28 +42,21 @@ export interface StepUpHandlers {
   /** Hands the reader to the identity provider for a fresh session. */
   reauthenticate: () => void;
   /**
-   * How THIS session was established, for the 428s that do not say.
+   * The credential this session can offer, for the 428s that do not say.
    *
-   * The control plane's own step-up refusal carries no `method`, so without
-   * this every deployment would be treated alike — and treating them alike is
-   * what a federated default did: a legacy or local operator lost a filled-in
-   * settings form to a navigation that only a provider round-trip needs.
+   * The control plane's own refusal carries no `method` — it answers CLI callers
+   * and browsers alike, and the credential is a property of how this session
+   * reaches it — so the dashboard names it while relaying (relayStepUpRefusal in
+   * internal/dashboard/dashboard.go) and states the same fact in the boot payload
+   * for the paths that do not go through that relay.
+   *
+   * Not inferred here any more. The console used to derive it from
+   * `principal.authentication`, and the boot payload names no principal for a
+   * federated session, so the inference returned `local` for exactly the
+   * operators who have no local password — leaving six controls unusable on every
+   * OIDC deployment.
    */
-  sessionMethod: () => StepUpMethod;
-}
-
-/**
- * The credential that can satisfy a step-up, given how the session was made.
- *
- * `principal.authentication` in internal/server/iam.go spells four kinds. Two
- * of them are held by an identity provider and can only be refreshed there;
- * the other two are held by this deployment and can be re-entered in place.
- * internal/dashboard/ui.go:1712 split them the same way and on the same field.
- */
-export function stepUpMethodFor(authentication: string): StepUpMethod {
-  return authentication === 'oidc' || authentication === 'federated-session'
-    ? 'federated'
-    : 'local';
+  sessionMethod: () => StepUpMethod | 'unstated';
 }
 
 /**
@@ -83,10 +76,13 @@ export async function withStepUp<T>(
     return first;
   }
   const method = first.method === 'unstated' ? handlers.sessionMethod() : first.method;
-  if (method === 'unavailable') {
-    // Not a failure to authenticate: the deployment holds no credential that
-    // could satisfy this. Asking for one would be asking for something that
-    // cannot work, so the server's own sentence is all there is.
+  if (method === 'unavailable' || method === 'unstated') {
+    // `unavailable` is not a failure to authenticate: the deployment holds no
+    // credential that could satisfy this. `unstated` is neither the refusal nor
+    // the payload naming one, which is a server older than this bundle. Asking
+    // in either case is asking for something that cannot work — and asking
+    // anyway is how a federated operator was shown a local password prompt. The
+    // server's own sentence is all there is.
     return first;
   }
   if (method === 'federated') {
@@ -127,7 +123,7 @@ export interface StepUp {
  * in-flight flag clear, which is the second activation the flag exists to
  * discard. Everything that does change is read through a ref.
  */
-export function useStepUp(authentication: string): StepUp {
+export function useStepUp(sessionMethod: StepUpMethod | 'unstated'): StepUp {
   const fieldID = useId();
   const loginPath = useHref('/login');
   const here = useHref(useLocation());
@@ -137,9 +133,9 @@ export function useStepUp(authentication: string): StepUp {
   const [failed, setFailed] = useState(false);
   /** Resolves the promise `elevate` is waiting on: true elevated, false declined. */
   const answer = useRef<((elevated: boolean) => void) | null>(null);
-  const target = useRef({ loginPath, here, authentication });
+  const target = useRef({ loginPath, here, sessionMethod });
   useEffect(() => {
-    target.current = { loginPath, here, authentication };
+    target.current = { loginPath, here, sessionMethod };
   });
 
   const settle = useCallback((elevated: boolean) => {
@@ -159,7 +155,7 @@ export function useStepUp(authentication: string): StepUp {
             setFailed(false);
             setAsking(true);
           }),
-        sessionMethod: () => stepUpMethodFor(target.current.authentication),
+        sessionMethod: () => target.current.sessionMethod,
         reauthenticate: () => {
           // prompt=login at the provider and then back to the page the write was
           // made from, so the reader lands where they were rather than on an

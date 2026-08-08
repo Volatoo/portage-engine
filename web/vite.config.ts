@@ -28,7 +28,12 @@ const DEV_BOOT: BootPayload = {
   local_login_enabled: false,
   identity_providers: [],
   principal: null,
-  route: { name: 'overview', path: '/ui/overview', job_id: '', instance_id: '', user_code: '' },
+  // No auth in `vite dev`, so no session and nothing that could elevate one.
+  step_up_method: 'unavailable',
+  // The path the console is served at now. It was /ui/overview until the console
+  // was promoted to the top level, which left `vite dev` handing the page a
+  // route whose path disagreed with the address bar.
+  route: { name: 'overview', path: '/overview', job_id: '', instance_id: '', user_code: '' },
   asset_base: ASSET_BASE,
 };
 
