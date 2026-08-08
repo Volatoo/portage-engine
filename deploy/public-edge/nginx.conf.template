@@ -190,10 +190,15 @@ server {
         proxy_set_header X-Forwarded-For $remote_addr;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Request-ID $request_id;
+        # Repeated, not inherited: this set replaces the server-level one, so the
+        # framing refusal has to be restated here or these IAM responses ship
+        # without it.
         add_header Cache-Control "no-store" always;
         add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
         add_header X-Content-Type-Options nosniff always;
         add_header Referrer-Policy no-referrer always;
+        add_header Content-Security-Policy "frame-ancestors 'none'" always;
+        add_header X-Frame-Options DENY always;
     }
 
     # The poll endpoint is the one part of the device flow whose request rate is
@@ -215,6 +220,8 @@ server {
         add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
         add_header X-Content-Type-Options nosniff always;
         add_header Referrer-Policy no-referrer always;
+        add_header Content-Security-Policy "frame-ancestors 'none'" always;
+        add_header X-Frame-Options DENY always;
     }
 
     # Device authorization and token polling are anonymous, write-backed IAM
@@ -234,6 +241,8 @@ server {
         add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
         add_header X-Content-Type-Options nosniff always;
         add_header Referrer-Policy no-referrer always;
+        add_header Content-Security-Policy "frame-ancestors 'none'" always;
+        add_header X-Frame-Options DENY always;
     }
 
     location / {
@@ -267,6 +276,8 @@ server {
 
     add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
     add_header X-Content-Type-Options nosniff always;
+    add_header Content-Security-Policy "frame-ancestors 'none'" always;
+    add_header X-Frame-Options DENY always;
 
     location = /metrics/prometheus {
         auth_basic "Portage metrics";

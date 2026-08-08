@@ -262,29 +262,56 @@ check_webshell_denied() {
 # click. The control plane sends these headers itself; the edge repeats them, and
 # a location that writes its own add_header set replaces the server-level one
 # entirely, so every such location has to carry them too.
+#
+# Scoped to every server block that proxies, not to the public vhost alone. The
+# earlier version read only ${PORTAGE_PUBLIC_HOST} and reported pass while the
+# metrics vhost carried no frame headers at all and the three IAM locations on
+# the API vhost replaced the server-level set without repeating them.
 check_frame_protection() {
   local config="${repo_root}/deploy/public-edge/nginx.conf.template"
-  local block
-  block="$(public_server_block "${config}")"
-  [[ -n "${block}" ]] || return 1
-  rg -q "add_header Content-Security-Policy \"frame-ancestors 'none'\" always;" <<<"${block}" &&
-    rg -q 'add_header X-Frame-Options DENY always;' <<<"${block}" || return 1
-
-  awk '
-    /^    location .* \{$/ { buffer = ""; inside = 1; next }
-    inside { buffer = buffer $0 "\n" }
-    inside && /^    \}$/ {
-      inside = 0
-      if (buffer !~ /add_header /) next
-      if (buffer !~ /add_header Content-Security-Policy "frame-ancestors/ ||
-          buffer !~ /add_header X-Frame-Options DENY always;/) {
-        print "location writes add_header without repeating the frame headers" > "/dev/stderr"
-        print buffer > "/dev/stderr"
-        bad = 1
+  awk \
+    -v csp="add_header Content-Security-Policy \"frame-ancestors 'none'\" always;" \
+    -v xfo='add_header X-Frame-Options DENY always;' '
+    function report(message) { print message > "/dev/stderr"; bad = 1 }
+    /^server \{/ { server = ""; name = "(unnamed)"; in_server = 1; in_location = 0; next }
+    in_server {
+      server = server $0 "\n"
+      if ($0 ~ /^    server_name /) {
+        name = $0
+        sub(/^ *server_name /, "", name)
+        sub(/;$/, "", name)
+      }
+      if (in_location) {
+        location = location $0 "\n"
+        if ($0 ~ /^    \}$/) {
+          in_location = 0
+          # A location without its own add_header inherits the server-level set.
+          if (index(location, "add_header ") == 0) next
+          if (index(location, csp) == 0 || index(location, xfo) == 0)
+            report("server " name ": " location_name " writes add_header without repeating the frame headers")
+        }
+        next
+      }
+      # One-line locations carry their whole body on the same line and never
+      # open a header set; only the multi-line form is collected.
+      if ($0 ~ /^    location .* \{$/) {
+        location = ""
+        location_name = $0
+        sub(/^ */, "", location_name)
+        sub(/ \{$/, "", location_name)
+        in_location = 1
+        next
+      }
+      if ($0 ~ /^\}/) {
+        in_server = 0
+        # Redirect, reject, and handshake-only blocks answer no framed content.
+        if (index(server, "proxy_pass") == 0) next
+        if (index(server, csp) == 0 || index(server, xfo) == 0)
+          report("server " name ": server block does not set the frame headers")
       }
     }
     END { exit bad ? 1 : 0 }
-  ' <<<"${block}"
+  ' "${config}"
 }
 
 check_documented_boundary() {
