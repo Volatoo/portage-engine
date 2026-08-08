@@ -13,6 +13,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/google/uuid"
+
+	"github.com/slchris/portage-engine/internal/distcc"
 )
 
 // MaxBuildRequestBodyBytes is the largest JSON build request accepted by the
@@ -535,6 +537,37 @@ func validateBoundedInt(value string, minValue, maxValue int, key string) error 
 	return nil
 }
 
+// validateCompileLease admits the scheduler-issued compile-slot reservation the
+// request carries, if it carries one.
+//
+// Expiry is checked apart from the shape, and only refuses the request under a
+// blocked fallback policy. A reservation that ran out between being minted and
+// this build being admitted is a scheduling delay; refusing the request turns
+// it into a failed build, and it did — for a request the builder was ready to
+// run locally, since configureDistCC already takes the controlled local
+// fallback when Authorize rejects the lease for exactly this reason. Under a
+// blocked policy the operator asked for the opposite, and a refusal here is the
+// earliest and clearest place to give it to them.
+func validateCompileLease(req *LocalBuildRequest) error {
+	lease := req.CompileLease
+	if lease == nil {
+		return nil
+	}
+	if err := lease.ValidateShape(); err != nil {
+		return fmt.Errorf("invalid distcc lease: %w", err)
+	}
+	if lease.Expired(time.Now()) && lease.FallbackPolicy == distcc.FallbackBlocked {
+		return fmt.Errorf("invalid distcc lease: %w", distcc.ErrLeaseExpired)
+	}
+	if req.ProjectID == "" ||
+		lease.Pool.ProjectTrustDomain != req.ProjectID ||
+		lease.AttemptID != req.AttemptID ||
+		lease.AttemptFence != req.AttemptFence {
+		return fmt.Errorf("distcc lease does not match the claimed project/attempt")
+	}
+	return nil
+}
+
 // validateLocalBuildRequest validates every untrusted field before any local
 // native executor can queue it.
 func validateLocalBuildRequest(req *LocalBuildRequest) error {
@@ -574,16 +607,8 @@ func validateLocalBuildRequest(req *LocalBuildRequest) error {
 	if req.AttemptFence < 0 || (req.AttemptID == "") != (req.AttemptFence == 0) {
 		return fmt.Errorf("invalid build attempt fence")
 	}
-	if req.CompileLease != nil {
-		if err := req.CompileLease.Validate(time.Now()); err != nil {
-			return fmt.Errorf("invalid distcc lease: %w", err)
-		}
-		if req.ProjectID == "" ||
-			req.CompileLease.Pool.ProjectTrustDomain != req.ProjectID ||
-			req.CompileLease.AttemptID != req.AttemptID ||
-			req.CompileLease.AttemptFence != req.AttemptFence {
-			return fmt.Errorf("distcc lease does not match the claimed project/attempt")
-		}
+	if err := validateCompileLease(req); err != nil {
+		return err
 	}
 	if len(req.RepositoryIDs) > maxRepositories {
 		return fmt.Errorf("too many repository IDs")

@@ -1,9 +1,12 @@
 package builder
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/slchris/portage-engine/internal/distcc"
 )
 
 func TestValidatePackageSpec_Valid(t *testing.T) {
@@ -277,5 +280,97 @@ func TestValidateLocalBuildRequest_RejectsInjection(t *testing.T) {
 	}
 	if err := validateLocalBuildRequest(ok); err != nil {
 		t.Errorf("valid request rejected: %v", err)
+	}
+}
+
+// distccTestLease is a well-formed lease. Every case below changes one fact.
+func distccTestLease(t *testing.T, expiresAt time.Time, fallback string) *distcc.Lease {
+	t.Helper()
+	pool := distcc.Pool{
+		Architecture: "amd64", CHOST: "x86_64-pc-linux-gnu",
+		CompilerDigest:           "sha256:" + strings.Repeat("a", 64),
+		ToolchainImageGeneration: "gentoo-g1", CPUFeatures: []string{"avx2"},
+		NetworkZone:        "build-a",
+		ProjectTrustDomain: "6f0b8f0a-6a4e-4e0e-9f2f-2a0b6f1f4c11",
+	}
+	poolID, err := pool.ID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &distcc.Lease{
+		ID: "lease-a", WorkerID: "worker-a", WorkerEndpoint: "10.44.0.9:3632",
+		BuilderID: "builder-a", BuilderNetworkIdentity: "worker-cert:a",
+		AttemptID: "8d6a1f6c-9d0d-4a4f-9a29-1f1a0d2b3c44", AttemptFence: 5,
+		Fence: 7, Slots: 2, PoolID: poolID, Pool: pool,
+		FallbackPolicy: fallback, ExpiresAt: expiresAt,
+	}
+}
+
+// TestAnExpiredLeaseFailsTheBuildOnlyUnderABlockedFallback covers the request
+// that waited longer than its compile-slot reservation.
+//
+// Admission used to run the whole lease through Validate, which reports expiry,
+// so a scheduling delay turned into a rejected request and a failed build — for
+// a build the builder was ready to compile locally, since configureDistCC
+// already takes the controlled local fallback when Authorize refuses the lease
+// for the very same reason. Under a blocked policy the operator asked for the
+// opposite, and refusing at admission is the earliest place to give it to them.
+func TestAnExpiredLeaseFailsTheBuildOnlyUnderABlockedFallback(t *testing.T) {
+	expired := time.Now().Add(-time.Minute)
+	live := time.Now().Add(time.Minute)
+	for _, test := range []struct {
+		name       string
+		expiresAt  time.Time
+		fallback   string
+		wantReject bool
+	}{
+		{name: "live lease, local fallback", expiresAt: live, fallback: distcc.FallbackLocal},
+		{name: "live lease, blocked fallback", expiresAt: live, fallback: distcc.FallbackBlocked},
+		{
+			name:      "expired lease degrades under a local fallback",
+			expiresAt: expired, fallback: distcc.FallbackLocal,
+		},
+		{
+			name:      "expired lease is refused under a blocked fallback",
+			expiresAt: expired, fallback: distcc.FallbackBlocked, wantReject: true,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			lease := distccTestLease(t, test.expiresAt, test.fallback)
+			req := &LocalBuildRequest{
+				PackageName: "sys-devel/gcc",
+				ProjectID:   lease.Pool.ProjectTrustDomain,
+				AttemptID:   lease.AttemptID, AttemptFence: lease.AttemptFence,
+				CompileLease: lease,
+			}
+			err := validateLocalBuildRequest(req)
+			if test.wantReject {
+				if err == nil || !errors.Is(err, distcc.ErrLeaseExpired) {
+					t.Fatalf("blocked fallback accepted an expired lease: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("rejected an admissible request: %v", err)
+			}
+		})
+	}
+}
+
+// A malformed lease is still refused whatever the fallback policy says: the
+// fallback covers a reservation that ran out, not one that was never coherent.
+func TestAMalformedLeaseIsRefusedUnderEveryFallbackPolicy(t *testing.T) {
+	for _, fallback := range []string{distcc.FallbackLocal, distcc.FallbackBlocked} {
+		lease := distccTestLease(t, time.Now().Add(time.Minute), fallback)
+		lease.Pump = true
+		req := &LocalBuildRequest{
+			PackageName: "sys-devel/gcc",
+			ProjectID:   lease.Pool.ProjectTrustDomain,
+			AttemptID:   lease.AttemptID, AttemptFence: lease.AttemptFence,
+			CompileLease: lease,
+		}
+		if err := validateLocalBuildRequest(req); err == nil {
+			t.Fatalf("%s fallback accepted a pump-mode lease", fallback)
+		}
 	}
 }
