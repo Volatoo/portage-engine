@@ -1317,3 +1317,42 @@ func TestTrustedProxyCIDRValidation(t *testing.T) {
 		t.Fatalf("invalid trusted proxy CIDR produced no warning: %v", cfg.Validate())
 	}
 }
+
+// TestStartupRejectsAnAllowlistEntryNeitherSideCanReduce is the server half of
+// the distcc allowlist contract.
+//
+// Both halves reduce DISTCC_PACKAGE_ALLOWLIST with distcc.NormalizeAtom: the
+// scheduler in distCCEligibleAtoms, the builder in NewBuilderPolicy. An entry
+// that does not reduce is dropped by the first and refused by the second, so
+// leaving it to run means the operator either loses one package silently or
+// loses distcc on that builder silently. Startup is where they are told.
+func TestStartupRejectsAnAllowlistEntryNeitherSideCanReduce(t *testing.T) {
+	valid := func() *ServerConfig {
+		return &ServerConfig{
+			DistCCAlphaEnabled:             true,
+			DistCCPackageAllowlist:         []string{">=sys-devel/gcc-14.2.0"},
+			DistCCCHOST:                    "x86_64-pc-linux-gnu",
+			DistCCCompilerDigest:           "sha256:" + strings.Repeat("a", 64),
+			DistCCToolchainImageGeneration: "gentoo-g1",
+			DistCCCPUFeatures:              []string{"avx2"},
+			DistCCNetworkZone:              "build-a",
+			DistCCIsolatedNetworkCIDRs:     []string{"10.44.0.0/24"},
+		}
+	}
+	// A versioned atom is a form the operator is entitled to write, and it has
+	// to survive: rejecting it would move the silent failure into a loud one
+	// for the wrong entry.
+	if err := valid().ValidateStartup(); err != nil {
+		t.Fatalf("startup rejected a versioned allowlist atom: %v", err)
+	}
+
+	cfg := valid()
+	cfg.DistCCPackageAllowlist = []string{"sys-devel/gcc", "llvm"}
+	err := cfg.ValidateStartup()
+	if err == nil {
+		t.Fatal("startup accepted an allowlist entry with no category")
+	}
+	if !strings.Contains(err.Error(), `"llvm"`) {
+		t.Fatalf("rejection does not name the offending entry: %v", err)
+	}
+}

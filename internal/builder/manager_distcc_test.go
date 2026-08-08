@@ -3,6 +3,8 @@ package builder
 import (
 	"context"
 	"errors"
+	"net"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -353,5 +355,82 @@ func TestManagerCompileOutputFenceSeparatesExpiryFromSupersession(t *testing.T) 
 			t.Fatalf("%s: recorded %d fallback observations", test.name, observations)
 		}
 		manager.Shutdown()
+	}
+}
+
+// TestBothSidesReduceTheOperatorAllowlistTheSameWay is the invariant the two
+// halves of the distcc allowlist have to hold, stated once.
+//
+// The control plane decides eligibility from DISTCC_PACKAGE_ALLOWLIST and ships
+// the result on the lease; the builder decides again from the same operator
+// list as defense in depth. They can only agree if they reduce that list
+// identically. They did not: the scheduler reduced with NormalizeAtom, the
+// builder demanded the already-reduced form, so one versioned entry — the form
+// an operator writes every day in package.mask — left the builder with distcc
+// silently off while the scheduler kept reserving slots for it.
+func TestBothSidesReduceTheOperatorAllowlistTheSameWay(t *testing.T) {
+	// One entry per dependency-atom form an operator may reasonably write.
+	operatorAllowlist := []string{
+		"dev-qt/qtwebengine",
+		">=sys-devel/gcc-14.2.0",
+		"=dev-lang/rust-1.83.0",
+		"dev-lang/python:3.13",
+		"media-libs/mesa[vulkan]",
+		"app-text/docbook-xml-dtd-4.5",
+	}
+	wantReduced := []string{
+		"app-text/docbook-xml-dtd", "dev-lang/python", "dev-lang/rust",
+		"dev-qt/qtwebengine", "media-libs/mesa", "sys-devel/gcc",
+	}
+
+	_, network, err := net.ParseCIDR("10.80.0.0/24")
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, err := distcc.NewBuilderPolicy(distcc.BuilderPolicy{
+		Enabled: true, Allowlist: operatorAllowlist,
+		IsolatedNetworks: []*net.IPNet{network},
+	})
+	if err != nil {
+		t.Fatalf("the builder refused an allowlist the scheduler accepts: %v", err)
+	}
+	if !slices.Equal(policy.Allowlist, wantReduced) {
+		t.Fatalf("builder reduced to %v, want %v", policy.Allowlist, wantReduced)
+	}
+
+	manager := &Manager{config: &config.ServerConfig{
+		DistCCAlphaEnabled: true, DistCCPackageAllowlist: operatorAllowlist,
+	}}
+	for _, atom := range operatorAllowlist {
+		eligible := manager.distCCEligibleAtoms(&BuildRequest{PackageName: atom})
+		if len(eligible) != 1 {
+			t.Fatalf("scheduler found %v eligible for %q, want exactly one", eligible, atom)
+		}
+		// The one form both sides must agree on: what the scheduler puts on the
+		// lease is what the builder looks up.
+		if !policy.Allowed(eligible[0]) {
+			t.Fatalf(
+				"scheduler leased %q for %q and the builder does not allow it",
+				eligible[0], atom,
+			)
+		}
+	}
+}
+
+// TestABadAllowlistEntryIsRejectedRatherThanDropped keeps the residual
+// disagreement loud. An entry neither side can reduce is an operator mistake,
+// and the only reading of it that is not a silent loss of distcc is a refusal.
+// The server half of this lives in pkg/config, where ValidateStartup rejects
+// the same entry before anything boots.
+func TestABadAllowlistEntryIsRejectedRatherThanDropped(t *testing.T) {
+	_, network, err := net.ParseCIDR("10.80.0.0/24")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := distcc.NewBuilderPolicy(distcc.BuilderPolicy{
+		Enabled: true, Allowlist: []string{"dev-qt/qtwebengine", "qtwebengine"},
+		IsolatedNetworks: []*net.IPNet{network},
+	}); err == nil {
+		t.Fatal("builder accepted an allowlist entry with no category")
 	}
 }

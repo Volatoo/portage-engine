@@ -1042,6 +1042,21 @@ func (c *ServerConfig) distCCPoolContract() error {
 	if !c.DistCCAlphaEnabled {
 		return nil
 	}
+	// The reviewed allowlist reduces through the same NormalizeAtom on both
+	// sides — the scheduler's distCCEligibleAtoms and the builder's
+	// NewBuilderPolicy — and neither can do anything with an entry that does
+	// not reduce. The scheduler skips it, so that package quietly never
+	// compiles remotely; the builder refuses the list it belongs to, so nothing
+	// on that builder does. Rejecting it here is the only place the operator is
+	// told, and it costs a failed start instead of a silent loss of the feature
+	// they configured.
+	for _, entry := range c.DistCCPackageAllowlist {
+		if _, ok := distcc.NormalizeAtom(entry); !ok {
+			return fmt.Errorf(
+				"DISTCC_PACKAGE_ALLOWLIST entry %q is not a package atom", entry,
+			)
+		}
+	}
 	_, err := distcc.Pool{
 		Architecture:             "amd64",
 		CHOST:                    c.DistCCCHOST,
