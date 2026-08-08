@@ -373,13 +373,6 @@ jobs:
           go-version: '1.26.5'
           cache: true
 
-      - name: Install ripgrep
-        # scripts/public-beta-recovery-drill.sh requires rg, and the suite runs
-        # parts of itself under a restricted PATH that names rg explicitly. It
-        # is not preinstalled on ubuntu-latest, so this job failed at its first
-        # step on every run - before the gates it exists to run.
-        run: sudo apt-get update && sudo apt-get install -y ripgrep
-
       # ubuntu-latest ships jq but not ripgrep, and every gate in this job
       # resolves `rg` from PATH: the recovery drill declares it a required tool
       # and the public edge gate greps the rendered template with it. Without
