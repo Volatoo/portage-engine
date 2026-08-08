@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"syscall"
 	"time"
@@ -243,13 +244,13 @@ func prefetchVerificationGenerationVia(client *http.Client, baseURL, pkgDir stri
 // anywhere in this package, and a future caller that skips the request
 // validator still must not be able to write outside the directory.
 func verificationArtifactPath(pkgDir, relativePath string) (string, error) {
-	clean := filepath.ToSlash(filepath.Clean(relativePath))
-	if relativePath == "" || filepath.IsAbs(relativePath) ||
-		clean != filepath.ToSlash(relativePath) ||
-		clean == "." || clean == ".." || strings.HasPrefix(clean, "../") {
+	native := filepath.FromSlash(relativePath)
+	if relativePath == "" || strings.Contains(relativePath, "\\") ||
+		!filepath.IsLocal(native) ||
+		filepath.ToSlash(filepath.Clean(native)) != relativePath {
 		return "", fmt.Errorf("verification artifact path %q is not canonical and relative", relativePath)
 	}
-	return filepath.Join(pkgDir, filepath.FromSlash(clean)), nil
+	return filepath.Join(pkgDir, native), nil
 }
 
 func indexContainsArtifact(index []byte, relativePath string) bool {
@@ -319,7 +320,17 @@ func downloadVerificationFile(client *http.Client, baseURL, relativePath, destin
 	return nil
 }
 
+// verificationBinhostURLShape admits only a plain http(s) URL with a bare
+// host[:port] authority and an optional plain path: no userinfo, query,
+// fragment, or percent-escapes in the authority. The dial-time address policy
+// still decides reachability; this lexical gate pins what a URL may spell.
+var verificationBinhostURLShape = regexp.MustCompile(
+	`^https?://[A-Za-z0-9.\-\[\]:]+(?:/[0-9A-Za-z._~%+/-]*)?$`)
+
 func verificationObjectURL(baseURL, relativePath string) (string, error) {
+	if !verificationBinhostURLShape.MatchString(baseURL) {
+		return "", fmt.Errorf("verification binhost URL %q is not a plain http(s) URL", baseURL)
+	}
 	parsed, err := neturl.Parse(baseURL)
 	if err != nil {
 		return "", err

@@ -5170,8 +5170,8 @@ func (m *Manager) serveObjectVerificationBinhost(
 	token, requested string,
 ) {
 	rel := path.Clean(strings.ReplaceAll(requested, "\\", "/"))
-	if rel == verificationCapabilityFile || rel == "." || rel == ".." ||
-		strings.HasPrefix(rel, "../") || strings.HasPrefix(rel, "/") {
+	relNative := filepath.FromSlash(rel)
+	if rel == verificationCapabilityFile || !filepath.IsLocal(relNative) {
 		http.NotFound(w, r)
 		return
 	}
@@ -5216,7 +5216,7 @@ func (m *Manager) serveObjectVerificationBinhost(
 		return
 	}
 	defer func() { _ = scratchRoot.Close() }()
-	localName := filepath.Base(rel)
+	localName := filepath.Base(relNative)
 	filePath := filepath.Join(scratch, localName)
 	if err := m.artifactStore.Download(key, filePath); err != nil {
 		http.NotFound(w, r)

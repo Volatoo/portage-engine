@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -233,6 +234,13 @@ func validatePVEEndpoint(endpoint string, insecure bool) error {
 	return nil
 }
 
+// pveEndpointShape is the lexical form validatePVEEndpoint accepts: a bare
+// scheme://host[:port] with nothing else. Every function that concatenates a
+// request URL re-checks the exact string it concatenates, because a barrier
+// must sit on that value: validatePVEEndpoint's semantic checks live in
+// another function and do not mark the caller's variable as clean.
+var pveEndpointShape = regexp.MustCompile(`^https?://[A-Za-z0-9._\-\[\]:]+$`)
+
 // pveTicket exchanges username+password for an auth ticket (the PVE cookie
 // auth flow — API tokens don't need this).
 func pveTicket(endpoint string, auth PVEAuth) (string, error) {
@@ -244,12 +252,16 @@ func pveLogin(ctx context.Context, endpoint string, auth PVEAuth) (string, strin
 	if err := validatePVEEndpoint(endpoint, auth.Insecure); err != nil {
 		return "", "", err
 	}
+	base := strings.TrimRight(endpoint, "/")
+	if !pveEndpointShape.MatchString(base) {
+		return "", "", fmt.Errorf("PVE endpoint %q must be a bare scheme://host[:port]", endpoint)
+	}
 	form := url.Values{}
 	form.Set("username", auth.Username)
 	form.Set("password", auth.Password)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		strings.TrimRight(endpoint, "/")+"/api2/json/access/ticket",
+		base+"/api2/json/access/ticket",
 		strings.NewReader(form.Encode()))
 	if err != nil {
 		return "", "", fmt.Errorf("build ticket request: %w", err)
@@ -295,8 +307,12 @@ func newPVEAPIClient(ctx context.Context, endpoint string, auth PVEAuth) (*pveAP
 	if !auth.valid() {
 		return nil, fmt.Errorf("PVE credentials are required")
 	}
+	base := strings.TrimRight(endpoint, "/")
+	if !pveEndpointShape.MatchString(base) {
+		return nil, fmt.Errorf("PVE endpoint %q must be a bare scheme://host[:port]", endpoint)
+	}
 	client := &pveAPIClient{
-		endpoint: strings.TrimRight(endpoint, "/"),
+		endpoint: base,
 		auth:     auth,
 		client:   pveHTTPClient(auth.Insecure),
 	}
@@ -479,7 +495,11 @@ func fetchPVEClusterResources(endpoint string, auth PVEAuth) ([]pveClusterResour
 	if err := validatePVEEndpoint(endpoint, auth.Insecure); err != nil {
 		return nil, err
 	}
-	reqURL := strings.TrimRight(endpoint, "/") + "/api2/json/cluster/resources"
+	base := strings.TrimRight(endpoint, "/")
+	if !pveEndpointShape.MatchString(base) {
+		return nil, fmt.Errorf("PVE endpoint %q must be a bare scheme://host[:port]", endpoint)
+	}
+	reqURL := base + "/api2/json/cluster/resources"
 	req, err := http.NewRequest(http.MethodGet, reqURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("build cluster-resources request: %w", err)
