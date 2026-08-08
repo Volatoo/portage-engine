@@ -7,6 +7,7 @@ package distcc
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net"
 	"regexp"
@@ -201,8 +202,32 @@ type Lease struct {
 	EligibleAtoms []string `json:"eligible_atoms,omitempty"`
 }
 
-// Validate checks the complete builder-visible lease shape.
+// ErrLeaseExpired is returned when a lease is well formed but its slot
+// reservation has run out. It is separate from the shape errors because it is
+// the one refusal a caller may be able to absorb: a reservation that ran out
+// while the build waited is a scheduling delay, not a malformed request, and a
+// build whose fallback policy is local can still compile.
+var ErrLeaseExpired = errors.New("distcc lease is expired")
+
+// Expired reports whether the reservation this lease describes has run out.
+func (l Lease) Expired(now time.Time) bool { return !l.ExpiresAt.After(now) }
+
+// Validate checks the complete builder-visible lease shape and that the lease
+// is still live.
 func (l Lease) Validate(now time.Time) error {
+	if err := l.ValidateShape(); err != nil {
+		return err
+	}
+	if l.Expired(now) {
+		return ErrLeaseExpired
+	}
+	return nil
+}
+
+// ValidateShape checks everything about a lease except whether it is still
+// live: identity, mode, fallback policy, pool binding, eligible atoms and
+// endpoint. Every one of these is wrong no matter when it is read.
+func (l Lease) ValidateShape() error {
 	if l.ID == "" || l.WorkerID == "" || l.BuilderID == "" ||
 		l.BuilderNetworkIdentity == "" || l.AttemptID == "" ||
 		l.AttemptFence <= 0 || l.Fence <= 0 || l.Slots <= 0 {
@@ -220,9 +245,6 @@ func (l Lease) Validate(now time.Time) error {
 	}
 	if l.PoolID != poolID {
 		return fmt.Errorf("distcc lease pool identity mismatch")
-	}
-	if !l.ExpiresAt.After(now) {
-		return fmt.Errorf("distcc lease is expired")
 	}
 	if len(l.EligibleAtoms) > maxEligibleAtoms {
 		return fmt.Errorf("distcc lease eligible atom count exceeds %d", maxEligibleAtoms)
