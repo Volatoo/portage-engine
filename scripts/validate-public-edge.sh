@@ -194,6 +194,99 @@ check_edge_static_contract() {
     ! rg -qF '$request_uri' <<<"${log_format_block}"
 }
 
+# The server block for the Dashboard host. Denials in the API or metrics vhost
+# must not count as covering a Dashboard route, so the coverage check below reads
+# this block alone rather than the whole file.
+public_server_block() {
+  awk '
+    /^server \{/ { buffer = $0 "\n"; inside = 1; next }
+    inside { buffer = buffer $0 "\n" }
+    inside && /^\}/ {
+      if (buffer ~ /server_name \$\{PORTAGE_PUBLIC_HOST\};/) printf "%s", buffer
+      inside = 0
+    }
+  ' "$1"
+}
+
+# Every WebShell path the Dashboard actually answers, read out of the source
+# rather than listed here. The hand-written deny list had already fallen behind
+# twice — /legacy/shell/ arrived when the old console moved under its mount, and
+# /api/shell/preflight arrived beside an exact `= /api/shell` — and in both cases
+# the list still read as complete.
+webshell_paths() {
+  local dashboard="${repo_root}/internal/dashboard/dashboard.go"
+  local console="${repo_root}/internal/dashboard/console.go"
+  {
+    rg -o 'HandleFunc\("(/[^"]*shell[^"]*)"' -r '$1' "${dashboard}"
+    # The console's route table. Every entry is served by the catch-all at the
+    # top level, so the suffix is the public path.
+    rg -o 'suffix: "(/[^"]*shell[^"]*)"' -r '$1' "${console}"
+    # The old console, which answers under the legacy mount now.
+    awk '
+      /^func \(d \*Dashboard\) legacyRouter\(\)/ { emit = 1 }
+      emit { print }
+      emit && /^\}/ { exit }
+    ' "${console}" | rg -o 'HandleFunc\("(/[^"]*shell[^"]*)"' -r '/legacy$1'
+    # Deduplicated with awk rather than `sort -u`: this gate runs under a
+    # restricted PATH in tests/recovery-drill-test.sh, and order is irrelevant to
+    # the coverage loop below.
+  } | awk '!seen[$0]++'
+}
+
+check_webshell_denied() {
+  local config="${repo_root}/deploy/public-edge/nginx.conf.template"
+  local block rules routes route kind pattern covered
+  block="$(public_server_block "${config}")"
+  [[ -n "${block}" ]] || return 1
+  routes="$(webshell_paths)"
+  [[ -n "${routes}" ]] || return 1
+  rules="$(rg -o 'location (\^~|=) (\S+) \{ return 404; \}' -r '$1 $2' <<<"${block}")"
+  [[ -n "${rules}" ]] || return 1
+
+  while IFS= read -r route; do
+    covered=0
+    while read -r kind pattern; do
+      case "${kind}" in
+        '^~') [[ "${route}" == "${pattern}"* ]] && covered=1 ;;
+        '=') [[ "${route}" == "${pattern}" ]] && covered=1 ;;
+      esac
+    done <<<"${rules}"
+    if (( covered == 0 )); then
+      echo "public edge does not deny the WebShell route ${route}" >&2
+      return 1
+    fi
+  done <<<"${routes}"
+}
+
+# The clickjacking answer for /device, which approves a pending CLI code with one
+# click. The control plane sends these headers itself; the edge repeats them, and
+# a location that writes its own add_header set replaces the server-level one
+# entirely, so every such location has to carry them too.
+check_frame_protection() {
+  local config="${repo_root}/deploy/public-edge/nginx.conf.template"
+  local block
+  block="$(public_server_block "${config}")"
+  [[ -n "${block}" ]] || return 1
+  rg -q "add_header Content-Security-Policy \"frame-ancestors 'none'\" always;" <<<"${block}" &&
+    rg -q 'add_header X-Frame-Options DENY always;' <<<"${block}" || return 1
+
+  awk '
+    /^    location .* \{$/ { buffer = ""; inside = 1; next }
+    inside { buffer = buffer $0 "\n" }
+    inside && /^    \}$/ {
+      inside = 0
+      if (buffer !~ /add_header /) next
+      if (buffer !~ /add_header Content-Security-Policy "frame-ancestors/ ||
+          buffer !~ /add_header X-Frame-Options DENY always;/) {
+        print "location writes add_header without repeating the frame headers" > "/dev/stderr"
+        print buffer > "/dev/stderr"
+        bad = 1
+      }
+    }
+    END { exit bad ? 1 : 0 }
+  ' <<<"${block}"
+}
+
 check_documented_boundary() {
   local document="${repo_root}/docs/PRODUCTION_BOUNDARY.md"
   rg -q 'Public Beta.*WebShell|Public Beta.*web shell|does not route.*WebShell' "${document}" &&
@@ -244,6 +337,8 @@ fi
 run_check repository_inputs "required public deployment inputs are present" check_required_files
 run_check provider_registry "provider registry has Authentik, Google, and GitHub HTTPS callbacks without embedded secrets" check_provider_registry
 run_check edge_static_policy "edge template contains independent source-IP/request limits, device IAM no-store policy, cookie policy, anonymous routes, metrics auth, and WebShell denial" check_edge_static_contract
+run_check webshell_denied "every WebShell path the Dashboard registers is denied on the public host" check_webshell_denied
+run_check frame_protection "the public host refuses framing, including in every location that writes its own header set" check_frame_protection
 run_check production_boundary_documented "production boundary documents evidence and not-run semantics" check_documented_boundary
 
 if ! command -v docker >/dev/null 2>&1; then

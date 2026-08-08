@@ -415,6 +415,10 @@ func (d *Dashboard) Router() http.Handler {
 	if d.config.AuthEnabled {
 		handler = d.authMiddleware(handler)
 	}
+	// Outside the auth middleware, so the redirect it writes for a signed-out
+	// viewer carries the headers too — a login page that can be framed is the
+	// same clickjacking surface one navigation earlier.
+	handler = frameProtectionMiddleware(handler)
 	handler = d.loggingMiddleware(handler)
 
 	return handler
@@ -1706,6 +1710,33 @@ func sessionToken(r *http.Request) string {
 // signed-in viewer to the legacy system administrator.
 func isFederatedSession(token string) bool {
 	return strings.HasPrefix(token, "oidc.") || strings.HasPrefix(token, "federated.")
+}
+
+// frameProtectionMiddleware refuses to be rendered inside another site's frame.
+//
+// The device authorization page is why this is not optional. /device approves a
+// pending CLI code with one click, and the approval mints a session that
+// inherits the approver's acr and amr — so a page that can be framed is a page
+// where a cross-site overlay can borrow an operator's identity from a single
+// mis-aimed click. SameSite does not help: inside the frame the document's
+// origin is this deployment, so the session cookie is first-party there.
+//
+// Set here rather than only at the reference edge in
+// deploy/public-edge/nginx.conf.template, because the Dashboard is documented as
+// reachable over plain HTTP on a restricted network with no proxy in front of
+// it, and that deployment serves the same one-click page.
+//
+// Both spellings: frame-ancestors is the one that is actually consulted where it
+// is supported, and X-Frame-Options is what the rest honour. Only the frame
+// directive is sent — a full Content-Security-Policy would have to account for
+// the console's inline boot payload, which is a separate decision.
+func frameProtectionMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		header := w.Header()
+		header.Set("Content-Security-Policy", "frame-ancestors 'none'")
+		header.Set("X-Frame-Options", "DENY")
+		next.ServeHTTP(w, r)
+	})
 }
 
 // loggingMiddleware provides request logging.

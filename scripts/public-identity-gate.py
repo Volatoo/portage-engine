@@ -471,9 +471,16 @@ def shell_and_backend_checks(gate: Gate, public_base: str, api_base: str) -> Non
             "Sec-WebSocket-Key": base64.b64encode(os.urandom(16)).decode("ascii"),
             "Sec-WebSocket-Version": "13",
         }
+        # One probe per address the Dashboard answers a shell at, not per rule
+        # the edge happens to have. /legacy/shell/ is where the old console
+        # moved, and /api/shell/preflight is a sibling an exact `= /api/shell`
+        # rule leaves reachable; both were live behind a template this check
+        # still reported as pass.
         probes = [
             gate.request(join(public_base, "/shell/probe"), extra_headers=headers),
+            gate.request(join(public_base, "/legacy/shell/probe"), extra_headers=headers),
             gate.request(join(public_base, "/api/shell"), extra_headers=headers),
+            gate.request(join(public_base, "/api/shell/preflight"), extra_headers=headers),
             gate.request(
                 join(api_base, "/api/v1/instances/shell?id=probe"),
                 origin="https://foreign.invalid",

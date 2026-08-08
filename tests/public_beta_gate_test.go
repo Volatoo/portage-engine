@@ -45,6 +45,50 @@ func nginxLocationBlock(t *testing.T, config, header string) string {
 	return remainder[:end]
 }
 
+// nginxServerBlock returns the one `server { ... }` carrying this server_name.
+//
+// Per-vhost rather than whole-file on purpose: a denial in the API or metrics
+// vhost does not cover a route the Dashboard host answers, and a whole-file
+// search would read one as if it covered the other.
+func nginxServerBlock(t *testing.T, config, serverName string) string {
+	t.Helper()
+	for _, block := range strings.Split(config, "\nserver {") {
+		if strings.Contains(block, serverName) {
+			if end := strings.Index(block, "\n}"); end >= 0 {
+				return block[:end]
+			}
+			t.Fatalf("nginx server block %q is not closed", serverName)
+		}
+	}
+	t.Fatalf("nginx server block %q is missing", serverName)
+	return ""
+}
+
+// nginxIndentScopes splits a server block into what applies to the vhost and the
+// multi-line `location` blocks inside it. Single-line locations (`{ return 404; }`)
+// stay with the vhost text: they carry no directives to inherit.
+func nginxIndentScopes(block string) (server string, locations []string) {
+	var vhost, current strings.Builder
+	inside := false
+	for _, line := range strings.Split(block, "\n") {
+		switch {
+		case !inside && strings.HasPrefix(line, "    location ") && strings.HasSuffix(line, "{"):
+			inside = true
+			current.Reset()
+			current.WriteString(line + "\n")
+		case inside && line == "    }":
+			current.WriteString(line)
+			locations = append(locations, current.String())
+			inside = false
+		case inside:
+			current.WriteString(line + "\n")
+		default:
+			vhost.WriteString(line + "\n")
+		}
+	}
+	return vhost.String(), locations
+}
+
 func TestPublicEdgeReferenceDeniesBackendAndWebShell(t *testing.T) {
 	compose := readRepositoryFile(t, "deploy/public-edge/docker-compose.edge.yml")
 	nginx := readRepositoryFile(t, "deploy/public-edge/nginx.conf.template")
@@ -69,8 +113,14 @@ func TestPublicEdgeReferenceDeniesBackendAndWebShell(t *testing.T) {
 		"limit_req_status 429;",
 		"limit_conn_status 429;",
 		"proxy_cookie_flags ~ secure httponly samesite=lax;",
+		// Prefix matches, not exact ones. The old console moved under /legacy and
+		// took its own /shell/ page with it, and /api/shell gained a /preflight
+		// sibling; an exact `= /api/shell` left both reachable while this list
+		// still read as complete. TestPublicEdgeDeniesEveryWebShellPathTheDashboardRegisters
+		// below is what keeps the two in step from now on.
 		"location ^~ /shell/ { return 404; }",
-		"location = /api/shell { return 404; }",
+		"location ^~ /legacy/shell/ { return 404; }",
+		"location ^~ /api/shell { return 404; }",
 		"location = /api/v1/instances/shell { return 404; }",
 		"auth_basic_user_file /run/secrets/portage_metrics_htpasswd;",
 		"proxy_set_header X-Forwarded-For $remote_addr;",
@@ -84,6 +134,109 @@ func TestPublicEdgeReferenceDeniesBackendAndWebShell(t *testing.T) {
 	}
 	if strings.Contains(nginx, "$proxy_add_x_forwarded_for") {
 		t.Fatal("edge trusts an unreviewed client forwarding chain")
+	}
+}
+
+// TestPublicEdgeDeniesEveryWebShellPathTheDashboardRegisters reads the shell
+// routes out of internal/dashboard instead of listing them here.
+//
+// docs/PRODUCTION_BOUNDARY.md promises Public Beta routes no WebShell, and the
+// deny list that kept that promise was written by hand. It fell behind twice in
+// one branch — /legacy/shell/ arrived when the old console moved under its mount,
+// and /api/shell/preflight arrived beside an exact `= /api/shell` — and in both
+// cases every gate still reported the boundary as verified.
+func TestPublicEdgeDeniesEveryWebShellPathTheDashboardRegisters(t *testing.T) {
+	nginx := readRepositoryFile(t, "deploy/public-edge/nginx.conf.template")
+	block := nginxServerBlock(t, nginx, "server_name ${PORTAGE_PUBLIC_HOST};")
+
+	handler := regexp.MustCompile(`HandleFunc\("(/[^"]*shell[^"]*)"`)
+	routeSuffix := regexp.MustCompile(`suffix: "(/[^"]*shell[^"]*)"`)
+	legacyRouter := regexp.MustCompile(
+		`(?s)func \(d \*Dashboard\) legacyRouter\(\).*?\n}`)
+
+	dashboard := readRepositoryFile(t, "internal/dashboard/dashboard.go")
+	console := readRepositoryFile(t, "internal/dashboard/console.go")
+
+	registered := make([]string, 0, 8)
+	for _, match := range handler.FindAllStringSubmatch(dashboard, -1) {
+		registered = append(registered, match[1])
+	}
+	// The console's own route table: every entry is served by the catch-all at
+	// the top level, so the suffix is the public path.
+	for _, match := range routeSuffix.FindAllStringSubmatch(console, -1) {
+		registered = append(registered, match[1])
+	}
+	// The old console, which answers under the legacy mount now.
+	for _, match := range handler.FindAllStringSubmatch(
+		legacyRouter.FindString(console), -1) {
+		registered = append(registered, "/legacy"+match[1])
+	}
+	if len(registered) == 0 {
+		t.Fatal("no shell route was found in internal/dashboard; the patterns above have drifted")
+	}
+
+	denial := regexp.MustCompile(`location (\^~|=) (\S+) \{ return 404; \}`)
+	rules := denial.FindAllStringSubmatch(block, -1)
+	for _, route := range registered {
+		covered := false
+		for _, rule := range rules {
+			if (rule[1] == "^~" && strings.HasPrefix(route, rule[2])) ||
+				(rule[1] == "=" && route == rule[2]) {
+				covered = true
+				break
+			}
+		}
+		if !covered {
+			t.Errorf("the public Dashboard host does not deny the WebShell route %q", route)
+		}
+	}
+}
+
+// TestPublicEdgeAndDashboardBothRefuseFraming: /device approves a pending CLI
+// code with one click and mints a session carrying the approver's acr and amr,
+// so a frameable page is a cross-site overlay away from an operator's identity.
+// SameSite does not help — inside the frame the document's origin is the
+// deployment itself. Asserted on both because the Dashboard is documented as
+// reachable over plain HTTP on a restricted network, with no edge in front.
+func TestPublicEdgeAndDashboardBothRefuseFraming(t *testing.T) {
+	nginx := readRepositoryFile(t, "deploy/public-edge/nginx.conf.template")
+	block := nginxServerBlock(t, nginx, "server_name ${PORTAGE_PUBLIC_HOST};")
+	frameHeaders := []string{
+		`add_header Content-Security-Policy "frame-ancestors 'none'" always;`,
+		"add_header X-Frame-Options DENY always;",
+	}
+
+	// Scoped by indentation, not by "somewhere in the vhost". One add_header in a
+	// location REPLACES the whole server-level set, so a location that carries
+	// the headers proves nothing about the responses that do not go through it —
+	// and a whole-block search reads one as if it covered the other.
+	serverLevel, locations := nginxIndentScopes(block)
+	for _, required := range frameHeaders {
+		if !strings.Contains(serverLevel, "    "+required) {
+			t.Errorf("the public Dashboard host does not declare %q at server level", required)
+		}
+	}
+	for _, location := range locations {
+		if !strings.Contains(location, "add_header ") {
+			// Inherits the server-level set above.
+			continue
+		}
+		for _, required := range frameHeaders {
+			if !strings.Contains(location, "        "+required) {
+				t.Errorf("a location writing its own headers does not repeat %q:\n%s",
+					required, location)
+			}
+		}
+	}
+
+	dashboard := readRepositoryFile(t, "internal/dashboard/dashboard.go")
+	for _, required := range []string{
+		`header.Set("Content-Security-Policy", "frame-ancestors 'none'")`,
+		`header.Set("X-Frame-Options", "DENY")`,
+	} {
+		if !strings.Contains(dashboard, required) {
+			t.Errorf("the Dashboard itself is missing %q", required)
+		}
 	}
 }
 
