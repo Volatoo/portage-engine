@@ -45,8 +45,29 @@ run_repo_gate() {
   go test ./pkg/config -run 'PersistentExecutor|PublicExecutor' -count=1
   go test ./internal/capacity -run 'Actuator|PVE' -count=1
   go test ./internal/iac -run 'EnsurePVEVMAbsent' -count=1
-  go test ./internal/persistence \
-    -run TestPostgresSchedulerFairnessAndAutoscaling -count=1 -v
+
+  # Drain completion, the refusal to delete an instance that still owns live
+  # work, and the exact-identity delete boundary are decided in SQL, so they only
+  # execute against a real database. The case skips itself when the DSN is unset,
+  # and a skipped case is a passing `go test` -- which is how this Gate used to
+  # report those three boundaries as verified without running any of them. Name
+  # the PASS line rather than trusting the exit status, and say not-run out loud
+  # otherwise, the way scripts/public-beta-recovery-drill.sh does.
+  local capacity_state=not-run
+  if [[ -n ${PORTAGE_TEST_DATABASE_URL:-} ]]; then
+    local capacity_log
+    capacity_log=$(mktemp "${TMPDIR:-/tmp}/portage-capacity-gate.XXXXXX")
+    go test ./internal/persistence \
+      -run TestPostgresSchedulerFairnessAndAutoscaling -count=1 -v |
+      tee "$capacity_log"
+    if ! grep -q -- '--- PASS: TestPostgresSchedulerFairnessAndAutoscaling ' "$capacity_log"; then
+      rm -f "$capacity_log"
+      echo "repository Gate failed: capacity delete boundaries did not execute" >&2
+      return 1
+    fi
+    rm -f "$capacity_log"
+    capacity_state=pass
+  fi
 
   if command -v packer >/dev/null 2>&1; then
     (
@@ -58,7 +79,12 @@ run_repo_gate() {
     echo "SKIP Packer syntax validation: packer is not installed" >&2
   fi
 
-  echo "repository persistent-executor Gate passed"
+  if [[ $capacity_state == not-run ]]; then
+    echo "NOT-RUN capacity delete boundaries (drain completion, live-work delete refusal, exact identity delete): set PORTAGE_TEST_DATABASE_URL"
+    echo "repository persistent-executor Gate passed without the capacity delete boundaries"
+  else
+    echo "repository persistent-executor Gate passed"
+  fi
   echo "SKIP live PVE SCHED-2B Gate: repo mode never claims an action or reports live evidence"
 }
 
