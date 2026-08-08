@@ -77,10 +77,12 @@ jobs:
 
       - name: golangci-lint
         # golangci-lint v2.x is required because .golangci.yml uses the v2 config
-        # format (version: "2"). v1.x (e.g. v1.55.2) cannot parse it.
+        # format (version: "2"). v1.x (e.g. v1.55.2) cannot parse it. The pin
+        # also has a floor: a release built with Go older than go.mod's 1.26.4
+        # refuses to load the config at all and exits 3.
         uses: golangci/golangci-lint-action@9fae48acfc02a90574d7c304a1758ef9895495fa # v7.0.1
         with:
-          version: v2.7.2
+          version: v2.12.2
           args: --timeout=5m -v
 
   test-check:

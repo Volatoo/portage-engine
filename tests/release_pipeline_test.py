@@ -875,6 +875,47 @@ class ReleasePipelineStaticTest(unittest.TestCase):
         self.assertIn("expected_previous_manifest_digest", promote)
         self.assertIn("expected_current_manifest_digest", rollback)
 
+    def test_every_golangci_lint_pin_can_load_this_module(self) -> None:
+        # golangci-lint refuses to load any config whose module targets a Go
+        # language version above the one it was built with, and exits 3 before
+        # linting. The pin therefore has a floor as well as a ceiling, and the
+        # floor moves with go.mod. Kept as one shared version so the CI lint job,
+        # the gosec job, the PR job and `make lint` cannot disagree about which
+        # findings are real.
+        go_mod = (ROOT / "go.mod").read_text(encoding="utf-8")
+        module_go = re.search(r"^go\s+(\d+)\.(\d+)", go_mod, re.MULTILINE)
+        assert module_go is not None
+        required = (int(module_go.group(1)), int(module_go.group(2)))
+
+        # (golangci-lint release, the Go minor it is built with). Extend when the
+        # pin moves; an unlisted version fails here rather than in CI.
+        built_with = {(2, 12, 2): (1, 26)}
+
+        # Read the `version:` that belongs to the golangci-lint step, not every
+        # `version:` in the file: these workflows pin other tools the same way.
+        pins = set()
+        for workflow in sorted((ROOT / ".github" / "workflows").glob("*.yml")):
+            lines = workflow.read_text(encoding="utf-8").splitlines()
+            for index, line in enumerate(lines):
+                if "golangci-lint-action@" not in line:
+                    continue
+                for follower in lines[index + 1 : index + 6]:
+                    pin = re.match(r"^\s*version:\s*v(\d+\.\d+\.\d+)\s*$", follower)
+                    if pin:
+                        pins.add(pin.group(1))
+                        break
+                else:
+                    self.fail(f"{workflow.name}: golangci-lint step has no version pin")
+        makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+        makefile_pin = re.search(r"^GOLANGCI_LINT_VERSION\s*\?=\s*v(\d+\.\d+\.\d+)", makefile, re.MULTILINE)
+        assert makefile_pin is not None
+        pins.add(makefile_pin.group(1))
+
+        self.assertEqual(len(pins), 1, f"golangci-lint pins disagree: {sorted(pins)}")
+        pin = tuple(int(part) for part in pins.pop().split("."))
+        self.assertIn(pin, built_with, "record which Go minor this golangci-lint release was built with")
+        self.assertGreaterEqual(built_with[pin], required)
+
 
 if __name__ == "__main__":
     unittest.main()

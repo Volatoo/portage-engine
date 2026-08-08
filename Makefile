@@ -20,7 +20,11 @@ WEB_DIR=web
 # the bytes go:embed compiles in are the bytes Vite just emitted; there is no
 # copy step in between that could carry a stale tree.
 WEB_DIST=internal/dashboard/webassets/bundle/dist
-GOLANGCI_LINT_VERSION ?= v2.7.2
+# Must be a release built with Go 1.26 or newer. golangci-lint refuses to load
+# any config whose module targets a language version above its own toolchain,
+# and go.mod is go 1.26.4, so v2.7.2 (built with go1.25) exits 3 before it lints
+# a single file.
+GOLANGCI_LINT_VERSION ?= v2.12.2
 GOLANGCI_LINT = $(GO) run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
