@@ -84,15 +84,16 @@ export interface TextFieldProps {
   form: FormBinding;
   control: TextControl;
   labelKey?: MessageKey | undefined;
-  /**
-   * A label the catalogue does not carry. Exactly one field uses it — see
-   * UNTRANSLATED in ./text.ts, which says which and why.
-   */
-  label?: string | undefined;
   /** The static explanation under the control. */
   hintKey?: MessageKey | undefined;
   /** A hint the page computes — the secret-status sentence, and nothing else. */
   hint?: ReactNode | undefined;
+  /**
+   * A placeholder that is prose and therefore translated. Use `placeholder`
+   * instead for an example value — a URL, a path, a bridge name — which reads
+   * the same in every language and must not be translated.
+   */
+  placeholderKey?: MessageKey | undefined;
   placeholder?: string | undefined;
   type?: 'text' | 'password' | 'number' | undefined;
   /** Only `bin_sha256` sets these two, and the server enforces both again. */
@@ -124,13 +125,30 @@ export interface TextFieldProps {
 function labelText(
   messages: ReturnType<typeof useMessages>,
   key: MessageKey | undefined,
-  literal: string | undefined,
   control: ControlID,
 ): string {
   if (key !== undefined) {
     return decodeEntities(messages.t(key));
   }
-  return literal ?? control;
+  return control;
+}
+
+/**
+ * The placeholder's text, in the order the three sources override each other:
+ * the page-computed one the secret inputs use, then a translated key, then a
+ * literal example value.
+ */
+function placeholderText(
+  messages: ReturnType<typeof useMessages>,
+  props: TextFieldProps,
+): string | undefined {
+  if (props.placeholderText !== undefined) {
+    return props.placeholderText;
+  }
+  if (props.placeholderKey !== undefined) {
+    return decodeEntities(messages.t(props.placeholderKey));
+  }
+  return props.placeholder;
 }
 
 export function TextField(props: TextFieldProps) {
@@ -139,7 +157,7 @@ export function TextField(props: TextFieldProps) {
   const hintID = props.hintKey !== undefined || props.hint !== undefined ? `${control}-hint` : null;
   return (
     <div className="field" hidden={props.fieldHidden}>
-      <label htmlFor={control}>{labelText(messages, props.labelKey, props.label, control)}</label>
+      <label htmlFor={control}>{labelText(messages, props.labelKey, control)}</label>
       <input
         id={control}
         type={props.type ?? 'text'}
@@ -150,7 +168,7 @@ export function TextField(props: TextFieldProps) {
         ref={(node) => {
           form.register(control, node);
         }}
-        placeholder={props.placeholderText ?? props.placeholder}
+        placeholder={placeholderText(messages, props)}
         maxLength={props.maxLength}
         min={props.min}
         spellCheck={props.spellCheck}

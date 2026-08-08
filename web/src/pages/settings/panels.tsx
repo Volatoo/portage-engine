@@ -5,7 +5,7 @@ import type { Messages } from '../../i18n/messages';
 import { CheckField, Hint, PlacementRadios, SelectField, TextAreaField, TextField } from './fields';
 import type { FormBinding } from './fields';
 import type { SecretControl } from './model';
-import { UNTRANSLATED, decodeEntities } from './text';
+import { decodeEntities } from './text';
 
 /**
  * The nine panels that are nothing but form.
@@ -484,18 +484,13 @@ export function NetPanel({ form }: { form: FormBinding }) {
           hintKey="set.binurl.hint"
           placeholder="https://example.com/portage-builder-linux-amd64"
         />
-        {/* The one field of the forty-five whose label, hint and placeholder
-            the catalogue has never carried — the Go page wrote all three into
-            the markup with no data-i18n, so they were English on the Chinese
-            page as well. Kept at parity and named in the handoffs; the strings
-            are gathered in ./text.ts rather than typed in here. */}
         <TextField
           form={form}
           control="bin_sha256"
-          label={UNTRANSLATED.binsha}
-          hint={UNTRANSLATED.binshaHint}
+          labelKey="set.binsha"
+          hintKey="set.binsha.hint"
           maxLength={64}
-          placeholder={UNTRANSLATED.binshaPlaceholder}
+          placeholderKey="set.binsha.placeholder"
         />
       </div>
     </Card>

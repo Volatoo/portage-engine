@@ -477,6 +477,10 @@ export const EN = {
   'set.backend': 'Build Backend',
   'set.binpath': 'Builder binary path',
   'set.binpath.hint': 'Copied to instances via scp; must be linux and arch-matching',
+  'set.binsha': 'Builder binary SHA-256',
+  'set.binsha.hint':
+    'Required when using a URL; the instance verifies it before installing or running the binary',
+  'set.binsha.placeholder': '64 lowercase hexadecimal characters',
   'set.binurl': 'Builder binary URL (optional)',
   'set.binurl.hint': 'Downloaded by the instance at bootstrap; path wins if both are set',
   'set.bridge': 'Network bridge',
