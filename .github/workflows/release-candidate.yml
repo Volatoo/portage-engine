@@ -113,10 +113,38 @@ jobs:
           ref: ${{ needs.gate.outputs.source_commit }}
           persist-credentials: false
 
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: '22.23.2'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version: '1.26.5'
           cache: true
+
+      - name: Build the console bundle
+        # Before the Go build, because portage-dashboard embeds it and the
+        # console is the catch-all at `/`. Without this step the signed release
+        # binary starts, serves every API route, and answers 503 on every
+        # console path — the one failure neither SHA256SUMS nor the cosign
+        # signature can catch, because both faithfully describe a binary that is
+        # exactly what the build produced. The image build already gets this
+        # right in Dockerfile's web-build stage; this is the binary path.
+        run: |
+          set -eu
+          npm ci
+          npm run build
+        working-directory: web
+
+      - name: Assert the bundle the dashboard embeds is present
+        # //go:embed all:bundle matches the committed bundle/.gitkeep on its
+        # own, so a missing console is a successful build rather than a compile
+        # error. This is the step that turns it back into a failure.
+        run: |
+          set -euo pipefail
+          test -s internal/dashboard/webassets/bundle/dist/index.html
 
       - name: Build the reviewed command and platform matrix
         env:

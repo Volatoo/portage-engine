@@ -875,6 +875,20 @@ class ReleasePipelineStaticTest(unittest.TestCase):
         self.assertIn("expected_previous_manifest_digest", promote)
         self.assertIn("expected_current_manifest_digest", rollback)
 
+    def test_release_binaries_are_built_after_the_console_bundle(self) -> None:
+        # portage-dashboard embeds the console and serves it as the catch-all at
+        # `/`. A Go build that runs first still succeeds -- //go:embed all:bundle
+        # matches the committed bundle/.gitkeep -- and produces a binary that
+        # answers 503 on every console path. SHA256SUMS and the cosign signature
+        # both describe that binary accurately, so nothing downstream catches it.
+        text = (ROOT / ".github" / "workflows" / "release-candidate.yml").read_text(encoding="utf-8")
+        install = text.index("npm ci")
+        build_console = text.index("npm run build")
+        build_go = text.index("Build the reviewed command and platform matrix")
+        self.assertLess(install, build_console)
+        self.assertLess(build_console, build_go)
+        self.assertIn("internal/dashboard/webassets/bundle/dist/index.html", text)
+
     def test_every_golangci_lint_pin_can_load_this_module(self) -> None:
         # golangci-lint refuses to load any config whose module targets a Go
         # language version above the one it was built with, and exits 3 before

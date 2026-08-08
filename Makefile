@@ -20,6 +20,7 @@ WEB_DIR=web
 # the bytes go:embed compiles in are the bytes Vite just emitted; there is no
 # copy step in between that could carry a stale tree.
 WEB_DIST=internal/dashboard/webassets/bundle/dist
+WEB_NODE_MODULES_STAMP=$(WEB_DIR)/node_modules/.package-lock.json
 # Must be a release built with Go 1.26 or newer. golangci-lint refuses to load
 # any config whose module targets a language version above its own toolchain,
 # and go.mod is go 1.26.4, so v2.7.2 (built with go1.25) exits 3 before it lints
@@ -45,11 +46,21 @@ build: web-build build-server build-dashboard build-builder build-client build-i
 # lockfile is committed and every install goes through `npm ci`, so a build
 # resolves the same tree it resolved last time and an offline mirror can serve it.
 
-web-deps:
+# npm ci writes this file, so it is the honest stamp for "node_modules holds the
+# tree the lockfile names". A file target rather than a phony one because
+# web-build depends on it: on a fresh clone the file is absent and the install
+# runs, and on every later `make build` it is newer than the lockfile and the
+# install is skipped.
+$(WEB_NODE_MODULES_STAMP): $(WEB_DIR)/package-lock.json $(WEB_DIR)/package.json
 	@echo "Installing console dependencies..."
 	cd $(WEB_DIR) && $(NPM) ci
 
-web-build:
+web-deps: $(WEB_NODE_MODULES_STAMP)
+
+# Depends on the install because `build` depends on this: without it a fresh
+# clone runs `npm run build` with no node_modules and dies on `tsc: not found`
+# before a single Go binary is produced.
+web-build: web-deps
 	@echo "Building Portage Engine Console..."
 	cd $(WEB_DIR) && $(NPM) run build
 
