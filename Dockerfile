@@ -47,7 +47,7 @@ FROM hashicorp/terraform:1.15.6@sha256:adae45661e45d3c88beef071ee1277b4621cea735
 # Minimal common runtime. Production targets below contain one trust-domain
 # binary and run as the same unprivileged numeric identity so deliberately
 # shared artifact volumes do not require root.
-FROM debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818 AS runtime-base
+FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241 AS runtime-base
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends ca-certificates && \
@@ -114,7 +114,7 @@ ENTRYPOINT ["/usr/local/bin/portage-artifact-lifecycle"]
 # Backward-compatible trusted/LAN image. The development Compose topology uses
 # several commands from one image and intentionally retains root plus its
 # shell/tooling. Public deployments must select the target-specific stages.
-FROM debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818 AS trusted-runtime
+FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241 AS trusted-runtime
 RUN apt-get update && \
     apt-get install -y --no-install-recommends bash ca-certificates gnupg openssh-client && \
     rm -rf /var/lib/apt/lists/*
