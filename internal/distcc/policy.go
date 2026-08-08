@@ -31,13 +31,23 @@ func (p BuilderPolicy) Allowed(atom string) bool {
 }
 
 // NewBuilderPolicy validates and normalizes operator configuration.
+//
+// The allowlist is reduced with NormalizeAtom, the same reduction the control
+// plane applies to the same operator list in distCCEligibleAtoms. It demanded
+// ValidAtom instead — the bare category/name form only — so an operator writing
+// a dependency atom they are entitled to write, `>=dev-qt/qtwebengine-6.7.2`,
+// got a builder that logged one line and then ran with distcc off, while the
+// control plane went on reserving compile slots for every build in the pool.
+// Eligibility is decided at package level on both sides, so both sides have to
+// reduce to it the same way; a form only one of them accepts is a disagreement
+// rather than a policy.
 func NewBuilderPolicy(policy BuilderPolicy) (BuilderPolicy, error) {
 	allowed := make(map[string]struct{}, len(policy.Allowlist))
 	allowlist := make([]string, 0, len(policy.Allowlist))
-	for _, atom := range policy.Allowlist {
-		atom = strings.TrimSpace(atom)
-		if !ValidAtom(atom) {
-			return BuilderPolicy{}, fmt.Errorf("invalid distcc allowlist atom %q", atom)
+	for _, entry := range policy.Allowlist {
+		atom, ok := NormalizeAtom(entry)
+		if !ok {
+			return BuilderPolicy{}, fmt.Errorf("invalid distcc allowlist atom %q", entry)
 		}
 		if _, exists := allowed[atom]; exists {
 			continue
