@@ -48,6 +48,10 @@ begin. Entries describe operator-visible changes, not every internal refactor.
 - `portage_distcc_*_total` are now `portage_distcc_*_last_hour` gauges. The
   readings behind them are a one-hour rolling window, so a quiet hour made a
   counter go down and every consumer of `rate()` read a spike out of the drop.
+  `portage_distcc_slots_total` is now `portage_distcc_slots` for the same
+  reason and in the same release: it is a capacity gauge, and it kept the
+  counter suffix through that rename because it is declared beside the
+  scheduler gauges rather than beside the windowed readings.
 - The compile-slot lease that expired while a build waited to be admitted no
   longer fails the build under `DISTCC_FALLBACK_POLICY=local`; it takes the
   controlled local fallback the builder already implements. A blocked policy

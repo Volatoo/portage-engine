@@ -77,7 +77,7 @@ func TestPrometheusSchedulerSnapshot(t *testing.T) {
 		"portage_monitor_projection_source_watermark_present 1",
 		"portage_monitor_projection_lag_seconds 37",
 		"portage_distcc_workers_fresh 2",
-		"portage_distcc_slots_total 8",
+		"portage_distcc_slots 8",
 		"portage_distcc_slots_leased 3",
 		"portage_distcc_compile_local_last_hour 11",
 		"portage_distcc_compile_remote_last_hour 17",
@@ -212,9 +212,19 @@ func TestDistCCObservationsAreNotPublishedAsCounters(t *testing.T) {
 			t.Fatalf("windowed distcc reading is not a gauge: %q", line)
 		}
 	}
-	if strings.Contains(body, "portage_distcc_compile_local_total") ||
-		strings.Contains(body, "portage_distcc_failures_total") {
-		t.Fatalf("a windowed distcc reading still carries a _total suffix:\n%s", body)
+	// Stated over every distcc gauge rather than over two named series.
+	// portage_distcc_slots_total survived the rename this test was written for:
+	// it is declared in writeSchedulerPrometheus, a different function from the
+	// windowed readings, so a check that named compile_local and failures could
+	// not reach it and it kept a counter suffix on a capacity gauge.
+	for _, line := range strings.Split(body, "\n") {
+		name, found := strings.CutPrefix(line, "# TYPE portage_distcc_")
+		if !found || !strings.HasSuffix(name, " gauge") {
+			continue
+		}
+		if strings.HasSuffix(strings.TrimSuffix(name, " gauge"), "_total") {
+			t.Fatalf("a distcc gauge still carries a _total suffix: %q", line)
+		}
 	}
 	if !strings.Contains(body, "portage_distcc_compile_local_last_hour 3") {
 		t.Fatalf("windowed distcc reading missing:\n%s", body)
