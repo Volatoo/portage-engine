@@ -66,9 +66,11 @@ jobs:
 
       # Use the same analyzer, suppressions, and path exclusions as local lint.
       # This keeps the dedicated security job aligned with pre-commit and the
-      # regular CI lint job while retaining G124/G703/G704 coverage.
+      # regular CI lint job while retaining G124/G703/G704 coverage. The version
+      # is kept identical to ci.yml and the Makefile on purpose, and has a floor:
+      # see the comment on the CI lint step.
       - name: Run gosec security scanner
         uses: golangci/golangci-lint-action@9fae48acfc02a90574d7c304a1758ef9895495fa # v7.0.1
         with:
-          version: v2.7.2
+          version: v2.12.2
           args: --enable-only=gosec --timeout=5m -v

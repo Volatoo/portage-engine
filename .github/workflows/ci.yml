@@ -38,9 +38,14 @@ jobs:
         run: go build ./...
 
       - name: golangci-lint
+        # The pin has a floor, not just a ceiling: golangci-lint refuses to load
+        # a config whose module targets a language version above the Go it was
+        # built with, and go.mod is go 1.26.4. v2.7.2 is built with go1.25 and
+        # exits 3 on `can't load config` before linting a single file, so this
+        # must stay on a release built with Go 1.26 or newer.
         uses: golangci/golangci-lint-action@9fae48acfc02a90574d7c304a1758ef9895495fa # v7.0.1
         with:
-          version: v2.7.2
+          version: v2.12.2
           args: --timeout=5m -v
 
   test:
