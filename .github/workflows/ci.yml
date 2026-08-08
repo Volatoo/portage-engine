@@ -330,8 +330,31 @@ jobs:
   operational-gates:
     name: Recovery, public edge, and executor gates
     runs-on: ubuntu-latest
+    services:
+      # The executor gate's drain and live-work delete boundaries are SQL
+      # decisions. Without a database here the case that carries them skips, and
+      # a skipped case is a passing `go test` — the gate would keep reporting
+      # those boundaries as verified while never executing one of them.
+      postgres:
+        image: postgres:18.4-alpine
+        env:
+          POSTGRES_DB: portage_engine_test
+          POSTGRES_USER: portage
+          POSTGRES_PASSWORD: portage-ci-local
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U portage -d portage_engine_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: '1.26.5'
+          cache: true
 
       - name: Recovery drill and evidence validators
         run: make test-recovery
@@ -354,7 +377,22 @@ jobs:
           esac
 
       - name: Persistent executor template contract
-        run: make test-persistent-executor-gate
+        env:
+          PORTAGE_TEST_DATABASE_URL: postgres://portage:portage-ci-local@127.0.0.1:5432/portage_engine_test?sslmode=disable
+        run: |
+          set -euo pipefail
+          make test-persistent-executor-gate 2>&1 | tee "${RUNNER_TEMP}/executor-gate.log"
+
+      - name: Assert the capacity delete boundaries executed
+        # The gate says not-run out loud when it has no database, and exits 0
+        # either way so a developer without PostgreSQL can still run it. In CI
+        # there is a database, so not-run here means the wiring above broke.
+        run: |
+          set -euo pipefail
+          if grep -q '^NOT-RUN capacity delete boundaries' "${RUNNER_TEMP}/executor-gate.log"; then
+            echo "the capacity delete boundaries did not run against the service database" >&2
+            exit 1
+          fi
 
       - name: Upload gate evidence
         if: always()
