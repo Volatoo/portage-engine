@@ -1,6 +1,9 @@
 package server
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -191,4 +194,89 @@ func TestLedgerConsistencyIntervalIsConfigurable(t *testing.T) {
 			t.Errorf("%d seconds -> %s, want %s", test.seconds, got, test.want)
 		}
 	}
+}
+
+// TestRetentionRunsBeforeTheProjectionItWouldContradict pins the order of the
+// three ledger boot steps.
+//
+// The order is the whole of the bug and none of it is observable from a unit
+// test: ExpireTerminal hides terminal jobs past the retention window, so a
+// projection loaded before it holds exactly the rows it is about to hide, and
+// the compare that follows counts every one of them as a job the map has and
+// the ledger does not. checkLedgerHealth turns that verdict into a red /readyz
+// and a logged warning, both describing a divergence this process manufactured
+// between its own two reads. Reproducing it needs a ledger with expired rows
+// and a real boot; asserting the order does not.
+func TestRetentionRunsBeforeTheProjectionItWouldContradict(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "server.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse server.go: %v", err)
+	}
+	// Both paths reach the ledger: initPersistence at boot, and the reconciler
+	// on every tick — which is the one that fires the sync.Once at all when the
+	// boot-time load failed and Initialize downgraded it to a warning.
+	ordered := map[string]bool{
+		"initPersistence": false, "startLedgerReconciler": false,
+	}
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok {
+			continue
+		}
+		if _, guarded := ordered[fn.Name.Name]; !guarded {
+			continue
+		}
+		ordered[fn.Name.Name] = true
+		steps := ledgerBootSteps(fn)
+		prune, load := indexOfStep(steps, "pruneLedgerOnce"), indexOfStep(steps, "LoadVisible")
+		if prune < 0 || load < 0 {
+			t.Fatalf("%s no longer prunes and loads; move this gate with it: %v",
+				fn.Name.Name, steps)
+		}
+		if prune > load {
+			t.Fatalf(
+				"%s prunes after loading the projection (%v); retention then hides "+
+					"rows the loaded map still holds and the compare reads them as a divergence",
+				fn.Name.Name, steps,
+			)
+		}
+		if compare := indexOfStep(steps, "checkLedgerConsistency"); compare >= 0 && compare < load {
+			t.Fatalf("%s compares before loading the projection (%v)", fn.Name.Name, steps)
+		}
+	}
+	for name, found := range ordered {
+		if !found {
+			t.Fatalf("%s is no longer in server.go; move this gate with it", name)
+		}
+	}
+}
+
+// ledgerBootSteps lists the ledger calls fn makes, in source order.
+func ledgerBootSteps(fn *ast.FuncDecl) []string {
+	watched := map[string]bool{
+		"pruneLedgerOnce": true, "LoadVisible": true,
+		"SyncLedgerJobs": true, "checkLedgerConsistency": true,
+	}
+	var steps []string
+	ast.Inspect(fn, func(node ast.Node) bool {
+		call, ok := node.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		if selector, ok := call.Fun.(*ast.SelectorExpr); ok && watched[selector.Sel.Name] {
+			steps = append(steps, selector.Sel.Name)
+		}
+		return true
+	})
+	return steps
+}
+
+func indexOfStep(steps []string, name string) int {
+	for index, step := range steps {
+		if step == name {
+			return index
+		}
+	}
+	return -1
 }
