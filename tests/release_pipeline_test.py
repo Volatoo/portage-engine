@@ -889,6 +889,66 @@ class ReleasePipelineStaticTest(unittest.TestCase):
         self.assertLess(build_console, build_go)
         self.assertIn("internal/dashboard/webassets/bundle/dist/index.html", text)
 
+    def test_every_job_that_needs_the_console_bundle_builds_it(self) -> None:
+        # The release job was the third place this ordering constraint had to be
+        # restated by hand, and pr-build.yml was the fourth -- its Test Check ran
+        # the dashboard tests against an unbuilt bundle and its Build Verification
+        # uploaded binaries that answer 503 on every console route. Restating a
+        # constraint per workflow is what let it be missed, so this derives the
+        # set of jobs that need it instead of naming them.
+        #
+        # A job needs the bundle if it links a portage-dashboard binary anyone
+        # keeps, or runs the whole test suite -- four dashboard cases serve the
+        # console and 503 without it. `go build ./...` is deliberately not on
+        # this list: //go:embed all:bundle matches the committed bundle/.gitkeep,
+        # so compiling succeeds either way and only the artifact is wrong.
+        needs_bundle = ("cmd/dashboard/main.go", "go test -v -race", "go test ./...")
+        missing = []
+        for workflow in sorted((ROOT / ".github" / "workflows").glob("*.yml")):
+            text = workflow.read_text(encoding="utf-8")
+            for job_name, job in self._workflow_jobs(text):
+                trigger = next(
+                    (marker for marker in needs_bundle if marker in job), None
+                )
+                if trigger is None:
+                    continue
+                if "npm ci" not in job or "npm run build" not in job:
+                    missing.append(f"{workflow.name}:{job_name} runs {trigger!r}")
+                    continue
+                if job.index("npm run build") > job.index(trigger):
+                    missing.append(
+                        f"{workflow.name}:{job_name} builds the console after {trigger!r}"
+                    )
+        self.assertEqual(missing, [])
+
+    @staticmethod
+    def _workflow_jobs(text: str) -> "list[tuple[str, str]]":
+        """Split a workflow into (job name, job body) without a YAML parser.
+
+        Jobs are the four-space-indented keys under `jobs:`; anything more
+        indented belongs to the job above it.
+        """
+        lines = text.split("\n")
+        try:
+            start = lines.index("jobs:") + 1
+        except ValueError:
+            return []
+        jobs: "list[tuple[str, list[str]]]" = []
+        for line in lines[start:]:
+            if line and not line.startswith(" "):
+                break
+            stripped = line.strip()
+            if (
+                line.startswith("  ")
+                and not line.startswith("   ")
+                and stripped.endswith(":")
+                and not stripped.startswith("#")
+            ):
+                jobs.append((stripped[:-1], []))
+            elif jobs:
+                jobs[-1][1].append(line)
+        return [(name, "\n".join(body)) for name, body in jobs]
+
     def test_every_golangci_lint_pin_can_load_this_module(self) -> None:
         # golangci-lint refuses to load any config whose module targets a Go
         # language version above the one it was built with, and exits 3 before

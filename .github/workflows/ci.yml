@@ -72,6 +72,23 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
+      - name: Set up Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: '22.23.2'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Build the console bundle
+        # Dockerfile.test copies the checkout in, so the bundle has to exist on
+        # the host before the image is built. Four dashboard cases serve the
+        # console and get 503 from an unbuilt bundle.
+        run: |
+          set -eu
+          npm ci
+          npm run build
+        working-directory: web
+
       - name: Build test Docker image
         run: docker build -f Dockerfile.test -t portage-test:latest .
 
