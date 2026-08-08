@@ -79,13 +79,13 @@ func TestPrometheusSchedulerSnapshot(t *testing.T) {
 		"portage_distcc_workers_fresh 2",
 		"portage_distcc_slots_total 8",
 		"portage_distcc_slots_leased 3",
-		"portage_distcc_compile_local_total 11",
-		"portage_distcc_compile_remote_total 17",
-		"portage_distcc_hits_total 16",
-		"portage_distcc_fallback_total 2",
-		"portage_distcc_network_bytes_total 4096",
-		"portage_distcc_queue_milliseconds_total 25",
-		`portage_distcc_failures_total{reason="connect"} 2`,
+		"portage_distcc_compile_local_last_hour 11",
+		"portage_distcc_compile_remote_last_hour 17",
+		"portage_distcc_hits_last_hour 16",
+		"portage_distcc_fallback_last_hour 2",
+		"portage_distcc_network_bytes_last_hour 4096",
+		"portage_distcc_queue_milliseconds_last_hour 25",
+		`portage_distcc_failures_last_hour{reason="connect"} 2`,
 	} {
 		if !strings.Contains(body, expected) {
 			t.Fatalf("prometheus body missing %q", expected)
@@ -121,6 +121,103 @@ func TestPrometheusQueueGaugeFollowsTheSchedulerSnapshot(t *testing.T) {
 	m.PrometheusHandler().ServeHTTP(response, request)
 	if !strings.Contains(response.Body.String(), "portage_builds_queued 23") {
 		t.Fatalf("queue gauge did not follow the scheduler snapshot:\n%s", response.Body.String())
+	}
+}
+
+// TestLeaseExpiryCountersSurviveAFailedSchedulerRead covers the scrape a
+// timeout lands on. GetSchedulerStatus returns a status map with no
+// lease_expiries key when RuntimeStatus exceeds its two-second budget, which
+// reaches the exposition as a snapshot of zeros; publishing those made
+// increase() re-count the whole lifetime total and fired
+// PortageEngineLeaseExpiry with no lease having expired.
+func TestLeaseExpiryCountersSurviveAFailedSchedulerRead(t *testing.T) {
+	m := New(&Config{Enabled: true})
+	// Above anything another test in this package publishes: the floor lives on
+	// the process-wide registry New returns, so the reading has to be the
+	// highest one for this assertion to be about this test.
+	const observed = 4242
+	m.SetSchedulerProvider(func() SchedulerSnapshot {
+		return SchedulerSnapshot{
+			LeaseAttemptRequeued: observed, LeasePhaseReclaimed: observed,
+		}
+	})
+	t.Cleanup(func() { m.SetSchedulerProvider(nil) })
+	scrape := func() string {
+		response := httptest.NewRecorder()
+		m.PrometheusHandler().ServeHTTP(
+			response, httptest.NewRequest(http.MethodGet, "/metrics/prometheus", nil),
+		)
+		return response.Body.String()
+	}
+	if body := scrape(); !strings.Contains(body,
+		`portage_scheduler_lease_expiries_total{lease="attempt",result="requeued"} 4242`) {
+		t.Fatalf("first scrape did not publish the durable reading:\n%s", body)
+	}
+
+	// The timeout: RuntimeStatus returned early, so every lease field is zero.
+	m.SetSchedulerProvider(func() SchedulerSnapshot { return SchedulerSnapshot{} })
+	body := scrape()
+	for _, expected := range []string{
+		`portage_scheduler_lease_expiries_total{lease="attempt",result="requeued"} 4242`,
+		`portage_scheduler_lease_expiries_total{lease="phase",result="reclaimed"} 4242`,
+	} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("a failed scheduler read reset a counter; missing %q:\n%s", expected, body)
+		}
+	}
+}
+
+// TestRaiseSeriesNeverPublishesADecrease pins the rule itself, including on the
+// pre-New registry whose floor map is nil.
+func TestRaiseSeriesNeverPublishesADecrease(t *testing.T) {
+	m := &Metrics{}
+	for _, step := range []struct{ read, published int64 }{
+		{read: 5, published: 5},
+		{read: 9, published: 9},
+		{read: 0, published: 9},
+		{read: 3, published: 9},
+		{read: 11, published: 11},
+	} {
+		if got := m.raiseSeries("lease/attempt/requeued", step.read); got != step.published {
+			t.Fatalf("raiseSeries(%d) = %d, want %d", step.read, got, step.published)
+		}
+	}
+	if got := m.raiseSeries("lease/phase/reclaimed", 1); got != 1 {
+		t.Fatalf("an unrelated series inherited a floor: got %d, want 1", got)
+	}
+}
+
+// TestDistCCObservationsAreNotPublishedAsCounters keeps the rolling-hour
+// readings typed as what they are. CompileMetrics sums compile_observations
+// inside a one-hour window, so a quiet hour drops the value; under a _total
+// counter that drop read as a process restart.
+func TestDistCCObservationsAreNotPublishedAsCounters(t *testing.T) {
+	m := New(&Config{Enabled: true})
+	m.SetSchedulerProvider(func() SchedulerSnapshot {
+		return SchedulerSnapshot{
+			DistCCLocalCompiles: 3, DistCCFailures: map[string]int64{"connect": 1},
+		}
+	})
+	t.Cleanup(func() { m.SetSchedulerProvider(nil) })
+	response := httptest.NewRecorder()
+	m.PrometheusHandler().ServeHTTP(
+		response, httptest.NewRequest(http.MethodGet, "/metrics/prometheus", nil),
+	)
+	body := response.Body.String()
+	for _, line := range strings.Split(body, "\n") {
+		if !strings.HasPrefix(line, "# TYPE portage_distcc_") {
+			continue
+		}
+		if !strings.HasSuffix(line, " gauge") {
+			t.Fatalf("windowed distcc reading is not a gauge: %q", line)
+		}
+	}
+	if strings.Contains(body, "portage_distcc_compile_local_total") ||
+		strings.Contains(body, "portage_distcc_failures_total") {
+		t.Fatalf("a windowed distcc reading still carries a _total suffix:\n%s", body)
+	}
+	if !strings.Contains(body, "portage_distcc_compile_local_last_hour 3") {
+		t.Fatalf("windowed distcc reading missing:\n%s", body)
 	}
 }
 
