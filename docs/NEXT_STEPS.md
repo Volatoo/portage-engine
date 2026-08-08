@@ -66,10 +66,12 @@ authority 为 schema v30，迁移顺序固定为 00027 → 00028 → 00029 → 0
   - 中文目录改用中文标点，`set.binsha` 三条字符串进入消息目录，`quota.shadow`
     补上译文。新增两条门禁：中文串里禁止出现紧贴汉字的半角标点，以及译文与原文
     逐字相同的键必须在白名单内。
-- [ ] 合并提交落地后重新生成 `evidence/public-beta/repository-gate.json`。当前这份
-  的 `repository_head` 不在本分支历史里，`working_tree_dirty` 为 true，且它之后
-  nginx 模板又被改过两次；在干净树上重跑 `scripts/validate-public-edge.sh` 才能
-  让这份制品对应待发布的树。
+- [x] 在干净树上重新生成 `evidence/public-beta/repository-gate.json`。上一份的
+  `repository_head` 不在本分支历史里，`working_tree_dirty` 为 true，且其后 nginx
+  模板又被改过两次。当前这份 10 项全 pass，`working_tree_dirty` 为 false，
+  `repository_head` 指向承载它那次提交的父提交——制品无法描述包含自身的树，这一次
+  提交的差异只有制品本身。nginx 模板或 `scripts/validate-public-edge.sh` 再改动时
+  必须重跑。
 - [ ] 推送后确认 GitHub CI、CodeQL 和安全扫描全部通过。
 
 退出标准：工作区干净，远端 `main` 包含当前提交，CI 全绿，路线图不存在与
