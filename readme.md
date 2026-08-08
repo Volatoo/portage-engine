@@ -273,6 +273,14 @@ scripts/pgbackrest-backup.sh full
 scripts/public-beta-recovery-drill.sh postgres
 ```
 
+Useful development checks:
+
+```bash
+go test ./...
+go test -race ./internal/builder ./internal/server
+go vet ./...
+```
+
 ## Deployment and security
 
 The PVE path clones a native Gentoo cloud-init template, runs
@@ -335,28 +343,20 @@ logs containing secrets.
 
 ## Documentation
 
-- [Using the binhost and requesting builds](docs/USAGE.md)
-- [Federated identity and project RBAC](docs/IAM.md)
-- [Scheduler fairness and autoscaling](docs/SCHEDULER.md)
-- [Observability alert runbooks and drills](docs/OBSERVABILITY_RUNBOOKS.md)
-- [Distributed Build Alpha](docs/DISTRIBUTED_BUILD_ALPHA.md)
-- [Authentik, Google, GitHub, and generic OIDC providers](docs/IDENTITY_PROVIDERS.md)
-- [Policy-validated Portage configuration](docs/SYSTEM_CONFIG_USAGE.md)
-- [PVE native Gentoo deployment and testing](docs/PVE_TESTING.md)
-- [Profiles and immutable build catalog](docs/CATALOG.md)
-- [Offline Packer/Catalyst image factory](image-factory/README.md)
-- [Desktop E2E](docs/DESKTOP_E2E.md)
-- [Trusted-LAN and public production boundaries](docs/PRODUCTION_BOUNDARY.md)
-- [Immutable S3 object-storage contract](docs/OBJECT_STORAGE.md)
-- [Roadmap, security architecture and release gates](docs/ROADMAP_AND_DESKTOP_E2E.html)
+[docs/README.md](docs/README.md) is the map: every document, grouped by whether
+it is a reference, a guide, a runbook or a plan, because the four go stale for
+different reasons and at different speeds.
 
-Useful development checks:
+The ones most people want first:
 
-```bash
-go test ./...
-go test -race ./internal/builder ./internal/server
-go vet ./...
-```
+- [Using Portage Engine](docs/USAGE.md) — consuming the binhost, requesting
+  builds.
+- [PVE Native Gentoo reference deployment](docs/PVE_TESTING.md) — the tested
+  path, end to end.
+- [Identity and project authorization](docs/IAM.md) — federated identity and
+  project RBAC.
+- [Production boundary](docs/PRODUCTION_BOUNDARY.md) — what the public
+  deployment mode refuses.
 
 ## License
 
