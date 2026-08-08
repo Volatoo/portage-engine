@@ -935,20 +935,36 @@ func testMonitorTerminalEventWatermarkFallback(
 			)
 		}
 	}
-	// A terminal event arriving behind a cached snapshot makes the projected
-	// watermark trail the source by the gap between the two events. Reported
-	// lag must stay the age of the snapshot being served, which the cache TTL
-	// bounds, instead of that ten-minute gap.
+	// A terminal event that lands behind a cached snapshot does not reach the
+	// reader until the snapshot is reloaded, and the reading it is served has
+	// to say so. Reported lag is the age of that snapshot, which the cache TTL
+	// bounds, not the gap between the two events.
+	//
+	// The source watermark assertion is the one that pins the cost: a cache hit
+	// answers from memory, so it must still report the watermark it loaded even
+	// though the durable one has moved. A hit that re-derived the source would
+	// return the advanced value here — and would pay a sequential scan over
+	// every visible terminal job to do it, on every scrape.
 	if _, err := db.Pool().Exec(ctx, `
 		UPDATE build_jobs SET completed_at = clock_timestamp() WHERE id = $1
 	`, status.JobID); err != nil {
 		t.Fatalf("advance monitor source watermark: %v", err)
 	}
+	// Long enough for the snapshot to be a whole second old, which is the
+	// resolution lag is reported in.
+	time.Sleep(1100 * time.Millisecond)
 	runtime, err := projectionRepo.RuntimeStatus(ctx)
 	projection := runtime.TargetHistory.Projection
 	if err != nil || projection.State != "lagging" ||
-		projection.LagSeconds < 0 || projection.LagSeconds > 30 {
+		projection.LagSeconds < 1 || projection.LagSeconds > 30 {
 		t.Fatalf("cached monitor projection lag=%+v err=%v", projection, err)
+	}
+	if projection.SourceWatermarkAt == nil ||
+		!projection.SourceWatermarkAt.Equal(attemptFinishedAt) {
+		t.Fatalf(
+			"cache hit re-read the source watermark: got %v, want the cached %s",
+			projection.SourceWatermarkAt, attemptFinishedAt,
+		)
 	}
 	if _, err := db.Pool().Exec(ctx, `
 		UPDATE build_jobs SET completed_at = NULL WHERE id = $1

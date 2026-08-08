@@ -51,8 +51,9 @@ func TestMonitorProjectionStatus(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			status := monitorProjectionStatus(
-				now, test.source, test.projected, test.snapshotAge,
+			status := agedMonitorProjection(
+				monitorProjectionStatus(now, test.source, test.projected),
+				test.snapshotAge,
 			)
 			if status.State != test.wantState || status.Valid != test.wantValid ||
 				status.SourceWatermarkPresent != test.wantPresent ||
@@ -70,10 +71,9 @@ func TestMonitorProjectionLagIsSnapshotAgeNotEventGap(t *testing.T) {
 	now := time.Date(2026, time.August, 1, 8, 0, 0, 0, time.UTC)
 	projected := now.Add(-3 * time.Hour)
 	source := now.Add(-time.Second)
-	stale := monitorProjectionStatus(
-		now, &source, &projected, 20*time.Second,
-	)
-	fresh := monitorProjectionStatus(now, &source, &projected, 0)
+	loaded := monitorProjectionStatus(now, &source, &projected)
+	stale := agedMonitorProjection(loaded, 20*time.Second)
+	fresh := agedMonitorProjection(loaded, 0)
 	if stale.State != "lagging" || stale.LagSeconds != 20 ||
 		fresh.LagSeconds != 0 {
 		t.Fatalf("projection lag stale=%+v fresh=%+v", stale, fresh)
@@ -91,12 +91,13 @@ func TestMonitorLagBoundTracksTheCacheTTL(t *testing.T) {
 	now := time.Date(2026, time.August, 1, 8, 0, 0, 0, time.UTC)
 	source := now.Add(-time.Second)
 	projected := now.Add(-time.Hour)
-	status := monitorProjectionStatus(now, &source, &projected, 29*time.Second)
+	loaded := monitorProjectionStatus(now, &source, &projected)
+	status := agedMonitorProjection(loaded, 29*time.Second)
 	if status.AlertThresholdSeconds != int64(monitorCacheTTL/time.Second) {
 		t.Fatalf("published lag bound %ds does not match the %s cache TTL that produces lag_seconds",
 			status.AlertThresholdSeconds, monitorCacheTTL)
 	}
-	beyond := monitorProjectionStatus(now, &source, &projected, 90*time.Second)
+	beyond := agedMonitorProjection(loaded, 90*time.Second)
 	if beyond.LagSeconds != 90 {
 		t.Fatalf("lag reading was clamped to the published bound: %+v", beyond)
 	}
@@ -125,7 +126,9 @@ func TestComposeGatePinsThePublishedLagBound(t *testing.T) {
 func TestMonitorProjectionLagNeverReportsNegativeStaleness(t *testing.T) {
 	now := time.Date(2026, time.August, 1, 8, 0, 0, 0, time.UTC)
 	future := now.Add(time.Minute)
-	status := monitorProjectionStatus(now, &future, nil, -time.Second)
+	status := agedMonitorProjection(
+		monitorProjectionStatus(now, &future, nil), -time.Second,
+	)
 	if status.State != "lagging" || status.LagSeconds != 0 {
 		t.Fatalf("projection status=%+v", status)
 	}
