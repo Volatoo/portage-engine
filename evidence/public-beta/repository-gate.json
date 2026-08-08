@@ -1,11 +1,11 @@
 {
   "schema_version": 1,
   "gate": "public_edge_repository",
-  "generated_at": "2026-08-01T05:10:02Z",
+  "generated_at": "2026-08-08T12:21:44Z",
   "baseline_commit": "f79fca4",
-  "repository_head": "d5b06eb7e95fbf8ca03d0d79c08e6bed5d481824",
+  "repository_head": "76b1b61162d0bd586957047bcf46258e4e70d138",
   "tree_basis": "repository_head_plus_worktree",
-  "working_tree_dirty": true,
+  "working_tree_dirty": false,
   "validation_image": "nginx:1.29-alpine",
   "validation_image_digest": "nginx@sha256:5616878291a2eed594aee8db4dade5878cf7edcb475e59193904b198d9b830de",
   "status": "pass",
@@ -26,6 +26,16 @@
       "id": "edge_static_policy",
       "status": "pass",
       "summary": "edge template contains independent source-IP/request limits, device IAM no-store policy, cookie policy, anonymous routes, metrics auth, and WebShell denial"
+    },
+    {
+      "id": "webshell_denied",
+      "status": "pass",
+      "summary": "every WebShell path the Dashboard registers is denied on the public host"
+    },
+    {
+      "id": "frame_protection",
+      "status": "pass",
+      "summary": "the public host refuses framing, including in every location that writes its own header set"
     },
     {
       "id": "production_boundary_documented",
