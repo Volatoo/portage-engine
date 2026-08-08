@@ -102,9 +102,12 @@ time. The distance between the two watermarks is not the staleness measure:
 `monitor_job_outcomes` is a plain view over those same base tables, so a gap
 only identifies which terminal event the served snapshot predates, and its
 size is the quiet period before that event — hours on an idle control plane.
-When the source is ahead, `lag_seconds` is instead the age of the cached
-snapshot being served. A caught-up projection, an empty source, and a
-freshly loaded snapshot all report zero. `source_watermark_present`
+`lag_seconds` is instead the age of the cached snapshot being served. A cache
+hit does not re-read the source watermark to find out whether a terminal event
+landed since: the answer cannot change what the caller is handed, which is a
+snapshot that age old either way, and buying it cost one unindexable scan over
+every visible terminal job on every read. An empty source and a freshly loaded
+snapshot report zero. `source_watermark_present`
 distinguishes the valid empty case. `alert_threshold_seconds` publishes the
 30-second read-through cache TTL that produced the reading, so a reader can
 scale one against the other: 3 seconds out of 30 says the snapshot is early in

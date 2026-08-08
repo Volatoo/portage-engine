@@ -37,6 +37,16 @@ func monitorTargetID(targetKey string) string {
 // targetHistoryStatus bounds the analytical projection to one query per
 // control-plane replica every 30 seconds. Prometheus and dashboard polling
 // therefore cannot turn the 30-day read model into a per-scrape database scan.
+//
+// A hit answers entirely from memory. It used to re-read the source watermark
+// on every hit so it could say whether a terminal event had landed since the
+// snapshot, and that read is a max() over every visible terminal build_jobs row
+// with a correlated max(build_attempts.finished_at) inside the COALESCE — no
+// index answers it, and it ran under monitorMu, so every Monitor reader and
+// every Prometheus scrape queued behind one sequential scan. That is the cost
+// the cache exists to avoid, being paid on the path that was supposed to avoid
+// it. What the read bought is one bit: current versus lagging. A cached reading
+// is `age` old either way, so the bit is now inferred rather than bought.
 func (r *JobRepository) targetHistoryStatus(
 	ctx context.Context,
 ) (builder.TargetHistoryStatus, error) {
@@ -44,14 +54,8 @@ func (r *JobRepository) targetHistoryStatus(
 	defer r.monitorMu.Unlock()
 	age := time.Since(r.monitorAt)
 	if !r.monitorAt.IsZero() && age >= 0 && age < monitorCacheTTL {
-		projection, err := loadCachedMonitorProjection(
-			ctx, r.db.Pool(), r.monitor.Projection.ProjectedWatermarkAt, age,
-		)
-		if err != nil {
-			return builder.TargetHistoryStatus{}, err
-		}
 		status := r.monitor
-		status.Projection = projection
+		status.Projection = agedMonitorProjection(r.monitor.Projection, age)
 		return status, nil
 	}
 	var status builder.TargetHistoryStatus
@@ -111,52 +115,49 @@ func loadMonitorProjection(
 		return builder.MonitorProjectionStatus{},
 			fmt.Errorf("read monitor projection watermarks: %w", err)
 	}
-	// Both watermarks come from one statement over the same base tables, so a
-	// full load is current by construction and is zero seconds stale.
-	return monitorProjectionStatus(now, source, projected, 0), nil
+	return monitorProjectionStatus(now, source, projected), nil
 }
 
-func loadCachedMonitorProjection(
-	ctx context.Context,
-	q Querier,
-	projected *time.Time,
-	snapshotAge time.Duration,
-) (builder.MonitorProjectionStatus, error) {
-	var now time.Time
-	var source *time.Time
-	err := q.QueryRow(ctx, `
-		SELECT clock_timestamp(),
-		       max(COALESCE(
-		         j.completed_at,
-		         (
-		           SELECT max(a.finished_at)
-		           FROM build_attempts a
-		           WHERE a.job_id = j.id
-		         ),
-		         j.updated_at
-		       ))
-		FROM build_jobs j
-		WHERE j.legacy_visible = true
-		  AND j.state IN ('completed', 'success', 'failed', 'canceled')
-	`).Scan(&now, &source)
-	if err != nil {
-		return builder.MonitorProjectionStatus{},
-			fmt.Errorf("read monitor source watermark: %w", err)
+// agedMonitorProjection restates a loaded projection as the reading it has
+// become: one taken `age` ago.
+//
+// It reports lagging without asking whether anything actually landed in that
+// window, and that is the honest direction to be wrong in. A caller cannot act
+// on "nothing has happened since" — the freshest thing this replica can offer
+// is still `age` old — but it can act on "what you are reading is up to 12
+// seconds behind". Buying the distinction cost a sequential scan on every
+// scrape, and the reading it produced was already stale by the time it was
+// published.
+//
+// An empty or invalid projection is returned untouched: neither says anything
+// about a lag, and both are facts about the durable rows rather than about the
+// snapshot's age.
+func agedMonitorProjection(
+	cached builder.MonitorProjectionStatus,
+	age time.Duration,
+) builder.MonitorProjectionStatus {
+	seconds := int64(age.Seconds())
+	if !cached.Valid || !cached.SourceWatermarkPresent || seconds <= 0 {
+		return cached
 	}
-	return monitorProjectionStatus(now, source, projected, snapshotAge), nil
+	cached.State = "lagging"
+	cached.LagSeconds = seconds
+	return cached
 }
 
-// monitorProjectionStatus reports how long the snapshot behind the projected
-// watermark has been serving terminal events it does not contain. The distance
-// between the two watermarks cannot be that measure: monitor_job_outcomes is a
-// plain view over the same base tables, so a watermark gap only appears while
-// a cached snapshot is being served, and its size is the age of the previous
-// terminal event — hours on a quiet control plane — not the staleness of what
-// the caller is reading.
+// monitorProjectionStatus judges one load of the two watermarks.
+//
+// It reports no lag of its own: both watermarks come from a single statement
+// over the same base tables, so what it describes is zero seconds old. A load
+// that still finds the source ahead is saying the view omitted rows, which is a
+// fact about the projection rather than about elapsed time — the age of a
+// snapshot only starts accruing afterwards, and agedMonitorProjection is what
+// adds it. The distance between the two watermarks is never the measure: it is
+// the age of the previous terminal event, hours on a quiet control plane, and
+// not the staleness of what the caller is reading.
 func monitorProjectionStatus(
 	now time.Time,
 	source, projected *time.Time,
-	snapshotAge time.Duration,
 ) builder.MonitorProjectionStatus {
 	status := builder.MonitorProjectionStatus{
 		Valid:                  true,
@@ -179,10 +180,6 @@ func monitorProjectionStatus(
 		return status
 	}
 	status.State = "lagging"
-	status.LagSeconds = int64(snapshotAge.Seconds())
-	if status.LagSeconds < 0 {
-		status.LagSeconds = 0
-	}
 	return status
 }
 
