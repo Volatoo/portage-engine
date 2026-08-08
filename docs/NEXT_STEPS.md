@@ -1,8 +1,12 @@
 # Portage Engine 后续待办与验收计划
 
-更新日期：2026-08-07
+更新日期：2026-08-08
 
 ## 当前结论
+
+P0 已关闭：整合分支的 51 个提交已 rebase 进 `origin/main`，CI、CodeQL、Security
+Scan 与 PR Build Verification 在 `main` 上全绿，`evidence/public-beta/repository-gate.json`
+在合并后的干净树上重新生成且十项全 pass。下一步是 P1，全部依赖真实环境。
 
 `codex/next-steps-integration` 已补齐本文件中可以在仓库内安全实现和验证的切片：
 persistent executor 模板与 fail-closed Gate、CLI device authorization、公开 edge
@@ -27,7 +31,9 @@ authority 为 schema v30，迁移顺序固定为 00027 → 00028 → 00029 → 0
 
 - [x] 检查本地 `.playwright-mcp/` 浏览器测试输出并加入本地 exclude，避免测试
   日志进入版本控制。
-- [ ] 审阅并将 `codex/next-steps-integration` 合并/推送到 `origin/main`。
+- [x] 审阅并将 `codex/next-steps-integration` 合并/推送到 `origin/main`。以 rebase
+  落地 51 个提交，`main` 保持线性，每条修复的因果留在 `git log` 而不是只留在 PR
+  页面。因为 SHA 已重写，仍在旧分支上的工作树必须先与 `origin/main` 对齐再继续。
 - [x] 统一路线图中的调度边界描述：v1 以 project 作为公平和配额边界，
   capacity pool 负责 hard routing 与容量隔离，不默认实现 target/provider
   层级公平子队列。
@@ -90,7 +96,18 @@ authority 为 schema v30，迁移顺序固定为 00027 → 00028 → 00029 → 0
   `repository_head` 指向承载它那次提交的父提交——制品无法描述包含自身的树，这一次
   提交的差异只有制品本身。nginx 模板或 `scripts/validate-public-edge.sh` 再改动时
   必须重跑。
-- [ ] 推送后确认 GitHub CI、CodeQL 和安全扫描全部通过。
+- [x] 推送后确认 GitHub CI、CodeQL 和安全扫描全部通过。`main` 的 CI 十个 job、
+  Security Scan 的 GoSec 与 Trivy、PR Build Verification、CodeQL 全部通过。
+  两处需要记住：
+  - CodeQL 此前根本没有运行。工作流被 GitHub 以 `disabled_inactivity` 停用，
+    最后一次执行是 2026-03-02，因此 PR 的检查列表里从头到尾都没有它。重新启用后
+    在 `main` 上对 Go 报 0 条结果。
+  - Security 页签仍有 26 条 `go/path-injection` 与 `go/request-forgery` 处于
+    open，最后一次出现在合并前的 `db9e32e`。它们的 `analysis_key` 指向
+    `security-scan.yml:codeql-analysis`——一个已经删除的 job。GitHub 按 analysis
+    category 维护告警生命周期，创建它们的 category 不再运行，所以没有任何一次
+    分析会把它们标成 fixed。同一套默认查询在当前树上返回 0 条，这些告警需要手动
+    dismiss，不是待修的缺陷。
 
 退出标准：工作区干净，远端 `main` 包含当前提交，CI 全绿，路线图不存在与
 当前实现相矛盾的调度描述。
