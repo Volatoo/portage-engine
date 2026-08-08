@@ -34,6 +34,7 @@ function boot(overrides: Partial<BootPayload> = {}): BootPayload {
     local_login_enabled: true,
     identity_providers: [],
     principal: null,
+    step_up_method: 'local',
     route: { name: 'login', path: '/ui/login', job_id: '', instance_id: '', user_code: '' },
     asset_base: '/static/ui/',
     ...overrides,

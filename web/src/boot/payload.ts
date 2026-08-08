@@ -14,6 +14,11 @@
  * render its frame without a round trip for the id already in the URL.
  */
 
+// Type-only, so this stays a leaf module at runtime: the import is erased and no
+// edge from boot to api survives compilation. The union is declared where the
+// wire types live because the same three values arrive in a step-up refusal.
+import type { StepUpMethod } from '../api/types';
+
 /** The two languages the console ships strings for. */
 export const LANGUAGES = ['en', 'zh'] as const;
 export type Language = (typeof LANGUAGES)[number];
@@ -87,6 +92,19 @@ export interface BootPayload {
    */
   identity_providers: BootIdentityProvider[];
   principal: BootPrincipal | null;
+  /**
+   * The credential that could satisfy a step-up for this session.
+   *
+   * Beside `principal` rather than inside it, because `principal` is null for a
+   * federated session — naming that principal costs the server an upstream round
+   * trip — and this fact does not. Reading the method off the principal read
+   * nothing on exactly the deployments where the answer is `federated`, and the
+   * page then offered a local administrator prompt that session can never pass.
+   *
+   * `unstated` is a payload that did not say, which is a server older than this
+   * bundle. It offers no credential rather than guessing at one.
+   */
+  step_up_method: StepUpMethod | 'unstated';
   route: BootRoute;
   /** URL prefix the hashed asset tree is mounted at, e.g. "/static/ui/". */
   asset_base: string;

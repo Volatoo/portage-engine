@@ -128,7 +128,7 @@ export function BuildDetailPage({ route, boot }: PageProps) {
   // answer for a job at all, so neither poll goes out before the chrome has
   // settled which project this reader is in.
   const { projectID, ready } = useProjectScope();
-  const stepUp = useStepUp(boot?.principal?.authentication ?? '');
+  const stepUp = useStepUp(boot?.step_up_method ?? 'unstated');
   const loadDetail = useCallback(
     (signal: AbortSignal) => api.buildDetail(jobID, { projectID, signal }),
     [jobID, projectID],

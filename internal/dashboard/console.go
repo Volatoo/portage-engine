@@ -340,6 +340,7 @@ func (d *Dashboard) consoleBoot(r *http.Request, route webassets.Route) webasset
 		LocalLoginEnabled: d.config.AdminUser != "" && d.config.AdminPassword != "",
 		IdentityProviders: d.consoleIdentityProviders(),
 		Principal:         d.consolePrincipal(r),
+		StepUpMethod:      d.stepUpMethod(r),
 		Route:             route,
 		AssetBase:         consoleAssetPrefix,
 	}

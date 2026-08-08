@@ -8,6 +8,7 @@ import {
   type BootRoute,
   type Language,
 } from './payload';
+import type { StepUpMethod } from '../api/types';
 
 declare global {
   interface Window {
@@ -69,6 +70,18 @@ function readPrincipal(value: unknown): BootPrincipal | null {
     provider_id: readText(source, 'provider_id'),
     authentication: readText(source, 'authentication'),
   };
+}
+
+/**
+ * The credential that could satisfy a step-up, or `unstated`.
+ *
+ * Anything the server did not spell is `unstated` and offers no credential.
+ * Defaulting to `local` here is what put the administrator password prompt in
+ * front of federated operators, who have no such password to give.
+ */
+function readStepUpMethod(source: Record<string, unknown> | null): StepUpMethod | 'unstated' {
+  const value = readText(source, 'step_up_method');
+  return value === 'local' || value === 'federated' || value === 'unavailable' ? value : 'unstated';
 }
 
 /**
@@ -134,6 +147,7 @@ export function coerceBootPayload(raw: unknown, servedLang: string | null): Boot
     local_login_enabled: readFlag(source, 'local_login_enabled'),
     identity_providers: readIdentityProviders(source?.['identity_providers']),
     principal: readPrincipal(source?.['principal']),
+    step_up_method: readStepUpMethod(source),
     route: readRoute(source?.['route']),
     asset_base: readText(source, 'asset_base'),
   };

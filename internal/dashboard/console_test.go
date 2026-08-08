@@ -306,6 +306,66 @@ func TestConsoleBootLeavesAnUnprovableSessionUnnamed(t *testing.T) {
 	}
 }
 
+// TestConsoleBootStatesTheStepUpMethodTheUnnamedSessionCanOffer covers the half
+// of the payload the test above deliberately leaves nil.
+//
+// A federated session has no principal here, because naming it costs an upstream
+// round trip. The console used to read the step-up method off that principal, so
+// on exactly the deployments whose answer is "federated" it read nothing,
+// defaulted to "local", and put the local administrator password prompt in front
+// of operators who have no such password — leaving Save, Test Connection, Start
+// Test Build, Delete Job, Clean Up Failed and Revoke All unusable. The method is
+// its own field for that reason: it is answerable from the session prefix alone.
+func TestConsoleBootStatesTheStepUpMethodTheUnnamedSessionCanOffer(t *testing.T) {
+	elevatable := &config.DashboardConfig{
+		AuthEnabled: true, JWTSecret: "console-boot-test-secret",
+		AdminUser: "operator", AdminPassword: "password",
+		ServerStepUpAPIKey: "independent-step-up-key",
+	}
+	local, err := signToken(elevatable.JWTSecret, "operator", time.Now(), time.Hour)
+	if err != nil {
+		t.Fatalf("signToken: %v", err)
+	}
+
+	cases := []struct {
+		name   string
+		config *config.DashboardConfig
+		token  string
+		want   string
+	}{
+		{"federated session", elevatable, "oidc.opaque-session-handle", "federated"},
+		{"federated legacy alias", elevatable, "federated.opaque-handle", "federated"},
+		{"local session with an independent step-up key", elevatable, local, "local"},
+		{
+			"local session on a deployment holding no step-up credential",
+			&config.DashboardConfig{
+				AuthEnabled: true, JWTSecret: "console-boot-test-secret",
+				AdminUser: "operator", AdminPassword: "password",
+			},
+			local,
+			"unavailable",
+		},
+		{"no session at all", elevatable, "", "unavailable"},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			dashboard := New(testCase.config)
+			request := httptest.NewRequest(http.MethodGet, "/settings", nil)
+			if testCase.token != "" {
+				request.AddCookie(&http.Cookie{Name: sessionCookie, Value: testCase.token})
+			}
+			_, route, ok := matchConsoleRoute(request.URL.Path, request.URL.Query())
+			if !ok {
+				t.Fatal("/settings did not match a console route")
+			}
+			boot := dashboard.consoleBoot(request, route)
+			if boot.StepUpMethod != testCase.want {
+				t.Errorf("step-up method %q, want %q", boot.StepUpMethod, testCase.want)
+			}
+		})
+	}
+}
+
 func TestConsoleBootNamesEveryProviderTheDeploymentCanSignInThrough(t *testing.T) {
 	dashboard := New(&config.DashboardConfig{
 		AuthEnabled: true,

@@ -96,10 +96,15 @@ export function SettingsPage(props: Partial<PageProps> = {}) {
   // successful PUT empties the four secret inputs, where an empty secret is the
   // wire spelling of "keep the stored one". So the panels take a guard and the
   // page owns the prompts, below the form.
-  const authentication = props.boot?.principal?.authentication ?? '';
-  const stepUp = useStepUp(authentication);
-  const connectionStepUp = useStepUp(authentication);
-  const sessionStepUp = useStepUp(authentication);
+  //
+  // The method comes off the payload's own field, not off the principal: the
+  // server sends no principal for a federated session, so reading it there
+  // returned nothing and every OIDC operator was offered the local password
+  // prompt their session can never satisfy.
+  const sessionMethod = props.boot?.step_up_method ?? 'unstated';
+  const stepUp = useStepUp(sessionMethod);
+  const connectionStepUp = useStepUp(sessionMethod);
+  const sessionStepUp = useStepUp(sessionMethod);
   // Held in its own binding because it never changes identity, and the writer
   // below is built once and must not be rebuilt: a rebuilt writer comes back
   // with its in-flight flag clear.

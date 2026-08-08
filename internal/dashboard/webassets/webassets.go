@@ -270,6 +270,15 @@ type Boot struct {
 	Principal *Principal `json:"principal"`
 	Route     Route      `json:"route"`
 
+	// StepUpMethod is the credential that could satisfy a step-up for this
+	// session: "federated", "local", or "unavailable" when the deployment holds
+	// none. Beside Principal rather than inside it, because Principal is nil for
+	// a federated session — naming that principal costs an upstream round trip —
+	// and this fact does not. A console that read the method off the principal
+	// read nothing, defaulted to the local password prompt, and offered it to
+	// the operators who can never satisfy it.
+	StepUpMethod string `json:"step_up_method"`
+
 	// AssetBase is the prefix the hashed tree is mounted at, passed in rather
 	// than compiled into the bundle so the two cannot drift apart.
 	AssetBase string `json:"asset_base"`
