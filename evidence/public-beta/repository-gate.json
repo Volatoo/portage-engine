@@ -1,9 +1,9 @@
 {
   "schema_version": 1,
   "gate": "public_edge_repository",
-  "generated_at": "2026-08-08T12:21:44Z",
+  "generated_at": "2026-08-08T13:42:05Z",
   "baseline_commit": "f79fca4",
-  "repository_head": "76b1b61162d0bd586957047bcf46258e4e70d138",
+  "repository_head": "974171b6771469deebda00e017348efbb9f89bd5",
   "tree_basis": "repository_head_plus_worktree",
   "working_tree_dirty": false,
   "validation_image": "nginx:1.29-alpine",
