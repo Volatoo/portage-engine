@@ -854,6 +854,15 @@ func (s *Server) initPersistence() error {
 		// restarted. Readiness stays red (see checkLedgerHealth) until one of
 		// the 5s ticks actually lands a projection.
 		s.startLedgerReconciler(5 * time.Second)
+		// Retention runs before the projection is loaded, not after it.
+		// ExpireTerminal hides every terminal job past the retention window, so
+		// a projection loaded first holds exactly the rows the prune is about
+		// to hide, and the consistency check below then counts each of them as
+		// the map claiming a job the ledger does not have — a divergence this
+		// process created between its own two reads. That verdict gates
+		// readiness, so a replica that had done nothing wrong answered 503 and
+		// logged a ledger warning from boot until the next reconciler tick.
+		s.pruneLedgerOnce()
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		durableJobs, loadErr := s.jobLedger.LoadVisible(ctx)
 		cancel()
@@ -862,7 +871,6 @@ func (s *Server) initPersistence() error {
 			return fmt.Errorf("load PostgreSQL job projection: %w", loadErr)
 		}
 		s.builder.SyncLedgerJobs(durableJobs)
-		s.pruneLedgerOnce()
 		// The first compare runs here rather than on the first tick, immediately
 		// after the projection it is about to judge was installed. Running it any
 		// earlier would compare the durable rows against an empty map and call
@@ -941,6 +949,12 @@ func (s *Server) startLedgerReconciler(interval time.Duration) {
 			case <-s.ledgerStop:
 				return
 			case <-ticker.C:
+				// Same order as initPersistence, for the same reason: a prune
+				// between the load and the compare invents a difference. This
+				// path is still the one that fires the sync.Once whenever the
+				// boot-time load failed, because Initialize downgrades that to
+				// a warning and carries on.
+				s.pruneLedgerOnce()
 				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 				jobs, err := s.jobLedger.LoadVisible(ctx)
 				cancel()
@@ -950,7 +964,6 @@ func (s *Server) startLedgerReconciler(interval time.Duration) {
 					continue
 				}
 				s.builder.SyncLedgerJobs(jobs)
-				s.pruneLedgerOnce()
 				s.checkLedgerConsistency(time.Now())
 			}
 		}
