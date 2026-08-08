@@ -352,7 +352,15 @@ services:
       CLOUD_PVE_USERNAME: ${PORTAGE_CAPACITY_PVE_USERNAME:-}
       CLOUD_PVE_PASSWORD: ${PORTAGE_CAPACITY_PVE_PASSWORD:-}
     volumes:
-      - ${PORTAGE_CAPACITY_CONFIG_PATH:-./configs/capacity-actuator.example.json}:/etc/portage-engine/capacity-actuator.json:ro
+      # Long syntax because the source carries a `:-` default. In the short
+      # form the whole entry is split on colons, and `docker compose config
+      # --no-interpolate` — which the public edge gate uses to prove no
+      # production credential is substituted — leaves the expansion literal and
+      # then counts four fields instead of three.
+      - type: bind
+        source: ${PORTAGE_CAPACITY_CONFIG_PATH:-./configs/capacity-actuator.example.json}
+        target: /etc/portage-engine/capacity-actuator.json
+        read_only: true
       - capacity-terraform:/var/lib/portage-engine/capacity-terraform
     depends_on:
       portage-migrate:
@@ -472,8 +480,15 @@ services:
       - portage-logs:/var/log/portage-engine
       - portage-state:/var/lib/portage-engine
       - ./configs:/etc/portage-engine/configs:ro
-      - ${PORTAGE_WORKER_PKI_DIR:-./.local/worker-pki}:/run/worker-pki:ro
-      - ${PORTAGE_WORKER_SECRETS_DIR:-./.local/worker-secrets}:/run/worker-secrets:ro
+      # Long syntax for the same reason as the actuator config mount above.
+      - type: bind
+        source: ${PORTAGE_WORKER_PKI_DIR:-./.local/worker-pki}
+        target: /run/worker-pki
+        read_only: true
+      - type: bind
+        source: ${PORTAGE_WORKER_SECRETS_DIR:-./.local/worker-secrets}
+        target: /run/worker-secrets
+        read_only: true
     depends_on:
       portage-migrate:
         condition: service_completed_successfully

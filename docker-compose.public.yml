@@ -143,8 +143,17 @@ services:
     volumes:
       - portage-state:/var/lib/portage-engine
       - ./configs:/etc/portage-engine/configs:ro
-      - ${PORTAGE_WORKER_SECRETS_DIR:?set worker secret directory}:/run/worker-secrets:ro
-      - ${PORTAGE_EXECUTOR_SECRETS_DIR:?set executor secret directory}:/run/executor-secrets:ro
+      # Long syntax: the short form is split on colons, and the gate renders
+      # this overlay with `--no-interpolate` to prove it substitutes no
+      # production credential, which leaves the `:?` expansion literal.
+      - type: bind
+        source: ${PORTAGE_WORKER_SECRETS_DIR:?set worker secret directory}
+        target: /run/worker-secrets
+        read_only: true
+      - type: bind
+        source: ${PORTAGE_EXECUTOR_SECRETS_DIR:?set executor secret directory}
+        target: /run/executor-secrets
+        read_only: true
     depends_on:
       portage-migrate:
         condition: service_completed_successfully
