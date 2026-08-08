@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/google/uuid"
@@ -797,16 +798,65 @@ func leaseExpiryResult(state string) string {
 	}
 }
 
+// leaseExpiryKey identifies one row of scheduler_lease_expiry_counters. The
+// set is fixed and small — seven rows — which is what makes a global lock order
+// over them cheap to state and cheap to keep.
+type leaseExpiryKey struct{ leaseKind, result string }
+
+// flushLeaseExpiries applies a whole recovery batch's counter updates in one
+// fixed order.
+//
+// Every replica runs the same recovery loop, and each used to update a counter
+// row per recovered lease, in whatever order loadExpiredLeases happened to
+// return them — which is by expires_at, so two replicas recovering overlapping
+// kinds routinely took the same two rows in opposite orders. That is a lock
+// cycle: PostgreSQL breaks it with 40P01 and rolls back a whole transaction,
+// and this transaction is the one that requeues expired work, so a deadlock
+// costs an entire round of recovery rather than one counter increment.
+//
+// Sorting gives the rows a global order, so two batches can only ever queue
+// behind each other. Folding the batch into one UPDATE per row is what makes
+// the ordered section short: the locks are taken once, at the end, and held for
+// the remainder of a transaction that has already done all its other work.
+func flushLeaseExpiries(
+	ctx context.Context,
+	q Querier,
+	tally map[leaseExpiryKey]int64,
+) error {
+	ordered := make([]leaseExpiryKey, 0, len(tally))
+	for key := range tally {
+		ordered = append(ordered, key)
+	}
+	sort.Slice(ordered, func(left, right int) bool {
+		if ordered[left].leaseKind != ordered[right].leaseKind {
+			return ordered[left].leaseKind < ordered[right].leaseKind
+		}
+		return ordered[left].result < ordered[right].result
+	})
+	for _, key := range ordered {
+		if err := recordLeaseExpiry(ctx, q, key.leaseKind, key.result, tally[key]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validLeaseExpiryCounter reports whether the pair names one of the fixed rows.
+func validLeaseExpiryCounter(leaseKind, result string) bool {
+	if leaseKind == "phase" {
+		return result == "reclaimed"
+	}
+	return (leaseKind == "attempt" || leaseKind == "admission") &&
+		(result == "requeued" || result == "failed" || result == "canceled")
+}
+
 func recordLeaseExpiry(
 	ctx context.Context,
 	q Querier,
 	leaseKind, result string,
 	count int64,
 ) error {
-	valid := (leaseKind == "attempt" || leaseKind == "admission") &&
-		(result == "requeued" || result == "failed" || result == "canceled")
-	valid = valid || (leaseKind == "phase" && result == "reclaimed")
-	if !valid || count <= 0 {
+	if !validLeaseExpiryCounter(leaseKind, result) || count <= 0 {
 		return fmt.Errorf(
 			"invalid lease expiry counter update kind=%q result=%q count=%d",
 			leaseKind, result, count,
@@ -840,10 +890,15 @@ func expiredLeaseOutcome(row expiredLeaseRow) (string, string) {
 	return "queued", "previous executor lease expired; job queued for a fenced retry"
 }
 
+// recoverExpiredLease requeues, fails or cancels one expired lease and tallies
+// the counter row it belongs to. The counter is written by flushLeaseExpiries
+// once the whole batch is recovered, so this function takes no lock that
+// another replica's batch could be holding in the other direction.
 func (r *JobRepository) recoverExpiredLease(
 	ctx context.Context,
 	q Querier,
 	row expiredLeaseRow,
+	tally map[leaseExpiryKey]int64,
 ) error {
 	now, err := readDatabaseClock(ctx, q)
 	if err != nil {
@@ -919,9 +974,15 @@ func (r *JobRepository) recoverExpiredLease(
 	}); err != nil {
 		return err
 	}
-	return recordLeaseExpiry(
-		ctx, q, row.leaseKind, leaseExpiryResult(state), 1,
-	)
+	result := leaseExpiryResult(state)
+	if !validLeaseExpiryCounter(row.leaseKind, result) {
+		return fmt.Errorf(
+			"invalid lease expiry counter update kind=%q result=%q",
+			row.leaseKind, result,
+		)
+	}
+	tally[leaseExpiryKey{leaseKind: row.leaseKind, result: result}]++
+	return nil
 }
 
 func (r *JobRepository) recoverExpiredTx(ctx context.Context, q Querier, limit int) (int, error) {
@@ -929,10 +990,14 @@ func (r *JobRepository) recoverExpiredTx(ctx context.Context, q Querier, limit i
 	if err != nil {
 		return 0, err
 	}
+	tally := make(map[leaseExpiryKey]int64, len(expired))
 	for _, row := range expired {
-		if err := r.recoverExpiredLease(ctx, q, row); err != nil {
+		if err := r.recoverExpiredLease(ctx, q, row, tally); err != nil {
 			return 0, err
 		}
+	}
+	if err := flushLeaseExpiries(ctx, q, tally); err != nil {
+		return 0, err
 	}
 	return len(expired), nil
 }
