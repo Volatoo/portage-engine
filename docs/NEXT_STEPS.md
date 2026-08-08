@@ -312,7 +312,8 @@ distcc 应作为独立里程碑，不能直接打开全局开关。
 
 ## 相关文档
 
-- [总体路线图](ROADMAP_AND_DESKTOP_E2E.html)
+- [企业内部构建中心差距分析](ENTERPRISE_GAPS.md)
+- [设计决策与被否决的方案](DESIGN_DECISIONS.md)
 - [生产部署边界](PRODUCTION_BOUNDARY.md)
 - [对象存储契约](OBJECT_STORAGE.md)
 - [调度与容量](SCHEDULER.md)

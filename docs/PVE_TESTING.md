@@ -76,8 +76,8 @@ outbound worker identity, project runtime/cost quota, failure-storm cooldown,
 administrator step-up and cross-replica OIDC session lifecycle are
 implemented; production identity-provider callbacks and an external workload
 issuer/recovery drill remain.
-See
-[ROADMAP_AND_DESKTOP_E2E.html](ROADMAP_AND_DESKTOP_E2E.html).
+See [NEXT_STEPS.md](NEXT_STEPS.md) for what is still outstanding, and
+[DESIGN_DECISIONS.md](DESIGN_DECISIONS.md) for why the boundary sits here.
 
 In a multi-replica control plane, the normal HTTP API may sit behind a load
 balancer, but each replica's `WORKER_GATEWAY_ADVERTISE_URL` must route directly
@@ -538,8 +538,10 @@ tests instead of modifying a template in place. Packer does not manage old PVE
 templates, so a separate image controller/CI retention job must retire a
 generation only after no active VM lease refers to it.
 
-The detailed matrix, architecture, and `IMG-0` through `IMG-4` rollout are in
-[ROADMAP_AND_DESKTOP_E2E.html#profile-images](ROADMAP_AND_DESKTOP_E2E.html#profile-images).
+The image matrix and the two build paths are in [CATALOG.md](CATALOG.md) and
+the [image factory](../image-factory/README.md); the rule about what belongs in
+a template rather than a BuildSpec is in
+[DESIGN_DECISIONS.md](DESIGN_DECISIONS.md).
 
 ### PVE identity
 

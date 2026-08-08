@@ -43,6 +43,8 @@ The contracts. These describe the system as it is.
 - [Compatibility policy](COMPATIBILITY.md) — what a pre-1.0 project promises
   across upgrades, and what it does not.
 - [HTTP API](openapi.yaml) — the OpenAPI document for the `/api/v1` surface.
+- [Design decisions](DESIGN_DECISIONS.md) — why the system is shaped this way
+  and what was rejected; the reasoning the contracts above do not carry.
 
 ## Guides
 

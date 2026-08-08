@@ -266,5 +266,6 @@ tenants: OIDC/project RBAC is now enforced; the next security milestone is
 per-project quota/admission and abuse
 controls, followed by production issuer/signer host and network isolation.
 
-See [ROADMAP_AND_DESKTOP_E2E.html](ROADMAP_AND_DESKTOP_E2E.html) for the gates
-and the Packer/Catalyst sequence.
+See [NEXT_STEPS.md](NEXT_STEPS.md) for the outstanding gates and
+[DESIGN_DECISIONS.md](DESIGN_DECISIONS.md) for why the Packer and Catalyst
+paths converge on one manifest.
