@@ -266,15 +266,19 @@ func (d *PVEQGADriver) Do(ctx context.Context, action ActionRequest) (Observatio
 		}
 		return Observation{State: "passed", Message: "digest-bound local fixture launched"}, nil
 	case "wait_accessible":
-		_, err := d.guestExec(ctx, []string{d.config.GuestAgentPath, "wait-accessible", action.Input["role"], action.Input["name"], action.Input["state"]})
+		_, err := d.guestExec(ctx, append([]string{
+			d.config.GuestAgentPath, "wait-accessible",
+			action.Input["role"], action.Input["name"], action.Input["state"],
+		}, accessibilityBudgetArgument(ctx)...))
 		if err != nil {
 			return Observation{}, err
 		}
 		return Observation{State: "passed"}, nil
 	case "close":
-		_, err := d.guestExec(ctx, []string{
-			d.config.GuestAgentPath, "close", action.Input["role"], action.Input["name"], action.Input["state"],
-		})
+		_, err := d.guestExec(ctx, append([]string{
+			d.config.GuestAgentPath, "close",
+			action.Input["role"], action.Input["name"], action.Input["state"],
+		}, accessibilityBudgetArgument(ctx)...))
 		if err != nil {
 			return Observation{}, err
 		}
@@ -537,6 +541,38 @@ func (d *PVEQGADriver) taskPOST(ctx context.Context, path string, values url.Val
 		}
 	}
 	return fmt.Errorf("PVE task did not finish before deadline")
+}
+
+// accessibilityBudgetArgument tells the guest agent how long this step may
+// wait, as an optional trailing argument.
+//
+// The agent capped both accessibility waits at a hardcoded 60 seconds, so a
+// step declaring timeout_seconds 90 — which tests/desktop/scenarios does, and
+// which scenario.go validates up to 300 — gave up at 60 and reported the
+// selector as missing. The declared budget was unreachable, and its failure was
+// indistinguishable from a desktop that never drew the window.
+//
+// The step context already carries the deadline, so it is the authority; a
+// second of margin keeps the guest's named failure ahead of the transport
+// cancellation, whose error says nothing about the selector. A context with no
+// deadline sends nothing and the agent uses its own default.
+func accessibilityBudgetArgument(ctx context.Context) []string {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return nil
+	}
+	// Rounded, not truncated: a 90-second step has a hair under 90 seconds left
+	// by the time this runs, and truncating would spend the margin twice.
+	seconds := int(time.Until(deadline).Round(time.Second).Seconds()) - 1
+	if seconds < 1 {
+		// Already out of time. Let the agent's default run and the context
+		// cancel it, rather than sending a budget the agent will reject.
+		return nil
+	}
+	if seconds > maxStepTimeoutSeconds {
+		seconds = maxStepTimeoutSeconds
+	}
+	return []string{strconv.Itoa(seconds)}
 }
 
 func (d *PVEQGADriver) guestExec(ctx context.Context, command []string) (string, error) {

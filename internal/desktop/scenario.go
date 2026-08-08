@@ -15,6 +15,11 @@ import (
 
 const maxScenarioBytes int64 = 1 << 20
 
+// maxStepTimeoutSeconds is the longest a single step may declare. It is also
+// the ceiling the guest agent applies to a wait budget it is handed, so the two
+// sides cannot disagree about how long a step is allowed to last.
+const maxStepTimeoutSeconds = 300
+
 var scenarioIDPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._/-]{0,127}$`)
 
 var (
@@ -163,7 +168,7 @@ func validateScenarioStep(schemaVersion, index int, step *Step, seen map[string]
 	if !ok {
 		return fmt.Errorf("step %q has unsupported action %q", step.ID, step.Action)
 	}
-	if step.TimeoutSeconds < 0 || step.TimeoutSeconds > 300 {
+	if step.TimeoutSeconds < 0 || step.TimeoutSeconds > maxStepTimeoutSeconds {
 		return fmt.Errorf("step %q timeout must be at most 300 seconds", step.ID)
 	}
 	if step.Action == "restore" || step.Action == "start" || step.Action == "stop" {

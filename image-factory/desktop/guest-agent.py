@@ -37,6 +37,11 @@ DIGEST_RE = re.compile(r"^sha256:[a-f0-9]{64}$")
 FINGERPRINT_RE = re.compile(r"^(?:[A-F0-9]{40}|[A-F0-9]{64})$")
 FIXTURE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 KEY_RE = re.compile(r"^[A-Za-z0-9+_-]{1,128}$")
+BUDGET_RE = re.compile(r"^[0-9]{1,3}$")
+# The fallback for a driver that sends no budget, and the ceiling, which is the
+# scenario schema's own per-step maximum in internal/desktop/scenario.go.
+DEFAULT_ACCESSIBILITY_BUDGET = 60.0
+MAX_ACCESSIBILITY_BUDGET = 300
 SAFE_PATH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9+._/-]{0,511}$")
 MAX_MANIFEST_BYTES = 4 * 1024 * 1024
 MAX_OBJECTS = 10000
@@ -430,13 +435,45 @@ def install_binpkg(atom: str, digest: str, signer_fingerprint: str = "", raw_log
         fail(f"{requirement}binpkg install failed with exit code {result.returncode}")
 
 
-def close_accessible(role: str, name: str, state: str) -> None:
+def accessibility_budget(seconds: str | None) -> float:
+    """Seconds an accessibility wait may take, from the caller's step budget.
+
+    The driver passes the step's own remaining time. It used to be hardcoded at
+    60 here, which silently capped every scenario: a step declaring
+    timeout_seconds 90 got 60, failed with "selector was not found" at 60, and
+    read as a desktop that never drew its window rather than as a budget the
+    guest refused to honour. DEFAULT_ACCESSIBILITY_BUDGET stays for a driver
+    that sends nothing, and the ceiling is the scenario schema's own per-step
+    maximum so the guest cannot be told to wait longer than a step may last.
+    """
+    if seconds is None:
+        return DEFAULT_ACCESSIBILITY_BUDGET
+    if not BUDGET_RE.fullmatch(seconds):
+        fail("invalid accessibility wait budget")
+    budget = int(seconds)
+    if budget < 1 or budget > MAX_ACCESSIBILITY_BUDGET:
+        fail("accessibility wait budget is out of range")
+    return float(budget)
+
+
+def wait_accessible(role: str, name: str, state: str, seconds: str | None = None) -> None:
+    if not role or not name or len(role) > 128 or len(name) > 256:
+        fail("invalid accessibility selector")
+    deadline = time.monotonic() + accessibility_budget(seconds)
+    while time.monotonic() < deadline:
+        if accessible_present(role, name, state):
+            return
+        time.sleep(1)
+    fail("accessibility selector was not found")
+
+
+def close_accessible(role: str, name: str, state: str, seconds: str | None = None) -> None:
     if not role or not name or len(role) > 128 or len(name) > 256:
         fail("invalid accessibility selector")
     if not accessible_present(role, name, state):
         fail("accessibility selector was not present before close")
     run_desktop(["/usr/bin/xdotool", "key", "--clearmodifiers", "Alt+F4"])
-    deadline = time.monotonic() + 60
+    deadline = time.monotonic() + accessibility_budget(seconds)
     while time.monotonic() < deadline:
         if not accessible_present(role, name, state):
             return
@@ -569,19 +606,11 @@ def main(arguments: list[str]) -> None:
     elif action == "launch-fixture" and len(values) == 3:
         application, fixture, digest = values
         launch_application(application, reviewed_fixture(fixture, digest))
-    elif action == "wait-accessible" and len(values) == 3:
-        role, name, state = values
-        if not role or not name or len(role) > 128 or len(name) > 256:
-            fail("invalid accessibility selector")
-        deadline = time.monotonic() + 60
-        while time.monotonic() < deadline:
-            if accessible_present(role, name, state):
-                return
-            time.sleep(1)
-        fail("accessibility selector was not found")
+    elif action == "wait-accessible" and len(values) in {3, 4}:
+        wait_accessible(*values)
     elif action == "_a11y" and len(values) == 3:
         print("found" if scan_accessibility(*values) else "missing")
-    elif action == "close" and len(values) == 3:
+    elif action == "close" and len(values) in {3, 4}:
         close_accessible(*values)
     elif action == "key" and len(values) == 1:
         if not KEY_RE.fullmatch(values[0]):
