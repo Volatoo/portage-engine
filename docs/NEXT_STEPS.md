@@ -1,6 +1,6 @@
 # Portage Engine 后续待办与验收计划
 
-更新日期：2026-08-01
+更新日期：2026-08-07
 
 ## 当前结论
 
@@ -16,7 +16,7 @@ authority 为 schema v30，迁移顺序固定为 00027 → 00028 → 00029 → 0
 
 | 工作流 | 仓库/本地 Gate | 真实环境 Gate |
 | --- | --- | --- |
-| Persistent Executor | `scripts/persistent-executor-gate.sh repo` 通过 | PVE SCHED-2B `not-run` |
+| Persistent Executor | `scripts/persistent-executor-gate.sh repo` 通过；capacity 删除边界需要 `PORTAGE_TEST_DATABASE_URL`，无数据库时记为 `not-run` | PVE SCHED-2B `not-run` |
 | Identity / Public Edge | 配置、Nginx/Compose 与 redacted Gate 通过 | 三个 IdP 与公网主机 `not-run` |
 | Recovery | 静态 7 项通过，4 个外部阶段明确 `not-run` | Vault/PostgreSQL/object/signer `not-run` |
 | Distributed Build | 单元、race 与 PostgreSQL 并发 Gate 通过 | distccd/PVE/双 job/disconnect `not-run` |
@@ -32,6 +32,44 @@ authority 为 schema v30，迁移顺序固定为 00027 → 00028 → 00029 → 0
   capacity pool 负责 hard routing 与容量隔离，不默认实现 target/provider
   层级公平子队列。
 - [x] 在整合分支运行全量 Go/race、release/recovery/persistent/edge Gate 和静态检查。
+- [x] 把三个 workflow 与 Makefile 的 golangci-lint 从 `v2.7.2` 抬到 `v2.12.2`。
+  golangci-lint 拒绝加载语言版本高于自身构建工具链的模块配置，`v2.7.2` 用
+  go1.25 构建，对 `go 1.26.5` 的 go.mod 直接 exit 3，`main` 上的 Lint 与 GoSec
+  job 因此一直是红的。
+- [x] 把 `go.mod` 的下界从 `1.26.5` 降到 `1.26.4`。Gentoo 稳定版 `dev-lang/go`
+  是 1.26.4，`Dockerfile.test` 里 `go mod download` 因此失败，CI 的 Test job
+  停在构建测试镜像这一步；同时这个下界会把所有源码构建者推到 `~amd64` 编译器上。
+- [x] 让 `release-candidate.yml` 在构建二进制前构建 console bundle。缺它时签名
+  发布的 `portage-dashboard` 内嵌空 bundle，对所有 console 路由返回 503，而
+  checksum 与 cosign 签名都会如实通过。
+- [x] 让 `make build` 在干净检出可用：`web-build` 现在依赖 npm 安装标记文件。
+- [x] 修完公测前那批可观测性与一致性缺陷，每项都带一条会变红的门禁：
+  - `portage_scheduler_lease_expiries_total` 在 `RuntimeStatus` 两秒超时归零，
+    Prometheus 判为 counter reset，`increase()` 因此重算整段生命周期总量，在没有
+    任何租约过期时点燃 `PortageEngineLeaseExpiry`。现在按序列保留历史高水位，
+    失败的读改为重发上一次读数。
+  - `portage_distcc_*_total` 改名为 `portage_distcc_*_last_hour` 并改为 gauge。
+    `CompileMetrics` 统计的是一小时滚动窗口，安静一小时就让 counter 下降。
+  - Monitor 缓存命中改为纯内存返回。此前每次命中都在同一把锁下重算 source
+    watermark——对全部可见终态 job 的聚合，内含相关子查询，无索引可用——每次抓取
+    和每个 Monitor 读者都排在一次顺序扫描后面。
+  - 启动时先跑 retention 再加载 projection。反过来会让内存里正好留着 retention
+    随后隐藏的那批行，一致性检查把差异读成 ledger 分叉，`/readyz` 从启动到下一个
+    reconciler tick 之间一直返回 503。
+  - 租约过期恢复把计数器写入折叠成每行一次、按固定顺序提交。逐行按 `expires_at`
+    顺序更新会让多副本以相反顺序取同两行，40P01 回滚掉的是整轮重排队。
+  - distcc allowlist 两侧统一用 `NormalizeAtom` 归约，无法归约的条目在启动时拒绝。
+  - 编译租约在准入时过期，`local` 回退策略下不再判整个请求失败，交给 builder 已
+    实现的受控本地回退；`blocked` 仍然拒绝。
+  - guest agent 的 `wait-accessible` 与 `close` 接受调用方下发的等待预算，不再把
+    场景声明的 90 秒截断成硬编码的 60 秒。
+  - 中文目录改用中文标点，`set.binsha` 三条字符串进入消息目录，`quota.shadow`
+    补上译文。新增两条门禁：中文串里禁止出现紧贴汉字的半角标点，以及译文与原文
+    逐字相同的键必须在白名单内。
+- [ ] 合并提交落地后重新生成 `evidence/public-beta/repository-gate.json`。当前这份
+  的 `repository_head` 不在本分支历史里，`working_tree_dirty` 为 true，且它之后
+  nginx 模板又被改过两次；在干净树上重跑 `scripts/validate-public-edge.sh` 才能
+  让这份制品对应待发布的树。
 - [ ] 推送后确认 GitHub CI、CodeQL 和安全扫描全部通过。
 
 退出标准：工作区干净，远端 `main` 包含当前提交，CI 全绿，路线图不存在与
@@ -47,8 +85,11 @@ authority 为 schema v30，迁移顺序固定为 00027 → 00028 → 00029 → 0
 - [x] 通过 SMBIOS/instance metadata 注入数据库生成的 capacity instance ID。
 - [x] 启动后主动连接 Worker Gateway，注册精确的 provider、zone、architecture、
   build mode、profile 和 image generation capability。
-- [x] repository Gate 验证 actuator 单次精确 create、幂等/stale fence、drain、
-  live-work 删除拒绝和 exact identity 删除边界。
+- [x] repository Gate 验证 actuator 单次精确 create 与幂等/stale fence。
+- [x] drain 完成、live-work 删除拒绝和 exact identity 删除边界由 SQL 判定，只在
+  设置 `PORTAGE_TEST_DATABASE_URL` 时执行。Gate 会核对该用例的 `--- PASS` 行，
+  没有数据库时打印 `NOT-RUN capacity delete boundaries` 而不是继续声称通过；
+  CI 的 `operational-gates` job 挂了 PostgreSQL service 并断言这行不出现。
 - [ ] 在真实 PVE 完成 scale-up → heartbeat → job → drain → delete，并通过 PVE API
   readback 确认 VM 不存在；当前状态 **not-run**。
 
@@ -135,15 +176,28 @@ membership，不来自 email 或可变 group claim。
 ### 公网入口与匿名页面
 
 - [x] 提供 HTTPS Nginx/Compose reference edge，repository Gate 已验证 backend
-  端口隔离、独立 source-IP/request/identity limit、cookie/CORS、minimal health、
-  metrics 双重认证、匿名路由和 WebShell 404。
+  端口隔离、独立 source-IP/request/identity limit、cookie/CORS、metrics Basic
+  Auth、匿名路由、frame-ancestors 拒绝，以及对 Dashboard 注册的每一条 WebShell
+  路径的 404。WebShell 路径清单从 `internal/dashboard` 的路由源码推导，不再手写：
+  手写清单曾漏掉 `/legacy/shell/` 与 `/api/shell/preflight`。
+- [x] `/readyz` 只发布固定词表，不再回显内部错误文本。此前它把
+  `databaseHealth.Reason` 与 `err.Error()` 写进匿名响应，pgx 的连接错误带有
+  host、库名和账号，数据库不可达时即向任意调用者泄露内网拓扑；细节改为写进
+  进程日志和需要鉴权的 `/api/v1/health`。仓库侧 Gate 由
+  `internal/server/readyz_gate_test.go` 提供：行为侧断言响应体不含连接串，结构侧
+  解析 `handleReadyz`/`handleLivez`/`refuseReadiness` 的 AST，拒绝任何非词表取值
+  进入响应体。
 - [ ] 部署 HTTPS edge/reverse proxy；API 和 Dashboard 可以继续在受限私网使用
   HTTP。
 - [ ] 验证 Secure/SameSite cookie、HTTPS CORS allowlist 和 provider callback。
 - [ ] 验证匿名 `/packages`、`/docs`、`/status`、`/binpkgs/.../Packages` 和 package
   下载。
 - [ ] 验证 `/livez`、`/readyz` 仅返回最小信息。
-- [ ] 验证 `/health` 需要 system-admin，metrics 需要独立 Basic Auth。
+- [ ] 验证 `/health` 需要 system-admin，metrics 需要 Basic Auth。edge 不重写
+  `Authorization`，客户端的原始头会透传给控制面的 metrics 处理器，因此 edge
+  htpasswd 的口令必须等于 `METRICS_PASSWORD`；这是同一个口令被校验两次，不是
+  两个独立因子。要做成独立因子需要 edge 改用 `proxy_set_header Authorization`
+  重写，属于单独一项变更。
 - [ ] 验证 foreign-origin WebShell upgrade 被拒绝。
 - [ ] Public Beta 阶段禁止从公网路由 WebShell；长期再实现短期 SSH certificate
   和 session recording。
@@ -156,8 +210,12 @@ membership，不来自 email 或可变 group claim。
 ### 监控缺口
 
 - [x] 增加 durable、固定 7 系列的低基数 lease expiry 指标和告警。
-- [x] 增加 canonical terminal event-time Monitor projection lag 指标和告警，并以
+- [x] 增加 canonical terminal event-time Monitor projection lag 指标，并以
   PostgreSQL fresh/cached 边界回归验证 source/projected watermark 语义一致。
+  不为该指标配告警：`deploy/observability/rules/portage-engine.yml` 与
+  `docs/OBSERVABILITY_RUNBOOKS.md` 记录了原因——高于刷新间隔的阈值永远不触发，
+  低于它的阈值会对正常刷新误报。投影不可用由
+  `PortageEngineMonitorProjectionUnavailable` 覆盖。
 - [ ] 在选定 billing export 后增加 provider invoice drift 指标。
 - [x] 为 lease/projection 告警补充 runbook URL、owner、severity 和本地规则验证。
 
