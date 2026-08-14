@@ -837,6 +837,21 @@ class ReleasePipelineStaticTest(unittest.TestCase):
         unpinned = [entry for entry in uses if not re.fullmatch(r"[^@]+@[0-9a-f]{40}", entry[2])]
         self.assertEqual(unpinned, [], f"unpinned Actions: {unpinned}")
 
+    def test_security_workflow_blocks_reachable_dependency_vulnerabilities(self) -> None:
+        security = (ROOT / ".github" / "workflows" / "security-scan.yml").read_text(encoding="utf-8")
+        self.assertRegex(security, r"govulncheck@v\d+\.\d+\.\d+ ./\.\.\.")
+        self.assertIn("npm audit --audit-level=high", security)
+        self.assertIn("ignore-unfixed: true", security)
+
+    def test_codeql_keeps_the_analysis_key_that_owns_existing_alerts(self) -> None:
+        workflow_dir = ROOT / ".github" / "workflows"
+        security = (workflow_dir / "security-scan.yml").read_text(encoding="utf-8")
+        self.assertIn("\n  codeql-analysis:\n", security)
+        self.assertFalse(
+            (workflow_dir / "codeql.yml").exists(),
+            "a second CodeQL workflow splits the result category and leaves old alerts stale",
+        )
+
     def test_every_external_base_image_is_digest_pinned(self) -> None:
         # A tag alone is a mutable input to a build whose output gets signed, and
         # `:latest@sha256:...` is pinned despite how the tag reads — the digest

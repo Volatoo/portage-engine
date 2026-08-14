@@ -1,7 +1,18 @@
+# Keep the Gentoo test environment while decoupling the security patch level of
+# the compiler from Gentoo keywording. The same upstream toolchain builds the
+# production binaries in Dockerfile.
+FROM golang:1.26.6@sha256:640a234f4bea3e399c056b7b8f9c667c4939befae8db2f14e9785e16eccd4205 AS go-toolchain
+
 # Test stage - Gentoo base with portage tree synced
-FROM gentoo/stage3:latest@sha256:3c0c14e5391329e05497a5fe9cfa02317e572d4e072309b496b4b9f7429be282
+FROM gentoo/stage3:latest@sha256:08914e15d306bfdb251262ca3f7e3489b77ca32604ad1928cbb21dc94587261c
+
+COPY --from=go-toolchain /usr/local/go /usr/local/go
 
 WORKDIR /app
+
+ENV PATH="/usr/local/go/bin:/app/bin:${PATH}"
+ENV GOPATH=/go
+ENV CGO_ENABLED=1
 
 # Disable sandboxing features that don't work well in containers
 RUN echo 'FEATURES="-pid-sandbox -network-sandbox -ipc-sandbox -mount-sandbox"' >> /etc/portage/make.conf
@@ -9,7 +20,6 @@ RUN echo 'FEATURES="-pid-sandbox -network-sandbox -ipc-sandbox -mount-sandbox"' 
 # Sync portage tree and install build dependencies
 RUN emerge-webrsync && \
     emerge -q \
-    dev-lang/go \
     dev-vcs/git \
     dev-libs/libgpg-error \
     app-crypt/gnupg && \
@@ -27,11 +37,6 @@ RUN mkdir -p /var/lib/portage-engine /tmp/portage-work /tmp/portage-artifacts &&
 
 # Verify emerge is available
 RUN which emerge && emerge --version
-
-# Set environment
-ENV PATH="/app/bin:${PATH}"
-ENV GOPATH=/go
-ENV CGO_ENABLED=1
 
 # Default test command (can be overridden)
 CMD ["go", "test", "-v", "-race", "-coverprofile=coverage.out", "./..."]

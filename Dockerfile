@@ -3,7 +3,7 @@
 # nothing that ships. The lockfile is copied on its own so a source-only change
 # reuses the install layer, and `npm ci` (not `npm install`) is what makes the
 # resolved tree the same one the lockfile records.
-FROM node:22.23.2-bookworm-slim@sha256:f32b81066cde10a75dbac96646099533316d94bac4150c55da1636e1f0ffdc46 AS web-build
+FROM node:26.7.0-bookworm-slim@sha256:cd565714d4da3e84bfd341e31448f81d47c6362198f152345297c9c1154e6341 AS web-build
 
 WORKDIR /app/web
 
@@ -18,7 +18,7 @@ RUN npm run build
 
 # Build the control-plane binaries. Package builds are deliberately excluded:
 # portage-builder runs only in a disposable native Gentoo root/VM.
-FROM golang:1.26.5@sha256:3aff6657219a4d9c14e27fb1d8976c49c29fddb70ba835014f477e1c70636647 AS go-build
+FROM golang:1.26.6@sha256:640a234f4bea3e399c056b7b8f9c667c4939befae8db2f14e9785e16eccd4205 AS go-build
 
 WORKDIR /app
 
@@ -42,12 +42,12 @@ RUN CGO_ENABLED=0 go build -trimpath -o /out/portage-server ./cmd/server && \
     CGO_ENABLED=0 go build -trimpath -o /out/portage-capacity-actuator ./cmd/capacity-actuator && \
     CGO_ENABLED=0 go build -trimpath -o /out/portage-artifact-lifecycle ./cmd/artifact-lifecycle
 
-FROM hashicorp/terraform:1.15.6@sha256:adae45661e45d3c88beef071ee1277b4621cea73517aae7f0844657c8e85f641 AS terraform
+FROM hashicorp/terraform:1.15.8@sha256:7ae513256f7ce67879e218ae8593d6fbe216ec9e123abe6c94e4e10704857963 AS terraform
 
 # Minimal common runtime. Production targets below contain one trust-domain
 # binary and run as the same unprivileged numeric identity so deliberately
 # shared artifact volumes do not require root.
-FROM debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818 AS runtime-base
+FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241 AS runtime-base
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends ca-certificates && \
@@ -114,7 +114,7 @@ ENTRYPOINT ["/usr/local/bin/portage-artifact-lifecycle"]
 # Backward-compatible trusted/LAN image. The development Compose topology uses
 # several commands from one image and intentionally retains root plus its
 # shell/tooling. Public deployments must select the target-specific stages.
-FROM debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818 AS trusted-runtime
+FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241 AS trusted-runtime
 RUN apt-get update && \
     apt-get install -y --no-install-recommends bash ca-certificates gnupg openssh-client && \
     rm -rf /var/lib/apt/lists/*
