@@ -287,7 +287,7 @@ jobs:
           (cd bin && sha256sum portage-* > SHA256SUMS)
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: binaries-${{ matrix.goos }}-${{ matrix.goarch }}
           path: bin/*
@@ -329,7 +329,7 @@ jobs:
           (cd supply-chain && sha256sum ./*.json > SHA256SUMS)
 
       - name: Upload supply-chain evidence
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: runtime-sbom-provenance
           path: supply-chain/*
@@ -374,13 +374,24 @@ jobs:
           cache: true
 
       # ubuntu-latest ships jq but not ripgrep, and every gate in this job
-      # resolves `rg` from PATH: the recovery drill declares it a required tool
-      # and the public edge gate greps the rendered template with it. Without
-      # this step the job dies on the first gate and the three that follow —
-      # including the capacity delete boundaries the postgres service above
-      # exists for — never execute.
+      # resolves `rg` from PATH. The runner also carries a moving Packer release,
+      # while the offline image-factory contract intentionally fixes Packer at
+      # 1.15.4. Install and authenticate that exact binary so a runner image
+      # refresh cannot invalidate the template gate.
       - name: Install gate tooling
-        run: sudo apt-get update && sudo apt-get install -y ripgrep
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y ripgrep unzip
+          packer_archive="${RUNNER_TEMP}/packer_1.15.4_linux_amd64.zip"
+          curl --fail --location --silent --show-error \
+            --output "${packer_archive}" \
+            https://releases.hashicorp.com/packer/1.15.4/packer_1.15.4_linux_amd64.zip
+          echo "15f97a6a99645c7d5308c609973b5280837b38e112beac413ccbce80da927cf1  ${packer_archive}" | \
+            sha256sum --check --strict -
+          mkdir -p "${RUNNER_TEMP}/packer-bin"
+          unzip -q "${packer_archive}" -d "${RUNNER_TEMP}/packer-bin"
+          echo "${RUNNER_TEMP}/packer-bin" >> "${GITHUB_PATH}"
 
       - name: Recovery drill and evidence validators
         run: make test-recovery
@@ -422,7 +433,7 @@ jobs:
 
       - name: Upload gate evidence
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: operational-gate-evidence
           path: ${{ runner.temp }}/public-edge.json
