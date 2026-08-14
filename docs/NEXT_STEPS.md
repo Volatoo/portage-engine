@@ -147,6 +147,10 @@ HA、生产备份/对象存储/signer、真实 distccd、GitHub 发布和 30 天
 
 - [x] 实现 Authentik、Google、GitHub provider registry、session idle/max/revoke、
   back-channel logout、step-up 与 equal-email 隔离的 fail-closed real-host Gate。
+- [x] 2026-08-14 重新执行 repository edge Gate：10 项全 pass；随后在未注入任何
+  production credential 的条件下执行 real-host Gate，20 项均明确 `not_run`、退出码
+  3，`credentials_used=false`、`secrets_persisted=false`。更新后的脱敏清单见
+  `evidence/public-beta/identity-gate.json`；它不替代下面三个正式 provider 的现场结果。
 - [ ] 为正式 HTTPS 域名配置 Authentik。
 - [ ] 配置 Google OAuth/OIDC application。
 - [ ] 配置 GitHub OAuth App。
@@ -301,7 +305,11 @@ distcc 应作为独立里程碑，不能直接打开全局开关。
   output fence 在 collection 前及下载后/staging commit 前复验，失败清理隔离结果。
 - [ ] 以真实 distccd/PVE、至少两个并行 job 和 worker disconnect 完成现场 Gate，
   保存数据库、网络策略、日志、metrics 与对照 receipt；当前状态 **not-run**，仓库
-  不伪造现场结果。
+  不伪造现场结果。2026-08-14 PVE inventory 回读没有 distcc/compile-worker VM 或
+  模板，部署配置仍显式关闭 Alpha，也没有隔离 CIDR、工具链 identity 或 lease
+  enforcement sidecar。PostgreSQL 并发 slot/fence 用例以及 distcc/builder race Gate
+  已重新通过；脱敏 readiness 证据见
+  `evidence/pve/distcc-readiness-audit-20260814.json`。
 
 退出标准：至少两个 job 并行，reviewed C/C++ workload 能借用同构 compile pool；
 资源不超卖，断开 worker 可控降级，产物仍通过同一签名、安装和发布 Gate。
@@ -314,7 +322,12 @@ distcc 应作为独立里程碑，不能直接打开全局开关。
 - [x] 增加 Qt FeatherPad 场景。
 - [x] 增加 WebKitGTK surf 的 WebView 场景。
 - [ ] 注入真实签名 candidate digest/fingerprint，并在 PVE 执行完整 matrix；tracked
-  sentinel 会 fail closed，当前状态 **not-run**。
+  sentinel 会 fail closed，当前状态 **not-run**。2026-08-14 通过 PVE linked clone
+  读取现有 VMID145：它仍是 schema v1 `desktop-g6`，缺 `assert-image`、
+  `launch-fixture` 和两份锁定 fixture，不能承载 schema v2 matrix；审计克隆 VMID153
+  已删除并回读为 absent。脱敏证据见
+  `evidence/pve/desktop-matrix-readiness-audit-20260814.json`。现场继续前必须构建新桌面
+  generation，并提供签名 GTK/Qt/WebView candidate manifest 与独立批准的主密钥指纹。
 - [ ] 基线稳定后再扩展 KDE/GNOME 模板。
 - [x] 视觉 AI 只用于失败 triage 和候选 selector/needle 建议，不作为 release
   oracle。

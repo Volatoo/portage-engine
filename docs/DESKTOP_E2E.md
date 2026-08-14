@@ -219,9 +219,13 @@ Run the Qt and WebView files with distinct result paths. A passed result is
 credible only when the install step includes its signed-install log artifact,
 the accessibility/screenshot/log steps include digest-verified artifacts, the
 close and stop steps pass, and the result identity matches the built image
-manifest. This repository has no live PVE or materialized signed candidate, so
-the checked-in validation is limited to schema, runner, guest-contract and
-fixture/static tests.
+manifest. The repository does not contain a live PVE policy or materialized
+signed candidate, so the checked-in validation is limited to schema, runner,
+guest-contract and fixture/static tests. An on-site 2026-08-14 linked-clone
+audit of the existing VMID145 `desktop-g6` template additionally proved that it
+is still schema v1, lacks the schema-v2 image/fixture capabilities and cannot
+be reused as matrix evidence. The disposable audit clone was removed; see
+`evidence/pve/desktop-matrix-readiness-audit-20260814.json`.
 
 ```bash
 export PORTAGE_DESKTOP_DRIVER_TOKEN='read-from-a-secret-store'
