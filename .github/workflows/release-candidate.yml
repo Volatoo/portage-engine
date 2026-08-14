@@ -113,7 +113,7 @@ jobs:
           ref: ${{ needs.gate.outputs.source_commit }}
           persist-credentials: false
 
-      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '22.23.2'
           cache: npm
@@ -167,7 +167,7 @@ jobs:
             find binaries -type f -print0 | sort -z | xargs -0 sha256sum >SHA256SUMS
           )
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-binaries-${{ needs.gate.outputs.candidate_tag }}
           path: bundle/
@@ -271,7 +271,7 @@ jobs:
             find evidence -type f -name '*.json' -print0 | sort -z | xargs -0 sha256sum >EVIDENCE.SHA256SUMS
           )
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-images-${{ needs.gate.outputs.candidate_tag }}
           path: bundle/
@@ -393,7 +393,7 @@ jobs:
             echo "Canonical JSON digest: \`$(sha256sum bundle/release-manifest.json | cut -d' ' -f1)\`"
           } >>"${GITHUB_STEP_SUMMARY}"
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-candidate-${{ needs.gate.outputs.candidate_tag }}
           path: bundle/

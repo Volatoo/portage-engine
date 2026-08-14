@@ -852,6 +852,21 @@ class ReleasePipelineStaticTest(unittest.TestCase):
             "a second CodeQL workflow splits the result category and leaves old alerts stale",
         )
 
+    def test_ci_authenticates_the_packer_version_required_by_templates(self) -> None:
+        versions = set()
+        for template in (ROOT / "image-factory").glob("**/*.pkr.hcl"):
+            match = re.search(r'required_version\s*=\s*"= ([0-9.]+)"', template.read_text(encoding="utf-8"))
+            if match:
+                versions.add(match.group(1))
+        self.assertEqual(len(versions), 1, f"Packer template versions drifted: {versions}")
+        version = versions.pop()
+        ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        self.assertIn(
+            f"https://releases.hashicorp.com/packer/{version}/packer_{version}_linux_amd64.zip",
+            ci,
+        )
+        self.assertRegex(ci, r'echo "[0-9a-f]{64}  \$\{packer_archive\}" \|\s*\\\n\s*sha256sum --check --strict -')
+
     def test_every_external_base_image_is_digest_pinned(self) -> None:
         # A tag alone is a mutable input to a build whose output gets signed, and
         # `:latest@sha256:...` is pinned despite how the tag reads — the digest

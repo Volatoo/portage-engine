@@ -8,6 +8,13 @@ updates:
       time: "04:00"
       timezone: Etc/UTC
     open-pull-requests-limit: 5
+    groups:
+      workflow-actions:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
 
   - package-ecosystem: npm
     directory: /web
@@ -21,6 +28,15 @@ updates:
       console-dependencies:
         patterns:
           - "*"
+        update-types:
+          - minor
+          - patch
+    # TypeScript 7 is outside typescript-eslint's supported <6.1 peer range.
+    # Keep the latest compatible TypeScript 6 release until that constraint moves.
+    ignore:
+      - dependency-name: typescript
+        update-types:
+          - version-update:semver-major
 
   - package-ecosystem: docker
     directory: /

@@ -27,7 +27,7 @@ jobs:
           go-version: '1.26.6'
 
       - name: Set up Node
-        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '22.23.2'
           cache: npm
@@ -66,7 +66,7 @@ jobs:
         run: go build -v -o bin/portage-builder-${{ matrix.goos }}-${{ matrix.goarch }} cmd/builder/main.go
 
       - name: Upload build artifacts
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: pr-binaries-${{ matrix.goos }}-${{ matrix.goarch }}
           path: bin/*
@@ -115,7 +115,7 @@ jobs:
           go-version: '1.26.6'
 
       - name: Set up Node
-        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '22.23.2'
           cache: npm
