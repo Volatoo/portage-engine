@@ -151,3 +151,11 @@ PostgreSQL reservation. A real Alpha still requires:
 
 Until those inputs and results exist, the repository tests are complete but the
 real distccd/PVE, two-concurrent-job and disconnect Gate status is **not-run**.
+
+An on-site PVE inventory audit on 2026-08-14 found no distcc or compile-worker
+VM/template, and the deployment examples remain disabled with no reviewed
+isolated CIDR, compiler identity or lease-enforcement sidecar. The PostgreSQL
+concurrent slot/fence test and the distcc/builder race suites were rerun and
+passed, which proves the repository boundary but not a remote compilation.
+The redacted result is recorded in
+`evidence/pve/distcc-readiness-audit-20260814.json`.

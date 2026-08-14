@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "observed_at": "2026-08-14T12:58:52Z",
+  "environment": "isolated-private-pve-gate",
+  "gate": "desktop-application-matrix-readiness",
+  "result": "not_run",
+  "source_template": {
+    "vmid": 145,
+    "node": "infra-node4",
+    "name": "pe-gentoo-amd64-no-multilib-desktop-verifier-g6",
+    "template": true,
+    "status": "stopped",
+    "image_id": "pe/amd64/no-multilib/desktop-verifier-g6",
+    "image_generation": "desktop-g6",
+    "build_plan_schema_version": 1,
+    "display_model": "qxl",
+    "guest_agent_sha256": "f195b35d48a2db49df3f1327fc448f4ae4d92174088c6c4455c1fe928ddd15ea"
+  },
+  "guest_readback": {
+    "desktop_ready": true,
+    "assert_image": false,
+    "launch_fixture": false,
+    "dump_accessibility": true,
+    "evidence_info": true,
+    "read_evidence": true,
+    "editor_fixture_present": false,
+    "webview_fixture_present": false
+  },
+  "required_live_contract": {
+    "scenario_schema_version": 2,
+    "applications": [
+      "app-editors/mousepad",
+      "app-editors/featherpad",
+      "www-client/surf"
+    ],
+    "requires_new_image_generation": true,
+    "requires_signed_candidate_manifest": true,
+    "requires_approved_primary_fingerprint": true,
+    "requires_locked_fixtures": true
+  },
+  "not_run_reasons": [
+    "the only PVE desktop-verifier template predates the schema-version 2 guest contract",
+    "the template cannot assert the requested image identity or launch the locked fixtures",
+    "no immutable signed GTK/Qt/WebView candidate manifest and independently approved primary fingerprint were supplied"
+  ],
+  "cleanup": {
+    "audit_clone_vmid": 153,
+    "audit_clone_name": "portage-desktop-audit-153",
+    "delete_task_state": "OK",
+    "pve_absence_readback": true,
+    "source_template_preserved": true
+  }
+}

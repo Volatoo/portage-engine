@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "observed_at": "2026-08-14T13:01:15Z",
+  "environment": "isolated-private-pve-gate",
+  "gate": "distributed-build-alpha-readiness",
+  "result": "not_run",
+  "repository_verification": {
+    "postgres_concurrent_slot_and_fence_test": "passed",
+    "distcc_contract_race_tests": "passed",
+    "builder_distcc_race_tests": "passed",
+    "comparison_gate_tests": "passed",
+    "temporary_postgres_removed": true
+  },
+  "pve_inventory_readback": {
+    "matching_distcc_or_compile_worker_resources": 0,
+    "matching_distcc_or_compile_worker_templates": 0,
+    "portage_engine_templates_observed": 12
+  },
+  "deployment_readback": {
+    "server_alpha_enabled": false,
+    "builder_alpha_enabled": false,
+    "reviewed_package_allowlist_configured": false,
+    "compiler_digest_configured": false,
+    "toolchain_image_generation_configured": false,
+    "isolated_network_cidrs_configured": false,
+    "lease_enforcement_sidecar_present": false,
+    "compile_worker_image_present": false
+  },
+  "required_live_inputs": [
+    "reviewed compile-worker image and immutable compiler/toolchain digests",
+    "isolated build-network CIDR and mTLS or L4 lease-enforcement sidecar",
+    "compile-worker leaf issuance and trusted inventory registration",
+    "exact CHOST, CPU feature, network-zone and project trust-domain policy",
+    "reviewed non-small C or C++ package allowlist and slot count",
+    "matching local-only and distcc artifact, ABI, install and GUI evidence",
+    "two concurrent jobs and worker-disconnect runs under local and blocked fallback policies"
+  ],
+  "not_run_reasons": [
+    "the PVE cluster has no distcc or compile-worker resource to exercise",
+    "the deployment has no isolated lease-enforced compile network or registered toolchain identity",
+    "the comparison Gate requires real local-only and distcc manifests and does not synthesize them"
+  ]
+}
