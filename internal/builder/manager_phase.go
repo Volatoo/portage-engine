@@ -14,8 +14,9 @@ import (
 )
 
 const (
-	phaseWorkLease    = 45 * time.Second
-	phaseAttemptLease = 2 * time.Minute
+	phaseWorkLease            = 45 * time.Second
+	phaseAttemptLease         = 2 * time.Minute
+	phaseAttemptRenewInterval = 30 * time.Second
 )
 
 // durablePhaseAdmissionLoop is the only shadow→active cutover path. It claims
@@ -52,6 +53,10 @@ func (m *Manager) durablePhaseAdmissionLoop() {
 			} else {
 				m.appendJobLog(claim.Status.JobID,
 					"[phase] durable provision/build/verify/publish plan activated")
+				// Admission hands execution to a separately scaled phase worker.
+				// Keep the attempt fence alive while capacity is still starting;
+				// phase-work renewal takes over once a phase is claimed.
+				go m.renewActivePhaseAttemptLoop(claim.Status.JobID)
 			}
 			continue
 		}
@@ -66,6 +71,38 @@ func (m *Manager) durablePhaseAdmissionLoop() {
 		case <-ticker.C:
 		}
 	}
+}
+
+func (m *Manager) renewActivePhaseAttemptLoop(jobID string) {
+	ticker := time.NewTicker(phaseAttemptRenewInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-m.stopCh:
+			return
+		case <-ticker.C:
+			if !m.renewActivePhaseAttemptOnce(jobID) {
+				return
+			}
+		}
+	}
+}
+
+func (m *Manager) renewActivePhaseAttemptOnce(jobID string) bool {
+	m.jobsMu.RLock()
+	status, ok := m.jobs[jobID]
+	if ok {
+		copyStatus := *status
+		status = &copyStatus
+	}
+	m.jobsMu.RUnlock()
+	if !ok || status.AttemptID == "" || terminalStatus(status.Status) {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	_ = m.scheduler.RenewClaim(ctx, status, phaseAttemptLease)
+	cancel()
+	return true
 }
 
 func (m *Manager) durablePhaseWorker(slot int) {

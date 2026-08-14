@@ -58,6 +58,10 @@ require_command cloud-init
 require_command qemu-ga
 require_command systemctl
 test -s /etc/portage/sets/portage-engine-image
+systemctl is-enabled portage-cloud-init-network-refresh.service >/dev/null
+test -x /usr/local/libexec/portage-engine/cloud-init-network-refresh
+grep -Fq 'ClientIdentifier=mac' \
+  /usr/local/libexec/portage-engine/cloud-init-network-refresh
 if [[ $PE_DESKTOP == true ]]; then
   log "verifying desktop runtime contract"
   for command_name in Xorg Xvfb startxfce4 gpg gtk-launch runuser xrandr xset scrot xdotool; do
@@ -90,6 +94,13 @@ fi
 
 log "sanitizing machine identity and transient state"
 cloud-init clean --logs --seed || cloud-init clean --logs
+# Never seal the Packer VM's MAC-specific renderer output into its successor.
+# cloud-init recreates the file for the clone and the enabled refresh unit
+# reloads networkd after that network stage.
+find /etc/systemd/network -maxdepth 1 -type f \
+  -name '10-cloud-init-*.network' -delete
+find /etc/systemd/network -maxdepth 1 -type d \
+  -name '10-cloud-init-*.network.d' -exec rm -rf -- {} +
 rm -f /etc/ssh/ssh_host_*
 find /root /home -xdev -type d -name .ssh -prune -exec rm -rf -- {} +
 rm -f /root/.bash_history
@@ -129,6 +140,10 @@ EOF
 chmod 0644 /etc/portage-engine/image-build.json
 
 test ! -s /etc/machine-id
+test -z "$(find /etc/systemd/network -maxdepth 1 -type f \
+  -name '10-cloud-init-*.network' -print -quit)"
+test -z "$(find /etc/systemd/network -maxdepth 1 -type d \
+  -name '10-cloud-init-*.network.d' -print -quit)"
 test ! -e /root/.ssh/authorized_keys
 test ! -e /root/.bash_history
 test ! -e /etc/ssh/ssh_host_rsa_key

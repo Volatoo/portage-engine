@@ -6,6 +6,7 @@ import (
 	"maps"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 
@@ -121,6 +122,12 @@ func validatePVEExecutorTemplate(template PVEExecutorTemplate) error {
 			PVEExecutorBootstrapDMIV1,
 		)
 	}
+	if err := validatePVEBootstrapCICustom(template.Spec["cicustom"]); err != nil {
+		return fmt.Errorf(
+			"capacity PVE template %s@%s bootstrap: %w",
+			template.ImageID, template.ImageGeneration, err,
+		)
+	}
 	for _, forbidden := range []string{
 		"resource_name", "name", "vmid", "template", "endpoint", "insecure",
 		"smbios_uuid", "start_stopped", "tags", "ssh_keys",
@@ -142,6 +149,76 @@ func validatePVEExecutorTemplate(template PVEExecutorTemplate) error {
 		return fmt.Errorf("capacity PVE template egress policy: %w", err)
 	}
 	return nil
+}
+
+// validatePVEBootstrapCICustom closes the gap between an image's intentionally
+// secret-free state and the first executor heartbeat. The pve-dmi-v1 provider
+// has no SSH deployment step, so custom user-data is the configured path that
+// provisions executor.conf and its referenced credentials before systemd
+// starts the service.
+func validatePVEBootstrapCICustom(value string) error {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return fmt.Errorf(
+			"spec.cicustom must define user=<shared-storage>:snippets/<file>",
+		)
+	}
+	for _, char := range value {
+		if (char >= 'a' && char <= 'z') ||
+			(char >= 'A' && char <= 'Z') ||
+			(char >= '0' && char <= '9') ||
+			strings.ContainsRune("._-/,:=", char) {
+			continue
+		}
+		return fmt.Errorf("spec.cicustom contains an invalid character")
+	}
+	foundUser := false
+	for _, component := range strings.Split(value, ",") {
+		parts := strings.SplitN(component, "=", 2)
+		if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+			return fmt.Errorf("spec.cicustom contains an invalid component")
+		}
+		switch parts[0] {
+		case "user", "vendor", "network", "meta":
+		default:
+			return fmt.Errorf("spec.cicustom contains unsupported key %q", parts[0])
+		}
+		if !validPVESnippetRef(parts[1]) {
+			return fmt.Errorf("spec.cicustom %s value must be <storage>:snippets/<file>", parts[0])
+		}
+		if parts[0] == "user" {
+			if foundUser {
+				return fmt.Errorf("spec.cicustom defines user data more than once")
+			}
+			foundUser = true
+		}
+	}
+	if !foundUser {
+		return fmt.Errorf(
+			"spec.cicustom must define user=<shared-storage>:snippets/<file>",
+		)
+	}
+	return nil
+}
+
+func validPVESnippetRef(value string) bool {
+	parts := strings.SplitN(value, ":", 2)
+	if len(parts) != 2 || parts[0] == "" ||
+		!strings.HasPrefix(parts[1], "snippets/") {
+		return false
+	}
+	for _, char := range parts[0] {
+		if (char >= 'a' && char <= 'z') ||
+			(char >= 'A' && char <= 'Z') ||
+			(char >= '0' && char <= '9') || strings.ContainsRune("._-", char) {
+			continue
+		}
+		return false
+	}
+	name := strings.TrimPrefix(parts[1], "snippets/")
+	return name != "" && name != "." && name != ".." &&
+		!strings.HasPrefix(name, "/") && !strings.HasPrefix(name, "../") &&
+		path.Clean(name) == name
 }
 
 func (p *PVEProvider) provisionSpec(

@@ -1794,6 +1794,20 @@ func TestProjectResourceAndArtifactMigrationsRequireDrainedAttempts(t *testing.T
 			derivedIndex, sessionKindDefault, err,
 		)
 	}
+	if _, err := runner.Provider().UpTo(ctx, 31); err != nil {
+		t.Fatalf("schema v31 worker-prune index migration failed: %v", err)
+	}
+	if version, err := runner.Provider().GetDBVersion(ctx); err != nil ||
+		version != 31 {
+		t.Fatalf("worker-prune index migration version=%d err=%v", version, err)
+	}
+	var workerPruneIndex string
+	if err := fixture.QueryRow(ctx, `
+		SELECT to_regclass('scheduler_worker_decisions_worker_idx')::text
+	`).Scan(&workerPruneIndex); err != nil ||
+		workerPruneIndex != "scheduler_worker_decisions_worker_idx" {
+		t.Fatalf("worker-prune index=%q err=%v", workerPruneIndex, err)
+	}
 }
 
 func testDurableWorkerGatewaySpool(
@@ -2654,22 +2668,42 @@ func testDurablePhaseWorkQueue(
 	}
 	// The renewal ticker runs beside the phase-executing goroutine and both
 	// hold this pointer, so renewal must extend only the durable lease and
-	// leave the shared claim untouched.
+	// leave the shared claim untouched. It must also refresh the busy phase
+	// executor heartbeat: the worker cannot poll again while a provider call is
+	// running, and autoscaling must not mistake that healthy slot for dead.
 	claimedExpiry := reclaimed.LeaseExpiresAt
+	if _, err := db.Pool().Exec(ctx, `
+		UPDATE workers
+		SET last_seen_at = clock_timestamp() - interval '2 minutes'
+		WHERE stable_name = $1
+	`, reclaimed.ClaimOwner); err != nil {
+		t.Fatal(err)
+	}
+	var staleHeartbeat time.Time
+	if err := db.Pool().QueryRow(ctx, `
+		SELECT last_seen_at FROM workers WHERE stable_name = $1
+	`, reclaimed.ClaimOwner).Scan(&staleHeartbeat); err != nil {
+		t.Fatal(err)
+	}
 	if err := jobRepo.RenewPhaseWork(ctx, reclaimed, time.Minute); err != nil {
 		t.Fatal(err)
 	}
-	var renewedExpiry time.Time
+	var renewedExpiry, renewedHeartbeat time.Time
 	if err := db.Pool().QueryRow(ctx, `
-		SELECT lease_expires_at FROM phase_work_items WHERE id = $1
-	`, reclaimed.ID).Scan(&renewedExpiry); err != nil {
+		SELECT w.lease_expires_at, executor.last_seen_at
+		FROM phase_work_items w
+		JOIN workers executor ON executor.stable_name = w.claim_owner
+		WHERE w.id = $1
+	`, reclaimed.ID).Scan(&renewedExpiry, &renewedHeartbeat); err != nil {
 		t.Fatal(err)
 	}
 	if !reclaimed.LeaseExpiresAt.Equal(claimedExpiry) ||
-		!renewedExpiry.After(claimedExpiry) {
+		!renewedExpiry.After(claimedExpiry) ||
+		!renewedHeartbeat.After(staleHeartbeat) {
 		t.Fatalf(
-			"phase renewal claim=%s claimed=%s durable=%s",
+			"phase renewal claim=%s claimed=%s durable=%s staleHeartbeat=%s renewedHeartbeat=%s",
 			reclaimed.LeaseExpiresAt, claimedExpiry, renewedExpiry,
+			staleHeartbeat, renewedHeartbeat,
 		)
 	}
 	if err := jobRepo.CompletePhaseWork(ctx, reclaimed); err != nil {

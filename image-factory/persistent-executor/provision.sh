@@ -33,7 +33,7 @@ done
 [[ $PE_TERRAFORM_PROXMOX_PROVIDER_SHA256 =~ ^[a-f0-9]{64}$ ]]
 [[ $PE_SOURCE_IMAGE_MANIFEST_SHA256 =~ ^[a-f0-9]{64}$ ]]
 if [[ -n ${PE_EGRESS_CAPABILITY:-} ]]; then
-  [[ $PE_EGRESS_CAPABILITY =~ ^egress:[a-zA-Z0-9][a-zA-Z0-9+._/@:-]+$ ]]
+  [[ $PE_EGRESS_CAPABILITY =~ ^egress:[a-zA-Z0-9][a-zA-Z0-9+._/-]*@sha256:[a-f0-9]{64}$ ]]
 fi
 
 expected_pool="${PE_CAPACITY_PROVIDER}-${PE_EXECUTION_ZONE}-${PE_ARCHITECTURE}-$(
@@ -73,6 +73,52 @@ install -m 0755 /tmp/capacity-executor-identity \
   /usr/local/libexec/portage-engine/capacity-executor-identity
 install -m 0644 /tmp/portage-capacity-executor.service \
   /etc/systemd/system/portage-capacity-executor.service
+
+# A re-templated cloud-init guest can briefly boot with the previous Packer
+# VM's generated networkd file. If networkd evaluates that stale MAC before
+# cloud-init replaces the file, the new NIC remains unmanaged even though
+# qemu-guest-agent is already responding. Refresh networkd after cloud-init's
+# network stage so the current clone MAC is always applied before the executor
+# service can start.
+cat >/usr/local/libexec/portage-engine/cloud-init-network-refresh <<'EOF'
+#!/bin/sh
+set -eu
+
+network_file=/etc/systemd/network/10-cloud-init-eth0.network
+if ! grep -q '^ClientIdentifier=mac$' "$network_file"; then
+  printf '\n[DHCPv4]\nClientIdentifier=mac\n' >>"$network_file"
+fi
+networkctl reload
+attempt=0
+while [ "$attempt" -lt 30 ]; do
+  if [ -e /sys/class/net/eth0 ]; then
+    networkctl reconfigure eth0
+    exit 0
+  fi
+  attempt=$((attempt + 1))
+  sleep 1
+done
+echo 'cloud-init network refresh: eth0 did not appear' >&2
+exit 1
+EOF
+chmod 0755 /usr/local/libexec/portage-engine/cloud-init-network-refresh
+
+cat >/etc/systemd/system/portage-cloud-init-network-refresh.service <<'EOF'
+[Unit]
+Description=Refresh cloud-init networkd configuration for the current clone
+After=systemd-networkd.service cloud-init-network.service
+Wants=systemd-networkd.service
+Before=portage-capacity-executor.service
+ConditionPathExists=/etc/systemd/network/10-cloud-init-eth0.network
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/portage-engine/cloud-init-network-refresh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
 install -m 0755 /tmp/terraform /usr/local/bin/terraform
 install -m 0644 /tmp/terraform-provider-proxmox.zip \
   "$provider_mirror/terraform-provider-proxmox_3.0.2-rc04_linux_${PE_ARCHITECTURE}.zip"
@@ -127,4 +173,6 @@ EOF
 chmod 0644 /usr/share/portage-engine-executor-runtime.example
 
 systemctl daemon-reload
-systemctl enable portage-capacity-executor.service
+systemctl enable \
+  portage-cloud-init-network-refresh.service \
+  portage-capacity-executor.service

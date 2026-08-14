@@ -11,9 +11,11 @@ for command_name in cloud-init systemctl sha256sum qemu-ga terraform; do
 done
 
 systemctl is-enabled portage-capacity-executor.service >/dev/null
+systemctl is-enabled portage-cloud-init-network-refresh.service >/dev/null
 test -x /usr/local/bin/portage-server
 test -x "/usr/local/libexec/portage-engine/portage-builder-linux-${PE_ARCHITECTURE}"
 test -x /usr/local/libexec/portage-engine/capacity-executor-identity
+test -x /usr/local/libexec/portage-engine/cloud-init-network-refresh
 test -r /etc/terraform.d/portage-engine.tfrc
 grep -Fq 'filesystem_mirror {' /etc/terraform.d/portage-engine.tfrc
 if grep -Fq 'direct {' /etc/terraform.d/portage-engine.tfrc; then
@@ -32,6 +34,10 @@ grep -Fq "build-mode:${PE_BUILD_MODE}" /etc/portage-engine/executor.env
 grep -Fq "profile:${PE_PROFILE_ID}" /etc/portage-engine/executor.env
 grep -Fq "image:${PE_WORKER_IMAGE_ID}@${PE_WORKER_IMAGE_GENERATION}" \
   /etc/portage-engine/executor.env
+if [[ -n ${PE_EGRESS_CAPABILITY:-} ]]; then
+  grep -Fq ",${PE_EGRESS_CAPABILITY}" /etc/portage-engine/executor.env ||
+    fail "bound egress capability is absent from executor environment"
+fi
 if grep -Fq 'capacity-instance:' /etc/portage-engine/executor.env; then
   fail "capacity instance identity was baked instead of derived from SMBIOS"
 fi
@@ -69,6 +75,14 @@ if find "${secret_scan_roots[@]}" -xdev -type f \
 fi
 
 cloud-init clean --logs --seed || cloud-init clean --logs
+# cloud-init clean does not remove renderer output on every distribution.
+# Never seal the Packer VM's MAC-specific networkd file into the successor
+# template; the boot-time refresh unit will apply the newly rendered clone
+# configuration after cloud-init-network completes.
+find /etc/systemd/network -maxdepth 1 -type f \
+  -name '10-cloud-init-*.network' -delete
+find /etc/systemd/network -maxdepth 1 -type d \
+  -name '10-cloud-init-*.network.d' -exec rm -rf -- {} +
 rm -f /etc/ssh/ssh_host_*
 find /root /home -xdev -type d -name .ssh -prune -exec rm -rf -- {} +
 rm -f /root/.bash_history
@@ -107,6 +121,10 @@ chmod 0644 /etc/portage-engine/evidence/persistent-executor-image.json
 
 test ! -s /etc/machine-id
 test "$(stat -c '%a' /etc/machine-id)" = 644
+test -z "$(find /etc/systemd/network -maxdepth 1 -type f \
+  -name '10-cloud-init-*.network' -print -quit)"
+test -z "$(find /etc/systemd/network -maxdepth 1 -type d \
+  -name '10-cloud-init-*.network.d' -print -quit)"
 test ! -e /root/.ssh/authorized_keys
 test ! -e /etc/ssh/ssh_host_ed25519_key
 echo "persistent executor image gate passed"

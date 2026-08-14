@@ -249,6 +249,52 @@ for unit in cloud-init-local.service cloud-init-network.service cloud-init-main.
     systemctl enable "$unit"
   fi
 done
+
+# PVE can start a clone with the template build's rendered networkd file and
+# replace it only when cloud-init's network stage runs. Install a post-stage
+# refresh that binds DHCP to the clone NIC rather than the sealed template's
+# transient identity.
+install -d -m 0755 /usr/local/libexec/portage-engine
+cat >/usr/local/libexec/portage-engine/cloud-init-network-refresh <<'EOF'
+#!/bin/sh
+set -eu
+
+network_file=/etc/systemd/network/10-cloud-init-eth0.network
+if ! grep -q '^ClientIdentifier=mac$' "$network_file"; then
+  printf '\n[DHCPv4]\nClientIdentifier=mac\n' >>"$network_file"
+fi
+networkctl reload
+attempt=0
+while [ "$attempt" -lt 30 ]; do
+  if [ -e /sys/class/net/eth0 ]; then
+    networkctl reconfigure eth0
+    exit 0
+  fi
+  attempt=$((attempt + 1))
+  sleep 1
+done
+echo 'cloud-init network refresh: eth0 did not appear' >&2
+exit 1
+EOF
+chmod 0755 /usr/local/libexec/portage-engine/cloud-init-network-refresh
+
+cat >/etc/systemd/system/portage-cloud-init-network-refresh.service <<'EOF'
+[Unit]
+Description=Refresh cloud-init networkd configuration for the current clone
+After=systemd-networkd.service cloud-init-network.service
+Wants=systemd-networkd.service
+ConditionPathExists=/etc/systemd/network/10-cloud-init-eth0.network
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/portage-engine/cloud-init-network-refresh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl daemon-reload
+systemctl enable portage-cloud-init-network-refresh.service
 if [[ $PE_DESKTOP == true ]]; then
   desktop_user=portage-e2e
   if ! id -u "$desktop_user" >/dev/null 2>&1; then

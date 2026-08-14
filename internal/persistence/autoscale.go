@@ -762,6 +762,7 @@ func reconcileCapacityActionsTx(
 			    WHERE desired_state = 'active'
 			      AND last_seen_at >
 			          clock_timestamp() - interval '45 seconds'
+			      AND capabilities ->> 'role' = 'phase-executor'
 			      AND COALESCE(
 			            capabilities -> 'labels', '[]'::jsonb
 			          ) ? $1

@@ -116,12 +116,13 @@ health checks and managed certificates.
   production should use an
   operator-managed issuer and rotation procedure.
 - A Linux builder binary matching the template architecture.
-- PostgreSQL schema 20 with the repeatable signer-role bootstrap, executor
+- PostgreSQL schema 31 with the repeatable signer-role bootstrap, executor
   protocol fence, OIDC subjects/project RBAC, durable phase execution context,
   Worker Gateway spool, attempt runtime/cost ledger, IAM session lifecycle and
   exact executor capability routing applied.
-- Shared writable `DATA_DIR`/quarantine, `BINPKG_PATH`, public-key directory,
-  and Terraform workspace paths.
+- In separated active-phase deployments, shared S3-compatible artifact storage;
+  process-local `DATA_DIR`/quarantine is disposable scratch. Terraform workspace
+  paths remain durable and shared with the capacity actuator.
 - A separate signer-only private GPG volume. The server and builders must not
   mount it.
 - For local bootstrap, `GPG_AUTO_CREATE=true` creates one key and persists an
@@ -495,6 +496,13 @@ unprivileged `systemd-networkd` service from reading the regenerated ID to
 derive its DHCP DUID. The Catalyst fsscript, QCOW2 assembler, Packer sanitizer,
 and live boot gate therefore all enforce an empty, world-readable file. A
 successful gate must show DHCP acquisition without any manual guest mutation.
+All current Packer successors refresh cloud-init's generated networkd file
+after the network stage and use the clone NIC's MAC address as the DHCP client
+identity. The PVE provisioner also performs the same fixed, idempotent reload
+through QGA while an older approved template reports no IPv4 address. This
+prevents a re-templated VM's stale renderer output or DUID/lease from being
+reused by a new NIC; the live Gate must still reject any assigned address that
+already answers duplicate-address detection on the PVE bridge.
 
 Catalyst may likewise preserve its build user's ownership on an external
 profile repository. Packer normalizes each locked repository to `root:root`
@@ -924,9 +932,21 @@ That file needs the least-privilege PostgreSQL, artifact, PVE and workload
 issuer settings required by the four executor phases. It must not set
 `WORKER_GATEWAY_TLS_KEY`: the executor has no API or Worker Gateway listener.
 
+For the `pve-dmi-v1` actuator this mechanism is a custom cloud-init user-data
+document. Put it on a PVE storage whose `content` includes `snippets` and which
+is shared by every candidate node, restrict the file to the PVE service
+account, and set the template allowlist's `spec.cicustom` to
+`user=<storage>:snippets/<file>`. The actuator rejects a missing user-data
+reference before it can create a VM. The document must write `executor.conf`
+and every referenced runtime credential, then enable and start
+`portage-capacity-executor.service`; the immutable template itself remains
+secret-free. Rotate or remove one-off Gate snippets after their instances are
+deleted.
+
 The actuator reserves the PostgreSQL capacity instance before Terraform. Its
 provider identity is exactly `portage-capacity-<uuid>` and Terraform writes
-that UUID to `smbios1`. The pre-start helper accepts only the normalized DMI
+that UUID through the Telmate 3.x `smbios { uuid = ... }` block. The pre-start
+helper accepts only the normalized DMI
 UUID and creates `CONTROL_PLANE_ID`, `SERVER_RUNTIME_ROLE=executor`, and
 `EXECUTOR_CAPACITY_INSTANCE_ID` in `/run`. Startup rejects a statically baked
 `capacity-instance` capability, ambiguous provider/zone/architecture/build
@@ -971,8 +991,19 @@ heartbeat or drain/delete lifecycle completes.
 Prepare the candidate and runtime secret injection, then configure the
 actuator allowlist with the exact worker `image_id`, worker
 `image_generation`, persistent template name and `pve-dmi-v1` contract. Enable
-an enforced egress policy. Start the API/admission role with the same immutable
+an enforced egress policy, and set `spec.cicustom` to the protected shared
+user-data snippet described above. Start the API/admission role with the same immutable
 catalog and:
+
+Disposable builders normally use DHCP. An isolated lab whose DHCP leases are
+exhausted may configure the runtime cloud settings `pve_ip_config` and
+`pve_gateway` (or the startup defaults `CLOUD_PVE_IP_CONFIG` and
+`CLOUD_PVE_GATEWAY`) with a reserved IPv4 CIDR and a same-subnet gateway. The
+settings API rejects a gateway without a static CIDR, a static CIDR without a
+gateway, IPv6, and an out-of-subnet gateway. This is an operator-owned default,
+not a catalog machine-spec field. Use it only with external address reservation
+and a concurrency limit that prevents two builders from claiming the same
+address; DHCP remains the production default.
 
 ```ini
 SCHEDULER_AUTOSCALE_MODE=actuate
@@ -1027,6 +1058,34 @@ specific `SKIP live PVE SCHED-2B Gate` reason. Preserve the two action IDs,
 instance UUIDs/generations, executor heartbeat timestamps, actuator logs and
 PVE API audit records as the external release packet; never replace them with
 repository test output.
+
+### 2026-08-14 live evidence
+
+The isolated real-PVE Gate completed with persistent-executor candidate g7
+(template VMID 159). The capacity VM received reserved `10.31.0.101/24`; the
+disposable builder's final PVE readback was
+`ip=10.31.0.105/24,gw=10.31.0.1`, with the internal resolver set separately.
+No guest mutation was used in the final cycle.
+
+- job `a34d113e-42db-4fe1-a4ac-dcf2cbaf83d4` completed provision, build,
+  verify and publish for `app-misc/hello`;
+- Worker Gateway completed a 112640-byte upload with SHA-256
+  `5fa98b20f4d0d322cf467b6b566e03d727a7c13a6b044985634770a421713f37`,
+  and the published artifact ledger recorded the same digest and size;
+- scale-up `d557f438-2af8-46a8-8da6-57fdb1de7e2e` and scale-down
+  `868ec433-36cc-4d0e-a1f8-94f922fc57f9` completed for capacity instance
+  `202c0e03-dd2a-4d6e-8f92-32dc37f11023`, generation 1;
+- the instance row ended `deleted`, and direct PVE readback found no disposable
+  or capacity VM after the cycle;
+- one-off credential-bearing cloud-init snippets and the rejected g6 candidate
+  were removed; g7 remains secret-free.
+
+The run first caught a malformed g6 egress label whose digest was not bound to
+its policy ID. Executor startup failed closed. The image runner, provisioner and
+sanitizer now require `egress:<policy-id>@sha256:<64 lowercase hex>`, and the
+rejected g6 PVE candidate was deleted before the clean g7 cycle. The redacted
+machine-readable packet is
+`evidence/pve/persistent-executor-gate-20260814.json`.
 
 ## Scaling behavior
 

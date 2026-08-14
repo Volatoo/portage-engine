@@ -10,6 +10,11 @@ User=root
 Group=root
 ExecStartPre=/usr/local/libexec/portage-engine/capacity-executor-identity
 EnvironmentFile=/etc/portage-engine/executor.env
+# executor.conf is provisioned only at boot and is already the application's
+# root-owned runtime configuration. Export it as the process environment too
+# so standard credential chains (notably the AWS SDK used for S3) can consume
+# AWS_* and workload-identity settings without baking them into executor.env.
+EnvironmentFile=/etc/portage-engine/executor.conf
 EnvironmentFile=-/run/portage-engine/capacity-executor.env
 ExecStart=/usr/local/bin/portage-server -config /etc/portage-engine/executor.conf
 Restart=on-failure

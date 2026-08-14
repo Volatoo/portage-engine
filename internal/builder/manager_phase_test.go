@@ -25,6 +25,41 @@ type phaseQueueStub struct {
 	failed    []string
 }
 
+type phaseAttemptRenewScheduler struct {
+	phaseGateScheduler
+	renewed chan struct{}
+}
+
+func (s *phaseAttemptRenewScheduler) RenewClaim(
+	context.Context, *BuildStatus, time.Duration,
+) error {
+	select {
+	case s.renewed <- struct{}{}:
+	default:
+	}
+	return nil
+}
+
+func TestActivePhaseAttemptRenewsWhileWaitingForCapacity(t *testing.T) {
+	scheduler := &phaseAttemptRenewScheduler{renewed: make(chan struct{}, 1)}
+	manager := &Manager{
+		scheduler: scheduler,
+		jobs: map[string]*BuildStatus{"job-1": {
+			JobID: "job-1", Status: "claimed", AttemptID: uuid.NewString(),
+			FenceToken: 1, LeaseOwner: "admission",
+		}},
+		stopCh: make(chan struct{}),
+	}
+	if !manager.renewActivePhaseAttemptOnce("job-1") {
+		t.Fatal("active phase attempt renewal stopped before capacity arrived")
+	}
+	select {
+	case <-scheduler.renewed:
+	default:
+		t.Fatal("active phase attempt was not renewed while capacity was absent")
+	}
+}
+
 func (*phaseQueueStub) ActivatePhasePlan(context.Context, *BuildStatus) error { return nil }
 
 func (*phaseQueueStub) ClaimPhaseWork(

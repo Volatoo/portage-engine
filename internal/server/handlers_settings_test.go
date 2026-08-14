@@ -126,6 +126,45 @@ func TestCloudSettingsRejectsBadProvider(t *testing.T) {
 	}
 }
 
+func TestCloudSettingsValidatesPVEStaticNetwork(t *testing.T) {
+	tests := []struct {
+		name       string
+		ipConfig   string
+		gateway    string
+		wantStatus int
+	}{
+		{name: "empty", wantStatus: http.StatusOK},
+		{name: "dhcp", ipConfig: "dhcp", wantStatus: http.StatusOK},
+		{name: "static", ipConfig: "10.31.0.105/24", gateway: "10.31.0.1", wantStatus: http.StatusOK},
+		{name: "gateway without static", gateway: "10.31.0.1", wantStatus: http.StatusBadRequest},
+		{name: "static without gateway", ipConfig: "10.31.0.105/24", wantStatus: http.StatusBadRequest},
+		{name: "invalid prefix", ipConfig: "10.31.0.105", gateway: "10.31.0.1", wantStatus: http.StatusBadRequest},
+		{name: "ipv6", ipConfig: "fd00::105/64", gateway: "fd00::1", wantStatus: http.StatusBadRequest},
+		{name: "gateway outside subnet", ipConfig: "10.31.0.105/24", gateway: "10.32.0.1", wantStatus: http.StatusBadRequest},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := settingsTestServer(t)
+			body, _ := json.Marshal(map[string]any{
+				"provider":      "pve",
+				"pve_ip_config": tt.ipConfig,
+				"pve_gateway":   tt.gateway,
+			})
+			w := httptest.NewRecorder()
+			s.handleCloudSettings(w, httptest.NewRequest(http.MethodPut, "/api/v1/settings/cloud", bytes.NewReader(body)))
+			if w.Code != tt.wantStatus {
+				t.Fatalf("got %d, want %d: %s", w.Code, tt.wantStatus, w.Body.String())
+			}
+			if tt.wantStatus == http.StatusOK {
+				settings := s.builder.CloudSettings()
+				if settings.PVEIPConfig != tt.ipConfig || settings.PVEGateway != tt.gateway {
+					t.Fatalf("network settings not applied: %q / %q", settings.PVEIPConfig, settings.PVEGateway)
+				}
+			}
+		})
+	}
+}
+
 func TestCloudSettingsDatabaseModeRejectsCredentialPersistence(t *testing.T) {
 	s := settingsTestServer(t)
 	// The rejection happens before any repository operation, so a zero-value

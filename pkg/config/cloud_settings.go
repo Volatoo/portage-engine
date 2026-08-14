@@ -1,6 +1,11 @@
 package config
 
-import "os"
+import (
+	"fmt"
+	"net/netip"
+	"os"
+	"strings"
+)
 
 // CloudSettings is the runtime-adjustable subset of ServerConfig that drives
 // on-demand cloud builders. PostgreSQL-enabled servers persist only redacted,
@@ -41,6 +46,11 @@ type CloudSettings struct {
 	// PVENameserver is pushed to build VMs via cloud-init so internal domains
 	// (registry/mirror hosts) resolve; DHCP-provided DNS often lacks the zone.
 	PVENameserver string `json:"pve_nameserver"`
+	// PVEIPConfig and PVEGateway are operator-owned defaults for disposable
+	// build VMs. Keep them out of client-controlled catalog machine specs so a
+	// profile cannot silently claim a fixed address.
+	PVEIPConfig string `json:"pve_ip_config"` // empty, "dhcp", or IPv4 CIDR
+	PVEGateway  string `json:"pve_gateway"`   // required with a static CIDR
 
 	// SSH deployment
 	SSHKeyPath         string `json:"ssh_key_path"`
@@ -114,6 +124,10 @@ func CloudSettingsFromServerConfig(cfg *ServerConfig) *CloudSettings {
 		PVEStorage:          cfg.CloudPVEStorage,
 		PVENetwork:          cfg.CloudPVENetwork,
 		PVETemplate:         cfg.CloudPVETemplate,
+		PVECICustom:         cfg.CloudPVECICustom,
+		PVENameserver:       cfg.CloudPVENameserver,
+		PVEIPConfig:         cfg.CloudPVEIPConfig,
+		PVEGateway:          cfg.CloudPVEGateway,
 		SSHKeyPath:          cfg.CloudSSHKeyPath,
 		SSHUser:             cfg.CloudSSHUser,
 		SSHKnownHosts:       cfg.CloudSSHKnownHosts,
@@ -126,6 +140,36 @@ func CloudSettingsFromServerConfig(cfg *ServerConfig) *CloudSettings {
 		BuildMode:           "native-gentoo",
 		UploadPassword:      os.Getenv("PORTAGE_UPLOAD_PASSWORD"),
 	}
+}
+
+// ValidatePVEStaticNetwork validates the operator-owned build VM network
+// default. A gateway is deliberately required for a static address: these VMs
+// must reach the worker gateway and object store, and accepting a local-only
+// address would turn a configuration typo into a late build timeout.
+func (s *CloudSettings) ValidatePVEStaticNetwork() error {
+	ipConfig := strings.TrimSpace(s.PVEIPConfig)
+	gateway := strings.TrimSpace(s.PVEGateway)
+	if ipConfig == "" || strings.EqualFold(ipConfig, "dhcp") {
+		if gateway != "" {
+			return fmt.Errorf("pve_gateway requires a static pve_ip_config IPv4 CIDR")
+		}
+		return nil
+	}
+	prefix, err := netip.ParsePrefix(ipConfig)
+	if err != nil || !prefix.Addr().Is4() {
+		return fmt.Errorf("pve_ip_config must be dhcp or an IPv4 CIDR")
+	}
+	if gateway == "" {
+		return fmt.Errorf("pve_gateway is required with a static pve_ip_config")
+	}
+	gatewayAddr, err := netip.ParseAddr(gateway)
+	if err != nil || !gatewayAddr.Is4() {
+		return fmt.Errorf("pve_gateway must be an IPv4 address")
+	}
+	if !prefix.Contains(gatewayAddr) {
+		return fmt.Errorf("pve_gateway must be inside the pve_ip_config subnet")
+	}
+	return nil
 }
 
 // Clone returns a deep copy (slices are the only reference fields).

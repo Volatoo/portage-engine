@@ -1,0 +1,71 @@
+{
+  "schema_version": 1,
+  "observed_at": "2026-08-14T12:28:35Z",
+  "environment": "isolated-private-pve-gate",
+  "result": "pass",
+  "candidate": {
+    "template": "pe-gentoo-amd64-persistent-executor-g7",
+    "pve_vmid": 159,
+    "bootstrap_contract": "pve-dmi-v1",
+    "manifest_sha256": "dd33a260d681dc48f586b75ad34a9deb17026e2ee7df69a529e1e1a579820a68",
+    "server_sha256": "20df9ecb9d052267e9293474a4c7f5a5bc59bebd8467495377d067e33983a608",
+    "builder_sha256": "7da4e6701e295a8933fa8ecb3888a898ed63d8ea32f80d0bb60f3036760c8686",
+    "source_manifest_sha256": "b506729f5d369701d73b933a9520c339170c764a312e72021c1967e61c377ff2"
+  },
+  "job": {
+    "id": "a34d113e-42db-4fe1-a4ac-dcf2cbaf83d4",
+    "package": "app-misc/hello",
+    "state": "completed",
+    "phases": {
+      "provision": "completed",
+      "build": "completed",
+      "verify": "completed",
+      "publish": "completed"
+    },
+    "capacity_ip_config": "10.31.0.101/24",
+    "builder_ip_config": "10.31.0.105/24",
+    "builder_gateway": "10.31.0.1"
+  },
+  "artifact": {
+    "kind": "gentoo-binpkg",
+    "upload_state": "completed",
+    "publish_state": "published",
+    "sha256": "5fa98b20f4d0d322cf467b6b566e03d727a7c13a6b044985634770a421713f37",
+    "size_bytes": 112640
+  },
+  "capacity": {
+    "pool_id": "pve-infra-amd64-52dffcff7841a6de1fd4119f",
+    "scale_up_action_id": "d557f438-2af8-46a8-8da6-57fdb1de7e2e",
+    "scale_down_action_id": "868ec433-36cc-4d0e-a1f8-94f922fc57f9",
+    "instance_id": "202c0e03-dd2a-4d6e-8f92-32dc37f11023",
+    "provider_instance_id": "portage-capacity-202c0e03-dd2a-4d6e-8f92-32dc37f11023",
+    "generation": 1,
+    "final_state": "deleted",
+    "pve_absence_readback": true
+  },
+  "live_provider_delete_refusal": {
+    "result": "pass",
+    "scale_up_fixture_action_id": "ded1432c-ab00-4b46-9af8-6966f3fea4cd",
+    "scale_down_action_id": "23e1a5fc-dbc3-4763-b2e4-2880a20213f2",
+    "instance_id": "90d409ed-f8b3-4ed9-9370-1adf78f79acb",
+    "provider_instance_id": "portage-capacity-90d409ed-f8b3-4ed9-9370-1adf78f79acb",
+    "pve_vmid": 153,
+    "active_lease_id": "acb46808-c40a-415e-bac7-c2252e70f0b7",
+    "refusal_attempt": 1,
+    "refusal_detail": "wait for executor drain: context deadline exceeded",
+    "action_requeued": true,
+    "pve_present_after_refusal": true,
+    "final_action_state": "completed",
+    "final_action_attempts": 3,
+    "final_instance_state": "deleted",
+    "pve_absence_readback": true
+  },
+  "cleanup": {
+    "disposable_vm_absent": true,
+    "capacity_vm_absent": true,
+    "negative_gate_vm_absent": true,
+    "preexisting_vmid_133_preserved": true,
+    "rejected_g6_template_removed": true,
+    "one_off_runtime_snippets_removed": true
+  }
+}

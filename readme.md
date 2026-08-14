@@ -16,14 +16,6 @@ can consume.
 > [production boundary](docs/PRODUCTION_BOUNDARY.md) and
 > [remaining work](docs/NEXT_STEPS.md).
 
-## What it does
-
-| Workflow | Tool | Result |
-| --- | --- | --- |
-| Consume an existing package | Portage `emerge` | Installs from a signed binhost |
-| Request a missing package | `portage-client` | Submits and tracks a remote build |
-| Operate the platform | Dashboard and service binaries | Manages workers, policy, signing, storage, and releases |
-
 The core pipeline is:
 
 ```text
@@ -31,16 +23,12 @@ client → API/scheduler → disposable native worker → quarantine/verify
        → isolated signer → immutable binhost → emerge
 ```
 
-Important boundaries:
+Security boundaries:
 
-- PostgreSQL is the durable authority for jobs, leases, admission, signing,
-  identity, and capacity state.
-- Builders are single-use and never receive the release private key.
-- The signer is isolated and pulls digest-bound work from its own queue.
-- Catalog policy fixes the repository revision, profile, image generation,
-  resource class, and allowed egress for every build.
-- OIDC sessions and project RBAC scope authenticated operations; anonymous
-  access is limited to package, documentation, and coarse status surfaces.
+- PostgreSQL is the durable authority for jobs, leases, identity, signing, and capacity.
+- Builders are single-use; the isolated signer alone handles release keys.
+- Catalog policy pins repositories, profiles, images, resources, and egress.
+- OIDC and project RBAC scope writes; anonymous access is read-only and limited.
 
 ## Quick start
 
@@ -66,14 +54,7 @@ docker compose --env-file .env.compose up -d
 scripts/verify-compose.sh .env.compose
 ```
 
-Default local endpoints:
-
-- API and binhost: `http://127.0.0.1:18080`
-- Dashboard: `http://127.0.0.1:18081`
-- Grafana: `http://127.0.0.1:23000`
-- Prometheus: `http://127.0.0.1:29090`
-
-These defaults are for local development only. Replace credentials and add the
+The Compose defaults bind only to loopback. Replace credentials and add the
 documented HTTPS edge before allowing access from another network.
 
 ## Use the binhost
@@ -89,38 +70,9 @@ emerge --getbinpkg app-editors/vim
 ```
 
 Use `--getbinpkgonly` when falling back to a local source build is not allowed.
-Signing trust and multi-profile setup are covered in the
-[usage guide](docs/USAGE.md).
-
-Request a build with a short-lived platform session and an authorized project:
-
-```bash
-export PORTAGE_ENGINE_TOKEN='<session-token>'
-export PORTAGE_ENGINE_PROJECT='<project-name-or-uuid>'
-
-./bin/portage-client build \
-  -server=https://portage.example.org \
-  -package=dev-lang/python -version=3.11 \
-  -profile-id=pe/amd64/glibc/systemd/base-v1 \
-  -resource-class=medium -wait
-```
-
-The legacy API key is a migration and break-glass administrator path, not a CI
-identity. Never send API keys or bearer tokens over untrusted HTTP.
-
-## Components
-
-- `portage-server` — API, scheduler, policy, IaC, and publication control.
-- `portage-builder` — native Gentoo build and install verification.
-- `portage-signer` — isolated digest-bound signing worker.
-- `portage-dashboard` — operator console and public read-only pages.
-- `portage-client` — consumer setup and developer build requests.
-- `portage-capacity-actuator` — fenced capacity operations outside scheduler transactions.
-- `image-factory/` — offline Packer/Catalyst image production and desktop gates.
-
-Distributed Build Alpha is optional and disabled by default. Its security
-boundary and remaining live PVE/distccd validation are documented in
-[Distributed Build Alpha](docs/DISTRIBUTED_BUILD_ALPHA.md).
+Signing, multi-profile setup, build requests, and short-lived sessions are in
+the [usage guide](docs/USAGE.md). The legacy API key is break-glass only; never
+send an API key or bearer token over untrusted HTTP.
 
 ## Development checks
 
@@ -141,13 +93,9 @@ and runtime SBOM/provenance generation.
 - [Documentation map](docs/README.md)
 - [Usage guide](docs/USAGE.md)
 - [PVE reference deployment](docs/PVE_TESTING.md)
-- [Identity and project authorization](docs/IAM.md)
 - [Production boundary](docs/PRODUCTION_BOUNDARY.md)
-- [Object storage contract](docs/OBJECT_STORAGE.md)
-- [Recovery Gate](docs/PUBLIC_BETA_RECOVERY.md)
-- [Release process](release/README.md)
 - [Public Beta and GA plan](docs/NEXT_STEPS.md)
-- [Enterprise capability gaps](docs/ENTERPRISE_GAPS.md)
+- [Release process](release/README.md)
 
 Report vulnerabilities through the process in [SECURITY.md](SECURITY.md).
 Never commit API tokens, infrastructure credentials, private signing keys, or

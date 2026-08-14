@@ -28,6 +28,39 @@ func TestPackerProvisionReconcilesWorldAndImageSetWithSamePolicy(t *testing.T) {
 	}
 }
 
+func TestPackerSuccessorRefreshesCloneNetworkIdentity(t *testing.T) {
+	t.Parallel()
+	provisionData, err := os.ReadFile(filepath.Join("..", "..", "image-factory", "packer", "scripts", "provision.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	gateData, err := os.ReadFile(filepath.Join("..", "..", "image-factory", "packer", "scripts", "sanitize-and-gate.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	provision, gate := string(provisionData), string(gateData)
+	for _, required := range []string{
+		"portage-cloud-init-network-refresh.service",
+		"After=systemd-networkd.service cloud-init-network.service",
+		"ClientIdentifier=mac",
+		"networkctl reload",
+		"networkctl reconfigure eth0",
+	} {
+		if !strings.Contains(provision, required) {
+			t.Fatalf("Packer successor network refresh is missing %q", required)
+		}
+	}
+	for _, required := range []string{
+		"systemctl is-enabled portage-cloud-init-network-refresh.service",
+		"-name '10-cloud-init-*.network' -delete",
+		"-name '10-cloud-init-*.network.d'",
+	} {
+		if !strings.Contains(gate, required) {
+			t.Fatalf("Packer successor network gate is missing %q", required)
+		}
+	}
+}
+
 func TestPackerDesktopProvisionEnablesConcreteDisplayManager(t *testing.T) {
 	t.Parallel()
 	provisionPath := filepath.Join("..", "..", "image-factory", "packer", "scripts", "provision.sh")

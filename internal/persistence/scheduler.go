@@ -734,15 +734,64 @@ func (r *JobRepository) schedulerWorker(
 }
 
 func (r *JobRepository) PruneStaleWorkers(ctx context.Context, before time.Time) (int64, error) {
-	tag, err := r.db.Pool().Exec(ctx, `
-		DELETE FROM workers w
-		WHERE (w.last_seen_at IS NULL OR w.last_seen_at < $1)
-		  AND NOT EXISTS (SELECT 1 FROM worker_leases l WHERE l.worker_id = w.id)
-	`, before)
+	var pruned int64
+	err := r.db.WithTx(ctx, pgx.TxOptions{}, func(q Querier) error {
+		rows, err := q.Query(ctx, `
+			SELECT w.id
+			FROM workers w
+			WHERE (w.last_seen_at IS NULL OR w.last_seen_at < $1)
+			  AND NOT EXISTS (
+			    SELECT 1 FROM worker_leases l WHERE l.worker_id = w.id
+			  )
+			FOR UPDATE OF w SKIP LOCKED
+		`, before)
+		if err != nil {
+			return err
+		}
+		var workerIDs []uuid.UUID
+		for rows.Next() {
+			var workerID uuid.UUID
+			if err := rows.Scan(&workerID); err != nil {
+				rows.Close()
+				return err
+			}
+			workerIDs = append(workerIDs, workerID)
+		}
+		rowsErr := rows.Err()
+		rows.Close()
+		if rowsErr != nil {
+			return rowsErr
+		}
+		if len(workerIDs) == 0 {
+			return nil
+		}
+		// Worker-scoring evidence deliberately uses ON DELETE RESTRICT so an
+		// accidental direct delete cannot erase audit context. Pruning is the
+		// authorized lifecycle path: remove that evidence in the same locked
+		// transaction before deleting the stale worker rows.
+		if _, err := q.Exec(ctx, `
+			DELETE FROM scheduler_worker_decisions
+			WHERE worker_id = ANY($1::uuid[])
+		`, workerIDs); err != nil {
+			return err
+		}
+		tag, err := q.Exec(ctx, `
+			DELETE FROM workers w
+			WHERE w.id = ANY($1::uuid[])
+			  AND NOT EXISTS (
+			    SELECT 1 FROM worker_leases l WHERE l.worker_id = w.id
+			  )
+		`, workerIDs)
+		if err != nil {
+			return err
+		}
+		pruned = tag.RowsAffected()
+		return nil
+	})
 	if err != nil {
 		return 0, fmt.Errorf("prune stale scheduler workers: %w", err)
 	}
-	return tag.RowsAffected(), nil
+	return pruned, nil
 }
 
 type expiredLeaseRow struct {

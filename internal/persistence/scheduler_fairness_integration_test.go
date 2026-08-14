@@ -266,6 +266,31 @@ func TestPostgresSchedulerFairnessAndAutoscaling(t *testing.T) {
 	`, workerID, capabilities, builder.ExecutorProtocolVersion); err != nil {
 		t.Fatal(err)
 	}
+	// Admission workers deliberately carry the same provider/pool labels so
+	// they can route phases, but they are not provider capacity. A provider
+	// slot ceiling must count only actual phase executors or a separated API
+	// role can consume the final slot and suppress scale-up forever.
+	admissionID := uuid.New()
+	admissionCapabilities := `{
+	  "role":"control-plane-admission",
+	  "executor_protocol":5,
+	  "labels":[
+	    "worker-kind:admission",
+	    "capacity-pool:pve-default-amd64-test-pool",
+	    "provider:pve"
+	  ]
+	}`
+	if _, err := db.Pool().Exec(ctx, `
+		INSERT INTO workers (
+		  id, stable_name, desired_state, capabilities, max_slots,
+		  last_seen_at, executor_protocol
+		) VALUES (
+		  $1, 'autoscale-admission-decoy', 'active', $2::jsonb, 1,
+		  clock_timestamp(), $3
+		)
+	`, admissionID, admissionCapabilities, builder.ExecutorProtocolVersion); err != nil {
+		t.Fatal(err)
+	}
 	policy := builder.SchedulerAutoscalePolicy{
 		Mode: "observe", MinSlots: 1, MaxSlots: 10, TargetReady: 2,
 		Cooldown: 0, ScaleDownDelay: time.Hour,
@@ -296,7 +321,7 @@ func TestPostgresSchedulerFairnessAndAutoscaling(t *testing.T) {
 	}
 	actuatePolicy := policy
 	actuatePolicy.Mode = "actuate"
-	actuatePolicy.ProviderMaxSlots = map[string]int{"pve": 8}
+	actuatePolicy.ProviderMaxSlots = map[string]int{"pve": 2}
 	if actuated, err := repo.ReconcileAutoscaling(
 		ctx, actuatePolicy,
 	); err != nil || actuated.Pools[0].Recommendation != "scale-up" {
@@ -391,6 +416,47 @@ func TestPostgresSchedulerFairnessAndAutoscaling(t *testing.T) {
 	testCapacityActionInstanceBindings(
 		t, ctx, db, repo, policy, poolID,
 	)
+	testStaleWorkerPruningRemovesScoringEvidence(t, ctx, db, repo)
+}
+
+func testStaleWorkerPruningRemovesScoringEvidence(
+	t *testing.T,
+	ctx context.Context,
+	db *persistence.Database,
+	repo *persistence.JobRepository,
+) {
+	t.Helper()
+	var workerID uuid.UUID
+	if err := db.Pool().QueryRow(ctx, `
+		SELECT d.worker_id
+		FROM scheduler_worker_decisions d
+		WHERE NOT EXISTS (
+		  SELECT 1 FROM worker_leases l WHERE l.worker_id = d.worker_id
+		)
+		LIMIT 1
+	`).Scan(&workerID); err != nil {
+		t.Fatalf("select stale-prune scoring fixture: %v", err)
+	}
+	if _, err := db.Pool().Exec(ctx, `
+		UPDATE workers
+		SET last_seen_at = clock_timestamp() - interval '2 hours'
+		WHERE id = $1
+	`, workerID); err != nil {
+		t.Fatal(err)
+	}
+	pruned, err := repo.PruneStaleWorkers(ctx, time.Now().Add(-time.Hour))
+	if err != nil || pruned < 1 {
+		t.Fatalf("prune worker with scoring evidence: pruned=%d err=%v", pruned, err)
+	}
+	var workers, decisions int
+	if err := db.Pool().QueryRow(ctx, `
+		SELECT
+		  (SELECT count(*) FROM workers WHERE id = $1),
+		  (SELECT count(*) FROM scheduler_worker_decisions WHERE worker_id = $1)
+	`, workerID).Scan(&workers, &decisions); err != nil || workers != 0 || decisions != 0 {
+		t.Fatalf("stale worker residue workers=%d decisions=%d err=%v",
+			workers, decisions, err)
+	}
 }
 
 // testCapacityActionInstanceBindings covers the reconcile pass that arrives

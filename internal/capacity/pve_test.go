@@ -18,6 +18,9 @@ func validPVEExecutorTemplate() PVEExecutorTemplate {
 		ImageID: "pe/amd64/base", ImageGeneration: "g1",
 		Template:          "pe-persistent-executor-g1",
 		BootstrapContract: PVEExecutorBootstrapDMIV1,
+		Spec: map[string]string{
+			"cicustom": "user=shared-snippets:snippets/executor-g1.yaml",
+		},
 		EgressPolicy: catalog.EgressPolicy{
 			ID: "egress/executor", Mode: catalog.EgressModeEnforce,
 			Channel: "candidate", DNSResolvers: []string{"192.0.2.53"},
@@ -27,6 +30,32 @@ func validPVEExecutorTemplate() PVEExecutorTemplate {
 				Ports: []int{443, 25432},
 			}},
 		},
+	}
+}
+
+func TestNewPVEProviderRequiresBootstrapUserData(t *testing.T) {
+	for _, cicustom := range []string{
+		"",
+		"vendor=shared-snippets:snippets/vendor.yaml",
+		"user=local:iso/executor.yaml",
+		"user=shared-snippets:snippets/../executor.yaml",
+		"user=shared-snippets:snippets/executor.yaml\nprovider=evil",
+	} {
+		t.Run(cicustom, func(t *testing.T) {
+			template := validPVEExecutorTemplate()
+			template.Spec["cicustom"] = cicustom
+			_, err := NewPVEProvider(PVEProviderConfig{
+				Endpoint:     "https://pve.example.internal:8006",
+				WorkspaceDir: t.TempDir(),
+				Credentials: &iac.CloudCredentials{
+					PVETokenID: "user@pve!capacity", PVETokenSecret: "test-secret",
+				},
+				Templates: []PVEExecutorTemplate{template},
+			})
+			if err == nil {
+				t.Fatalf("invalid bootstrap cicustom %q was accepted", cicustom)
+			}
+		})
 	}
 }
 
@@ -103,6 +132,7 @@ func TestPVEProvisionSpecBindsDatabaseIdentityAndStartsStopped(t *testing.T) {
 		"template":      template.Template,
 		"start_stopped": "true",
 		"tags":          "portage-capacity,persistent-executor",
+		"cicustom":      "user=shared-snippets:snippets/executor-g1.yaml",
 	} {
 		if spec[key] != want {
 			t.Errorf("spec[%q]=%q, want %q", key, spec[key], want)

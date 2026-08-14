@@ -3,9 +3,9 @@
 Distributed Build Alpha is an optional compile-only acceleration milestone. It
 does not block Public Beta and is disabled by default. Migration 00029 owns the
 repository-side inventory and leases; 00027 and 00028 are reserved by the CLI
-device-flow and monitoring milestones and 00030 by CLI session derivation, so
-final integration must be `00027 -> 00028 -> 00029 -> 00030`, landing on the
-pinned PostgreSQL schema v30.
+device-flow and monitoring milestones and 00030 by CLI session derivation.
+Migration 00031 adds the worker-pruning lookup required by the shared scheduler,
+so final integration lands on pinned PostgreSQL schema v31.
 
 ## Scheduling boundary
 

@@ -1240,8 +1240,12 @@ var zhCatalogue = map[string]string{
 	"set.nodes.hint":                  "共享存储集群配合 auto 使用;留空则仅在持有模板的节点中选",
 	"set.template":                    "VM 模板",
 	"set.template.hint":               "须为装有 cloud-init 与 qemu-guest-agent 的 QEMU 模板",
-	"set.nameserver":                  "构建机 DNS(可选)",
-	"set.nameserver.hint":             "经 cloud-init 下发;填内网 DNS 让构建机能解析镜像站/registry 域名",
+	"set.nameserver":                  "构建机 DNS（可选）",
+	"set.nameserver.hint":             "经 cloud-init 下发；填内网 DNS 让构建机能解析镜像站/registry 域名",
+	"set.ipconfig":                    "构建机 IP 配置（可选）",
+	"set.ipconfig.hint":               "正常使用 DHCP；仅在实验室预留地址场景填写 IPv4 CIDR 作为运维级回退",
+	"set.gateway":                     "静态网关（可选）",
+	"set.gateway.hint":                "使用静态 IPv4 CIDR 时必填，且必须位于同一子网",
 	"set.cicustom":                    "cloud-init snippet(cicustom,可选)",
 	"set.cicustom.hint":               "克隆后保留;基础镜像没有 qemu-guest-agent 时用 vendor snippet 首启安装",
 	"set.tokenid":                     "API Token ID",
@@ -4080,6 +4084,16 @@ const settingsContent = `
       <p class="hint" data-i18n="set.nameserver.hint">Pushed via cloud-init; set your internal DNS so mirror/registry domains resolve on build VMs</p>
     </div>
     <div class="field">
+      <label for="pve_ip_config" data-i18n="set.ipconfig">Build VM IP configuration (optional)</label>
+      <input type="text" id="pve_ip_config" placeholder="dhcp or 10.31.0.105/24">
+      <p class="hint" data-i18n="set.ipconfig.hint">Use DHCP normally; an IPv4 CIDR is an operator-only fallback for a reserved lab address</p>
+    </div>
+    <div class="field">
+      <label for="pve_gateway" data-i18n="set.gateway">Static gateway (optional)</label>
+      <input type="text" id="pve_gateway" placeholder="10.31.0.1">
+      <p class="hint" data-i18n="set.gateway.hint">Required with a static build VM IPv4 CIDR and must be in the same subnet</p>
+    </div>
+    <div class="field">
       <label for="pve_cicustom" data-i18n="set.cicustom">cloud-init snippet (cicustom, optional)</label>
       <input type="text" id="pve_cicustom" placeholder="vendor=local:snippets/vendor.yaml">
       <p class="hint" data-i18n="set.cicustom.hint">Preserved on cloned VMs; use a vendor snippet that installs qemu-guest-agent when the base image lacks it</p>
@@ -4460,6 +4474,8 @@ function collect() {
     pve_template: val('pve_template'),
     pve_cicustom: val('pve_cicustom'),
     pve_nameserver: val('pve_nameserver'),
+    pve_ip_config: val('pve_ip_config'),
+    pve_gateway: val('pve_gateway'),
     gentoo_mirror: val('gentoo_mirror'),
     portage_sync_uri: val('portage_sync_uri'),
     portage_sync_method: val('portage_sync_method') || 'webrsync',
@@ -4530,6 +4546,8 @@ function fill(s) {
   setVal('pve_template', s.pve_template);
   setVal('pve_cicustom', s.pve_cicustom);
   setVal('pve_nameserver', s.pve_nameserver);
+  setVal('pve_ip_config', s.pve_ip_config);
+  setVal('pve_gateway', s.pve_gateway);
   setVal('gentoo_mirror', s.gentoo_mirror);
   setVal('portage_sync_uri', s.portage_sync_uri);
   setVal('portage_sync_method', s.portage_sync_method || 'webrsync');
@@ -4578,6 +4596,7 @@ var FIELD_CONTROLS = {
   pve_username: 'pve_username', pve_password: 'pve_password',
   pve_storage: 'pve_storage', pve_network: 'pve_network', pve_template: 'pve_template',
   pve_cicustom: 'pve_cicustom', pve_nameserver: 'pve_nameserver',
+  pve_ip_config: 'pve_ip_config', pve_gateway: 'pve_gateway',
   gentoo_mirror: 'gentoo_mirror', portage_sync_uri: 'portage_sync_uri',
   portage_sync_method: 'portage_sync_method', make_conf_extra: 'make_conf_extra',
   build_features: 'build_features', ssh_key_path: 'ssh_key_path', ssh_user: 'ssh_user',

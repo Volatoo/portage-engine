@@ -352,7 +352,7 @@ func (s *Server) Initialize() error {
 		}
 	}
 	if err := s.initArtifactStorage(); err != nil {
-		if s.config.DeploymentMode == config.DeploymentModePublic {
+		if s.config.DeploymentMode == config.DeploymentModePublic || apiOnly || executorOnly {
 			return err
 		}
 		log.Printf("Warning: artifact storage initialization failed: %v", err)
@@ -394,7 +394,7 @@ func (s *Server) Initialize() error {
 	if s.config.StorageType == "s3" && s.artifactStorage != nil {
 		if err := s.validateObjectBinhostChannels(); err != nil {
 			s.setArtifactStorageError(err)
-			if s.config.DeploymentMode == config.DeploymentModePublic {
+			if s.config.DeploymentMode == config.DeploymentModePublic || apiOnly || executorOnly {
 				return fmt.Errorf("validate object binhost channels: %w", err)
 			}
 			log.Printf("Warning: object binhost validation failed: %v", err)

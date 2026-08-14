@@ -20,6 +20,13 @@ variable "proxmox_username" {
 variable "proxmox_token" {
   type      = string
   sensitive = true
+  default   = ""
+}
+
+variable "proxmox_password" {
+  type      = string
+  sensitive = true
+  default   = ""
 }
 
 variable "proxmox_node" {
@@ -74,7 +81,8 @@ variable "ssh_username" {
 }
 
 variable "ssh_private_key_file" {
-  type = string
+  type    = string
+  default = ""
 }
 
 variable "cores" {
@@ -163,7 +171,8 @@ variable "terraform_proxmox_provider_sha256" {
 source "proxmox-clone" "persistent_executor" {
   proxmox_url              = var.proxmox_url
   username                 = var.proxmox_username
-  token                    = var.proxmox_token
+  token                    = var.proxmox_token != "" ? var.proxmox_token : null
+  password                 = var.proxmox_password != "" ? var.proxmox_password : null
   node                     = var.proxmox_node
   pool                     = var.proxmox_pool
   insecure_skip_tls_verify = var.proxmox_insecure
@@ -194,8 +203,12 @@ source "proxmox-clone" "persistent_executor" {
     firewall = true
   }
 
-  ssh_username         = var.ssh_username
-  ssh_private_key_file = var.ssh_private_key_file
+  ssh_username = var.ssh_username
+  # With no operator key, the Proxmox builder creates an ephemeral keypair,
+  # injects the public key through Cloud-Init, and removes the private key when
+  # the build ends. An explicit owner-only key remains supported for offline
+  # runners that already manage one.
+  ssh_private_key_file = var.ssh_private_key_file != "" ? var.ssh_private_key_file : null
   ssh_timeout          = "20m"
   task_timeout         = "30m"
 

@@ -135,6 +135,10 @@ type ServerConfig struct {
 	CloudPVEStorage     string   // Default storage pool
 	CloudPVENetwork     string   // Default network bridge
 	CloudPVETemplate    string   // Default VM template
+	CloudPVECICustom    string   // Optional PVE cloud-init custom snippet mapping
+	CloudPVENameserver  string   // Optional build VM DNS resolver
+	CloudPVEIPConfig    string   // Build VM IP configuration: dhcp or an IPv4 CIDR
+	CloudPVEGateway     string   // Gateway paired with a static build VM IPv4 CIDR
 	CloudPVENodes       []string // Candidate nodes for automatic placement (CLOUD_PVE_NODE=auto)
 	CloudPVEAllowedIPs  []string // Allowed IP ranges for firewall
 	CloudSSHKeyPath     string
@@ -368,6 +372,13 @@ func (c *ServerConfig) ValidateStartup() error {
 	if err := c.distCCPoolContract(); err != nil {
 		return fmt.Errorf("distcc alpha configuration rejected: %w", err)
 	}
+	// In separated active-phase mode the executor that prepares an upload and
+	// the API replica that terminates Worker Gateway mTLS do not share a local
+	// filesystem. Persisting an executor-local absolute quarantine path makes
+	// the gateway reject the upload (or, with an identically named but
+	// unrelated directory, attest different bytes). S3 is the implemented
+	// cross-replica artifact authority; reject local storage before accepting a
+	// job instead of failing after a remote build has completed.
 	if c.RuntimeRole == "executor" {
 		if violations := c.validatePersistentExecutorBoundary(); len(violations) > 0 {
 			return fmt.Errorf(
@@ -377,6 +388,26 @@ func (c *ServerConfig) ValidateStartup() error {
 		}
 	}
 	if mode != DeploymentModePublic {
+		if c.PhaseExecutorMode == "active" &&
+			(c.RuntimeRole == "api" || c.RuntimeRole == "executor") {
+			if c.StorageType != "s3" {
+				return fmt.Errorf(
+					"separated active phase execution requires STORAGE_TYPE=s3; local artifact quarantine is process-local",
+				)
+			}
+			if strings.TrimSpace(c.StorageS3Bucket) == "" ||
+				strings.TrimSpace(c.StorageS3Region) == "" {
+				return fmt.Errorf(
+					"separated active phase execution requires STORAGE_S3_BUCKET and STORAGE_S3_REGION",
+				)
+			}
+			endpoint := strings.TrimSpace(c.StorageS3Endpoint)
+			if endpoint != "" && !validHTTPOrigin(endpoint) {
+				return fmt.Errorf(
+					"separated active phase execution requires STORAGE_S3_ENDPOINT to be an absolute HTTP(S) origin without credentials, path, query, or fragment",
+				)
+			}
+		}
 		return nil
 	}
 
@@ -1699,6 +1730,10 @@ func LoadServerConfig(path string) (*ServerConfig, error) {
 	config.CloudPVEStorage = getEnvString(env, "CLOUD_PVE_STORAGE", "local-lvm")
 	config.CloudPVENetwork = getEnvString(env, "CLOUD_PVE_NETWORK", "vmbr0")
 	config.CloudPVETemplate = getEnvString(env, "CLOUD_PVE_TEMPLATE", "")
+	config.CloudPVECICustom = getEnvString(env, "CLOUD_PVE_CICUSTOM", "")
+	config.CloudPVENameserver = getEnvString(env, "CLOUD_PVE_NAMESERVER", "")
+	config.CloudPVEIPConfig = getEnvString(env, "CLOUD_PVE_IP_CONFIG", "")
+	config.CloudPVEGateway = getEnvString(env, "CLOUD_PVE_GATEWAY", "")
 	if nodes := getEnvString(env, "CLOUD_PVE_NODES", ""); nodes != "" {
 		config.CloudPVENodes = strings.Split(nodes, ",")
 		for i := range config.CloudPVENodes {
