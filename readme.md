@@ -136,14 +136,14 @@ stable promotion, rollback, and independent verification contract is in
 
 ## Development quick start
 
-Requires Go 1.26.4 and Node 22.22.2 or newer; real builds require a native
+Requires Go 1.26.6 and Node 22.22.2 or newer; real builds require a native
 Gentoo disposable root or VM. Node is not optional: `portage-dashboard` embeds
 the operator console, so `make build` builds `web/` first and the dashboard
 binary answers 503 on every console route without it. `make build` runs `npm ci`
 itself when `web/node_modules` is missing or older than the lockfile.
 
 ```bash
-git clone https://github.com/slchris/portage-engine.git
+git clone https://github.com/Volatoo/portage-engine.git
 cd portage-engine
 go mod download
 make build

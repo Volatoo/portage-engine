@@ -1,0 +1,6 @@
+# GO-2026-5932 affects only golang.org/x/crypto/openpgp and its subpackages.
+# Portage Engine directly imports golang.org/x/crypto/blake2b and no OpenPGP
+# package; govulncheck confirms that the vulnerable symbols are unreachable.
+# The advisory affects every x/crypto version and has no patched release, so a
+# version bump cannot resolve this module-level Trivy false positive.
+GO-2026-5932

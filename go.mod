@@ -1,12 +1,11 @@
 module github.com/slchris/portage-engine
 
-// A patch-level floor is a real constraint, not a version stamp: it rejects
-// every toolchain below it. Gentoo's stable dev-lang/go is 1.26.4, and Gentoo is
-// where this project is built and run, so a 1.26.5 floor made `go mod download`
-// fail inside Dockerfile.test and would have forced every source consumer onto a
-// testing-keyword compiler. Nothing here needs a 1.26.5 fix; CI still builds and
-// tests with 1.26.5. Raise this only for a fix the code actually depends on.
-go 1.26.4
+// A patch-level floor is a real constraint, not a version stamp. Go 1.26.6 is
+// required because earlier 1.26 toolchains contain reachable standard-library
+// vulnerabilities (GO-2026-6218, GO-2026-6091, GO-2026-6090, GO-2026-6089,
+// GO-2026-6088, GO-2026-5972, and GO-2026-5026). Dockerfile.test supplies the
+// upstream 1.26.6 toolchain instead of depending on Gentoo's release cadence.
+go 1.26.6
 
 require (
 	github.com/aws/aws-sdk-go-v2 v1.43.0
@@ -20,6 +19,7 @@ require (
 	github.com/klauspost/compress v1.19.1
 	github.com/pressly/goose/v3 v3.27.3
 	github.com/redis/go-redis/v9 v9.20.0
+	github.com/ulikunitz/xz v0.5.15
 	golang.org/x/crypto v0.54.0
 	golang.org/x/oauth2 v0.36.0
 )

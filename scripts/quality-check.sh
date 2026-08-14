@@ -3,8 +3,8 @@
 
 set -euo pipefail
 
-readonly golangci_lint_version="v2.7.2"
-readonly govulncheck_version="v1.1.4"
+readonly golangci_lint_version="v2.12.2"
+readonly govulncheck_version="v1.7.0"
 readonly golangci_lint_package="github.com/golangci/golangci-lint/v2/cmd/golangci-lint@${golangci_lint_version}"
 readonly govulncheck_package="golang.org/x/vuln/cmd/govulncheck@${govulncheck_version}"
 
