@@ -142,8 +142,8 @@ jobs:
         run: make test-release
 
       - name: Upload coverage
-        uses: codecov/codecov-action@0f8570b1a125f4937846a11fcfa3bcd548bd8c97 # v4.6.0
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
         with:
-          file: ./coverage.out
+          files: ./coverage.out
           flags: pr-unittests
           fail_ci_if_error: false
