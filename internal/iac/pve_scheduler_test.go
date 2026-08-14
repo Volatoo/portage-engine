@@ -196,6 +196,89 @@ func TestWaitForPVEGuestHostKeyBindsKeyThroughQGA(t *testing.T) {
 	}
 }
 
+func TestPVEGuestExecUsesPasswordCookieAndCSRF(t *testing.T) {
+	t.Parallel()
+	var execSeen atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api2/json/access/ticket":
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{
+				"ticket": "PVE:guest-ticket", "CSRFPreventionToken": "guest-csrf",
+			}})
+		case "/api2/json/nodes/pve01/qemu/900/agent/exec":
+			cookie, err := r.Cookie("PVEAuthCookie")
+			if err != nil || cookie.Value != "PVE:guest-ticket" {
+				t.Fatalf("auth cookie = %v, err=%v", cookie, err)
+			}
+			if got := r.Header.Get("CSRFPreventionToken"); got != "guest-csrf" {
+				t.Fatalf("CSRF token = %q", got)
+			}
+			execSeen.Store(true)
+			_, _ = fmt.Fprint(w, `{"data":{"pid":42}}`)
+		case "/api2/json/nodes/pve01/qemu/900/agent/exec-status":
+			if _, err := r.Cookie("PVEAuthCookie"); err != nil {
+				t.Fatalf("status auth cookie: %v", err)
+			}
+			_, _ = fmt.Fprint(w, `{"data":{"exited":1,"exitcode":0,"out-data":"ok\n","err-data":"","out-truncated":0,"err-truncated":0}}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	out, err := PVEGuestExec(context.Background(), server.URL,
+		PVEAuth{Username: "guest@pve", Password: "password", Insecure: true},
+		"pve01", "900", []string{"/usr/bin/true"})
+	if err != nil || out != "ok\n" || !execSeen.Load() {
+		t.Fatalf("out=%q exec=%v err=%v", out, execSeen.Load(), err)
+	}
+}
+
+func TestRecoverPVEGuestNetworkUsesFixedNoBlockRestart(t *testing.T) {
+	var command []string
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "PVEAPIToken=network@pve!gate=secret" {
+			t.Fatalf("Authorization = %q", got)
+		}
+		switch {
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/agent/exec"):
+			if err := r.ParseForm(); err != nil {
+				t.Fatal(err)
+			}
+			command = append([]string(nil), r.Form["command"]...)
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"pid": 41}})
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/agent/exec-status"):
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{
+				"exited": 1, "exitcode": 0, "out-data": "",
+			}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	auth := PVEAuth{
+		TokenID: "network@pve!gate", TokenSecret: "secret", Insecure: true,
+	}
+	if err := recoverPVEGuestNetwork(
+		context.Background(), server.URL, auth, "pve01", "9001",
+	); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(command, []string{"/bin/sh", "-c", pveGuestNetworkRecoveryScript}) {
+		t.Fatalf("network recovery command = %#v", command)
+	}
+	for _, required := range []string{
+		"10-cloud-init-eth0.network",
+		"ClientIdentifier=mac",
+		"systemctl --no-block restart systemd-networkd.service",
+	} {
+		if !strings.Contains(command[2], required) {
+			t.Fatalf("network recovery command is missing %q", required)
+		}
+	}
+}
+
 // fakeCluster serves a /api2/json/cluster/resources fixture and records the
 // Authorization header it saw.
 func fakeCluster(t *testing.T) (*httptest.Server, *string) {

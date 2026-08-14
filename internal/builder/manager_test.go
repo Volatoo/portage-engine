@@ -1008,3 +1008,26 @@ func TestSubmitBuildFullQueueLeavesNoOrphan(t *testing.T) {
 		t.Errorf("full-queue submission left an orphan job: before=%d after=%d", before, after)
 	}
 }
+
+func TestPVESpecWithDefaultsIncludesOperatorNetworkAndKeepsRequestOverrides(t *testing.T) {
+	settings := &config.CloudSettings{
+		PVEEndpoint:   "https://pve.internal:8006",
+		PVETemplate:   "gentoo-template",
+		PVEIPConfig:   "10.31.0.105/24",
+		PVEGateway:    "10.31.0.1",
+		PVENameserver: "10.31.0.252",
+	}
+
+	got := pveSpecWithDefaults(settings, map[string]string{
+		"ip_config": "10.31.0.106/24",
+	}, "native-gentoo")
+	if got["ip_config"] != "10.31.0.106/24" {
+		t.Fatalf("request override lost: %q", got["ip_config"])
+	}
+	if got["gateway"] != "10.31.0.1" || got["nameserver"] != "10.31.0.252" {
+		t.Fatalf("operator network defaults missing: gateway=%q nameserver=%q", got["gateway"], got["nameserver"])
+	}
+	if got["bios"] != "ovmf" || got["machine"] != "q35" || got["disk_type"] != "scsi" {
+		t.Fatalf("native Gentoo defaults missing: %#v", got)
+	}
+}

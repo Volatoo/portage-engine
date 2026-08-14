@@ -6,7 +6,7 @@
  * `control.closest('.panel')`, which only works while the offending control is
  * rendered, and every panel but one is hidden. Declaring the membership makes
  * "open the panel that holds `pve_endpoint`" a lookup that holds whether or not
- * anything is on screen, and lets a test assert that all forty-five controls
+ * anything is on screen, and lets a test assert that all forty-seven controls
  * live in exactly one section — the count the accessibility sweep measured.
  *
  * Group headings are the three the Go subnav prints: General, Infrastructure,
@@ -63,6 +63,8 @@ export const SECTIONS: readonly SettingsSection[] = [
       'pve_storage',
       'pve_network',
       'pve_nameserver',
+      'pve_ip_config',
+      'pve_gateway',
       'pve_cicustom',
     ],
   },

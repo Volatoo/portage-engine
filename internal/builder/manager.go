@@ -731,7 +731,10 @@ func (m *Manager) SetArtifactStorage(store artifactstorage.Storage) {
 	m.artifactStore = store
 	if m.objectQuarantineEnabled() {
 		m.workerBroker.SetUploadRoot(m.artifactQuarantineBase())
+		m.workerBroker.SetUploadObjectSink(m.storeGatewayUpload)
+		return
 	}
+	m.workerBroker.SetUploadObjectSink(nil)
 }
 
 // SetGPGKeyProvider registers the isolated signer's public identity for
@@ -1068,6 +1071,18 @@ func (m *Manager) StartWorkers() error {
 		// blocked phase work stays in PostgreSQL and consumes no executor
 		// goroutine or VM slot.
 		if runtimeRunsAdmission(runtimeRole) {
+			// A restarted admission replica must resume renewal for phase plans
+			// that are waiting for external executor capacity. Otherwise the
+			// original two-minute admission lease can expire before a PVE clone
+			// finishes and consume every job attempt without running a phase.
+			m.jobsMu.RLock()
+			for jobID, status := range m.jobs {
+				if status != nil && status.AttemptID != "" &&
+					!terminalStatus(status.Status) {
+					go m.renewActivePhaseAttemptLoop(jobID)
+				}
+			}
+			m.jobsMu.RUnlock()
 			go m.durablePhaseAdmissionLoop()
 		}
 		if runtimeRunsPhaseExecution(runtimeRole) {
@@ -3421,6 +3436,8 @@ func pveSpecWithDefaults(cs *config.CloudSettings, reqSpec map[string]string, bu
 	set("template", cs.PVETemplate)
 	set("cicustom", cs.PVECICustom)
 	set("nameserver", cs.PVENameserver)
+	set("ip_config", cs.PVEIPConfig)
+	set("gateway", cs.PVEGateway)
 	if cs.PVEInsecure {
 		spec["insecure"] = "true"
 	}
@@ -4820,6 +4837,106 @@ func (m *Manager) persistJobQuarantine(
 		if err := m.artifactStore.Upload(local, key); err != nil {
 			return fmt.Errorf("upload quarantine artifact %q: %w", rel, err)
 		}
+	}
+	return nil
+}
+
+// gatewayQuarantineKey converts the Broker's portable root-relative
+// destination (token/artifact) into the private immutable object key. The
+// exported storage helper independently validates both the capability token
+// and the worker-selected artifact path.
+func gatewayQuarantineKey(relative string) (string, error) {
+	portable := filepath.ToSlash(relative)
+	token, artifact, ok := strings.Cut(portable, "/")
+	if !ok || artifact == "" {
+		return "", fmt.Errorf("invalid gateway quarantine destination")
+	}
+	return artifactstorage.QuarantineGenerationKey(token, artifact)
+}
+
+// storeGatewayUpload copies a Broker-owned fenced generation into a private
+// regular temporary file before handing it to Storage.Upload. This preserves
+// the Broker's os.Root confinement across the path-based storage interface and
+// makes the shared object durable before the PostgreSQL upload row completes.
+func (m *Manager) storeGatewayUpload(
+	relative string,
+	source io.Reader,
+	expectedSize int64,
+	expectedDigest string,
+) error {
+	if !m.objectQuarantineEnabled() {
+		return fmt.Errorf("object quarantine is not configured")
+	}
+	if expectedSize < 0 || !sha256DigestRegex.MatchString(expectedDigest) {
+		return fmt.Errorf("invalid gateway artifact attestation")
+	}
+	key, err := gatewayQuarantineKey(relative)
+	if err != nil {
+		return err
+	}
+	scratch := filepath.Join(m.artifactQuarantineBase(), ".object-upload")
+	if err := os.MkdirAll(scratch, 0o750); err != nil {
+		return fmt.Errorf("create gateway object scratch: %w", err)
+	}
+	temporary, err := os.CreateTemp(scratch, ".generation-*")
+	if err != nil {
+		return fmt.Errorf("create gateway object generation: %w", err)
+	}
+	temporaryPath := temporary.Name()
+	defer func() {
+		_ = temporary.Close()
+		_ = os.Remove(temporaryPath)
+	}()
+	hash := sha256.New()
+	written, copyErr := io.Copy(
+		io.MultiWriter(temporary, hash), io.LimitReader(source, expectedSize+1),
+	)
+	if copyErr != nil {
+		return fmt.Errorf("copy gateway object generation: %w", copyErr)
+	}
+	if written != expectedSize {
+		return fmt.Errorf("copy gateway object generation: size=%d expected=%d",
+			written, expectedSize)
+	}
+	actualDigest := hex.EncodeToString(hash.Sum(nil))
+	if actualDigest != strings.ToLower(expectedDigest) {
+		return fmt.Errorf("gateway object generation digest mismatch")
+	}
+	if err := temporary.Sync(); err != nil {
+		return fmt.Errorf("sync gateway object generation: %w", err)
+	}
+	if err := temporary.Close(); err != nil {
+		return fmt.Errorf("close gateway object generation: %w", err)
+	}
+	if err := m.artifactStore.Upload(temporaryPath, key); err != nil {
+		return fmt.Errorf("upload gateway object %q: %w", key, err)
+	}
+	return nil
+}
+
+// materializeGatewayArtifact restores the object committed by the API-side
+// Broker into the active phase executor's private quarantine. The subsequent
+// size/digest check remains the final attestation before the artifact enters a
+// job generation.
+func (m *Manager) materializeGatewayArtifact(
+	jobID, relative, destination string,
+) error {
+	if !m.objectQuarantineEnabled() {
+		return nil
+	}
+	m.jobsMu.RLock()
+	job := m.jobs[jobID]
+	token := ""
+	if job != nil {
+		token = job.VerificationToken
+	}
+	m.jobsMu.RUnlock()
+	key, err := artifactstorage.QuarantineGenerationKey(token, filepath.ToSlash(relative))
+	if err != nil {
+		return fmt.Errorf("resolve collected artifact object: %w", err)
+	}
+	if err := m.artifactStore.Download(key, destination); err != nil {
+		return fmt.Errorf("materialize collected artifact %q: %w", relative, err)
 	}
 	return nil
 }
@@ -6421,6 +6538,9 @@ func (m *Manager) collectOnePullArtifact(
 	cancel()
 	if err != nil {
 		return "", result, ArtifactBudget{}, fmt.Errorf("stream artifact %q: %w", rel, err)
+	}
+	if err := m.materializeGatewayArtifact(jobID, clean, destination); err != nil {
+		return "", result, ArtifactBudget{}, err
 	}
 	info, err := os.Stat(destination)
 	if err != nil || info.Size() != result.Size || !sha256DigestRegex.MatchString(result.SHA256) {

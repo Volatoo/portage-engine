@@ -250,7 +250,6 @@ func TestPublicExecutorRequiresQuarantineScopedDeleteClient(t *testing.T) {
 func TestPersistentExecutorAcceptsOutboundGatewayWithoutListenerKey(t *testing.T) {
 	cfg := validPublicServerConfig()
 	cfg.DeploymentMode = DeploymentModeTrusted
-	cfg.StorageType = "local"
 	configurePersistentExecutor(cfg)
 	if err := cfg.ValidateStartup(); err != nil {
 		t.Fatalf("listener-free persistent executor was rejected: %v", err)
@@ -633,6 +632,31 @@ func TestServerConfigActivePhaseExecutorFailsClosedWithoutDurablePullMode(t *tes
 	if !strings.Contains(warnings,
 		"active phase executor does not support legacy REMOTE_BUILDERS") {
 		t.Fatalf("legacy dual-run warning missing: %q", warnings)
+	}
+}
+
+func TestValidateStartupSeparatedActivePhaseRequiresObjectStorage(t *testing.T) {
+	cfg := &ServerConfig{
+		DeploymentMode:    DeploymentModeTrusted,
+		RuntimeRole:       "api",
+		PhaseExecutorMode: "active",
+		StorageType:       "local",
+	}
+	if err := cfg.ValidateStartup(); err == nil || !strings.Contains(
+		err.Error(), "separated active phase execution requires STORAGE_TYPE=s3",
+	) {
+		t.Fatalf("separated local artifact authority was accepted: %v", err)
+	}
+	cfg.StorageType = "s3"
+	if err := cfg.ValidateStartup(); err == nil || !strings.Contains(
+		err.Error(), "requires STORAGE_S3_BUCKET and STORAGE_S3_REGION",
+	) {
+		t.Fatalf("separated incomplete S3 authority was accepted: %v", err)
+	}
+	cfg.StorageS3Bucket = "artifacts"
+	cfg.StorageS3Region = "us-east-1"
+	if err := cfg.ValidateStartup(); err != nil {
+		t.Fatalf("separated S3 artifact authority was rejected: %v", err)
 	}
 }
 
@@ -1068,6 +1092,10 @@ func TestLoadServerConfigEnvWithoutFile(t *testing.T) {
 	t.Setenv("CATALOG_PATH", "/srv/portage-engine/catalog.json")
 	t.Setenv("CLOUD_PVE_USERNAME", "terraform-prov@pve")
 	t.Setenv("CLOUD_PVE_PASSWORD", "runtime-only-password")
+	t.Setenv("CLOUD_PVE_CICUSTOM", "user=shared:snippets/executor.yaml")
+	t.Setenv("CLOUD_PVE_NAMESERVER", "10.31.0.252")
+	t.Setenv("CLOUD_PVE_IP_CONFIG", "10.31.0.105/24")
+	t.Setenv("CLOUD_PVE_GATEWAY", "10.31.0.1")
 	t.Setenv("BUILD_MODE", "native-gentoo")
 
 	cfg, err := LoadServerConfig("/nonexistent/path/server.conf")
@@ -1089,6 +1117,12 @@ func TestLoadServerConfigEnvWithoutFile(t *testing.T) {
 	settings := CloudSettingsFromServerConfig(cfg)
 	if settings.PVEUsername != cfg.CloudPVEUsername || settings.PVEPassword != cfg.CloudPVEPassword {
 		t.Fatal("PVE password authentication was dropped from runtime cloud settings")
+	}
+	if settings.PVEIPConfig != "10.31.0.105/24" || settings.PVEGateway != "10.31.0.1" {
+		t.Fatalf("PVE static network defaults were dropped: %q / %q", settings.PVEIPConfig, settings.PVEGateway)
+	}
+	if settings.PVECICustom != "user=shared:snippets/executor.yaml" || settings.PVENameserver != "10.31.0.252" {
+		t.Fatalf("PVE cloud-init defaults were dropped: %q / %q", settings.PVECICustom, settings.PVENameserver)
 	}
 	if settings.BuildMode != "native-gentoo" {
 		t.Fatalf("build mode was dropped from runtime cloud settings: %q", settings.BuildMode)
@@ -1218,7 +1252,6 @@ func TestPublicDeploymentRequiresVerifiedDatabaseTLS(t *testing.T) {
 func TestStartupRejectsUnnormalizableDistCCPool(t *testing.T) {
 	cfg := validPublicServerConfig()
 	cfg.DeploymentMode = DeploymentModeTrusted
-	cfg.StorageType = "local"
 	cfg.DistCCAlphaEnabled = true
 	cfg.DistCCCHOST = "x86_64-pc-linux-gnu"
 	cfg.DistCCCompilerDigest = "sha256:not-a-digest"
@@ -1241,7 +1274,6 @@ func TestStartupRejectsUnnormalizableDistCCPool(t *testing.T) {
 func TestPersistentExecutorEgressCapabilityFollowsTheCatalog(t *testing.T) {
 	cfg := validPublicServerConfig()
 	cfg.DeploymentMode = DeploymentModeTrusted
-	cfg.StorageType = "local"
 	configurePersistentExecutor(cfg)
 	withoutEgress := make([]string, 0, len(cfg.ExecutorCapabilities))
 	for _, capability := range cfg.ExecutorCapabilities {

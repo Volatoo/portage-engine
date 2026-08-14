@@ -504,6 +504,27 @@ func (r *JobRepository) RenewPhaseWork(
 		if tag.RowsAffected() != 1 {
 			return fmt.Errorf("attempt lease is stale or expired")
 		}
+		// Renewing a claimed phase is also the executor's liveness proof. The
+		// phase worker cannot return to ClaimPhaseWork while provision/build is
+		// blocked on a multi-minute provider operation, so relying on claim
+		// polling alone makes a healthy busy worker look dead after 45 seconds.
+		// Autoscaling would then request a replacement and could exceed the
+		// provider ceiling. Refresh only the exact phase-executor identity after
+		// both fenced leases renewed successfully; a stale claim must never
+		// resurrect an executor heartbeat.
+		tag, err = q.Exec(ctx, `
+			UPDATE workers
+			SET last_seen_at = clock_timestamp(),
+			    updated_at = clock_timestamp()
+			WHERE stable_name = $1
+			  AND capabilities ->> 'role' = 'phase-executor'
+		`, claim.ClaimOwner)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() != 1 {
+			return fmt.Errorf("phase executor identity is missing")
+		}
 		return nil
 	})
 	if err != nil {

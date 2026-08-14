@@ -358,6 +358,32 @@ func TestPVEProvisioner_EnforcedVMStartsStopped(t *testing.T) {
 	}
 }
 
+func TestPVEProvisioner_SMBIOSUUIDUsesTelmate3Block(t *testing.T) {
+	t.Parallel()
+	provisioner, err := NewPVEProvisioner(&PVEConfig{
+		Endpoint: "https://pve.example.internal", Node: "pve01",
+		Storage: "local-lvm", Network: "vmbr0", Template: "gentoo",
+		TokenID: "test@pve!builder", TokenSecret: "secret",
+		StateDir: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := DefaultPVEInstanceSpec()
+	spec.SMBIOSUUID = "123E4567-E89B-12D3-A456-426614174000"
+	tf := provisioner.GenerateMainTF(spec, "identity-test")
+	for _, expected := range []string{
+		"smbios {", `uuid = "123e4567-e89b-12d3-a456-426614174000"`,
+	} {
+		if !strings.Contains(tf, expected) {
+			t.Fatalf("generated Telmate 3.x SMBIOS block is missing %q", expected)
+		}
+	}
+	if strings.Contains(tf, "smbios1") {
+		t.Fatal("generated deprecated top-level smbios1 argument")
+	}
+}
+
 func TestPVEProvisioner_GenerateMainTF_WithVMID(t *testing.T) {
 	t.Parallel()
 

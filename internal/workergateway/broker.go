@@ -9,9 +9,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -20,16 +22,24 @@ import (
 )
 
 const (
-	maxCompletionBytes  = 4 << 20
-	defaultPollWait     = 25 * time.Second
-	defaultCommandLease = 90 * time.Second
-	defaultUploadLease  = 30 * time.Minute
+	maxCompletionBytes         = 4 << 20
+	defaultPollWait            = 25 * time.Second
+	defaultCommandLease        = 90 * time.Second
+	defaultUploadLease         = 30 * time.Minute
+	durableUploadCommitTimeout = 10 * time.Second
 	// memoryUploadSuffix names the single generation the standalone path uses.
 	// Without a database there is no fence to distinguish attempts.
 	memoryUploadSuffix = ".uploading"
 )
 
 type ClaimChecker func(context.Context, Identity) error
+
+// UploadObjectSink persists a verified durable upload in the shared object
+// authority. relative is rooted at the Broker's upload root; source is opened
+// from the fenced generation and is valid only for the duration of the call.
+// Implementations must consume source synchronously and verify size/digest
+// before returning success.
+type UploadObjectSink func(relative string, source io.Reader, size int64, digest string) error
 
 type pendingTask struct {
 	result chan Completion
@@ -62,6 +72,7 @@ type Broker struct {
 	commandLease time.Duration
 	uploadLease  time.Duration
 	uploadRoot   string
+	uploadSink   UploadObjectSink
 }
 
 type RuntimeStatus struct {
@@ -104,7 +115,26 @@ func (b *Broker) SetDurableStore(store DurableStore) {
 // lose artifact collection, not gain an unbounded write primitive.
 func (b *Broker) SetUploadRoot(root string) {
 	b.mu.Lock()
-	b.uploadRoot = filepath.Clean(root)
+	clean := filepath.Clean(root)
+	b.uploadRoot = clean
+	uploadLease := b.uploadLease
+	b.mu.Unlock()
+	if strings.TrimSpace(root) != "" {
+		// A process crash can leave a fenced receive generation behind. It is
+		// never authoritative without its database row, and after the longest
+		// upload lease no live request may still own it. WalkDir does not follow
+		// planted symlink directories; removal is issued through os.Root below.
+		_ = sweepExpiredUploadGenerations(clean, time.Now().Add(-uploadLease))
+	}
+}
+
+// SetUploadObjectSink makes shared object storage the durable byte authority
+// for PostgreSQL-backed uploads. The local upload root remains a confined,
+// disposable receive buffer; a completed database row is only written after
+// the sink has accepted the exact verified generation.
+func (b *Broker) SetUploadObjectSink(sink UploadObjectSink) {
+	b.mu.Lock()
+	b.uploadSink = sink
 	b.mu.Unlock()
 }
 
@@ -430,7 +460,7 @@ func (b *Broker) PrepareUploadID(
 	}
 	if store != nil {
 		if err := store.PrepareWorkerUpload(
-			context.Background(), identity, uploadID, confined.absolute, maxBytes,
+			context.Background(), identity, uploadID, confined.relative, maxBytes,
 		); err != nil {
 			return "", err
 		}
@@ -679,6 +709,7 @@ func (b *Broker) handleDurableUploadRequest(
 	}
 	b.mu.Lock()
 	uploadRoot := b.uploadRoot
+	uploadSink := b.uploadSink
 	b.mu.Unlock()
 	target, err := openUploadTarget(uploadRoot, claim.Destination)
 	if err != nil {
@@ -691,12 +722,19 @@ func (b *Broker) handleDurableUploadRequest(
 	defer target.close()
 	claim.Destination = target.absolute
 	if !claim.Completed {
-		b.handleDurableUpload(w, r, store, identity, claim, target)
+		b.handleDurableUpload(w, r, store, identity, claim, target, uploadSink)
 		return
 	}
-	if err := recoverCompletedUpload(target, claim); err != nil {
-		http.Error(w, "recover committed artifact", http.StatusInternalServerError)
-		return
+	// A completed row with an object sink means the shared object was committed
+	// before the row. A different API replica is neither expected nor required
+	// to have the disposable receive file used by the original request.
+	if uploadSink == nil {
+		if err := recoverCompletedUpload(target, claim); err != nil {
+			http.Error(w, "recover committed artifact", http.StatusInternalServerError)
+			return
+		}
+	} else {
+		target.discardGenerations(claim.ID)
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(CollectResult{
@@ -767,9 +805,10 @@ func (b *Broker) handleMemoryUpload(
 	_ = json.NewEncoder(w).Encode(CollectResult{SHA256: digest, Size: written})
 }
 
-// confinedUploadDestination resolves destination inside root and returns both
-// the absolute name the capability record carries and the root-relative name
-// every filesystem call is issued with. An unconfigured root is an error: the
+// confinedUploadDestination resolves an absolute trusted destination or a
+// durable root-relative capability inside root. The durable form is portable
+// across API and executor replicas whose local scratch roots differ. An
+// unconfigured root is an error: the
 // alternative — treating "no root" as "anywhere" — turns a deployment mistake
 // into a filesystem write primitive for whichever worker happens to hold a
 // live certificate.
@@ -777,16 +816,24 @@ func confinedUploadDestination(root, destination string) (confinedUpload, error)
 	if strings.TrimSpace(root) == "" {
 		return confinedUpload{}, fmt.Errorf("worker upload root is not configured")
 	}
-	absoluteDestination, err := filepath.Abs(destination)
-	if err != nil {
-		return confinedUpload{}, fmt.Errorf("resolve upload destination: %w", err)
-	}
-	absoluteDestination = filepath.Clean(absoluteDestination)
 	absoluteRoot, err := filepath.Abs(root)
 	if err != nil {
 		return confinedUpload{}, fmt.Errorf("resolve upload root: %w", err)
 	}
 	absoluteRoot = filepath.Clean(absoluteRoot)
+	cleanDestination := filepath.Clean(destination)
+	if destination == "" || cleanDestination == "." || cleanDestination == ".." ||
+		cleanDestination != destination {
+		return confinedUpload{}, fmt.Errorf("upload destination is not normalized")
+	}
+	absoluteDestination := cleanDestination
+	if !filepath.IsAbs(cleanDestination) {
+		if strings.HasPrefix(cleanDestination, ".."+string(filepath.Separator)) ||
+			filepath.VolumeName(cleanDestination) != "" {
+			return confinedUpload{}, fmt.Errorf("upload destination is outside configured root")
+		}
+		absoluteDestination = filepath.Join(absoluteRoot, cleanDestination)
+	}
 	relative, err := filepath.Rel(absoluteRoot, absoluteDestination)
 	if err != nil || relative == "." || relative == ".." ||
 		strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
@@ -862,6 +909,79 @@ func (t *uploadTarget) prepareParent() error {
 	return t.root.MkdirAll(parent, 0o750)
 }
 
+// discardGenerations removes fenced files belonging to one stable capability.
+// A new fence is issued only after the prior lease is dead, and a completed
+// object-backed replay needs no local generation at all.
+func (t *uploadTarget) discardGenerations(uploadID string) {
+	if !canonicalUploadID(uploadID) {
+		return
+	}
+	parent := filepath.Dir(t.relative)
+	directory, err := t.root.Open(parent)
+	if err != nil {
+		return
+	}
+	entries, readErr := directory.ReadDir(-1)
+	_ = directory.Close()
+	if readErr != nil {
+		return
+	}
+	prefix := filepath.Base(t.relative) + ".uploading." + uploadID + "."
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasPrefix(entry.Name(), prefix) {
+			continue
+		}
+		fence, err := strconv.ParseInt(strings.TrimPrefix(entry.Name(), prefix), 10, 64)
+		if err != nil || fence < 1 {
+			continue
+		}
+		_ = t.root.Remove(filepath.Join(parent, entry.Name()))
+	}
+}
+
+func sweepExpiredUploadGenerations(root string, before time.Time) error {
+	absolute, err := filepath.Abs(root)
+	if err != nil {
+		return err
+	}
+	handle, err := os.OpenRoot(absolute)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer func() { _ = handle.Close() }()
+	return fs.WalkDir(os.DirFS(absolute), ".", func(name string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return nil
+		}
+		if entry.IsDir() || !uploadGenerationName(entry.Name()) {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil || !info.Mode().IsRegular() || !info.ModTime().Before(before) {
+			return nil
+		}
+		_ = handle.Remove(name)
+		return nil
+	})
+}
+
+func uploadGenerationName(name string) bool {
+	const marker = ".uploading."
+	index := strings.LastIndex(name, marker)
+	if index < 1 {
+		return false
+	}
+	tail := strings.Split(name[index+len(marker):], ".")
+	if len(tail) != 2 || !canonicalUploadID(tail[0]) {
+		return false
+	}
+	fence, err := strconv.ParseInt(tail[1], 10, 64)
+	return err == nil && fence > 0
+}
+
 // discardUploadGeneration removes an abandoned temporary generation. It is
 // best-effort cleanup, so a destination that no longer resolves inside the root
 // is simply left alone rather than chased with an unconfined os.Remove.
@@ -881,6 +1001,7 @@ func (b *Broker) handleDurableUpload(
 	identity Identity,
 	claim UploadClaim,
 	target *uploadTarget,
+	uploadSink UploadObjectSink,
 ) {
 	if r.ContentLength < 0 || r.ContentLength > claim.MaxBytes {
 		_ = store.CancelWorkerUpload(
@@ -894,6 +1015,7 @@ func (b *Broker) handleDurableUpload(
 		return
 	}
 	tmp := target.relative + uploadGenerationSuffix(claim)
+	target.discardGenerations(claim.ID)
 	_ = target.root.Remove(tmp)
 	file, err := target.create(tmp)
 	if err != nil {
@@ -925,11 +1047,51 @@ func (b *Broker) handleDurableUpload(
 		http.Error(w, "artifact digest mismatch", http.StatusUnprocessableEntity)
 		return
 	}
+	if uploadSink != nil {
+		source, openErr := target.root.Open(tmp)
+		if openErr != nil {
+			_ = target.root.Remove(tmp)
+			_ = store.CancelWorkerUpload(
+				r.Context(), identity, claim.ID, claim.Fence,
+			)
+			http.Error(w, "open verified artifact generation", http.StatusInternalServerError)
+			return
+		}
+		sinkErr := uploadSink(target.relative, source, written, digest)
+		closeErr := source.Close()
+		if sinkErr != nil || closeErr != nil {
+			_ = target.root.Remove(tmp)
+			_ = store.CancelWorkerUpload(
+				r.Context(), identity, claim.ID, claim.Fence,
+			)
+			http.Error(w, "persist artifact upload", http.StatusInternalServerError)
+			return
+		}
+	}
+	commitContext := r.Context()
+	commitCancel := func() {}
+	if uploadSink != nil {
+		// Once immutable object storage accepted the bytes, finish the small
+		// PostgreSQL commit even if the worker disconnected while S3 was
+		// acknowledging the request. A retry can then recover from the row.
+		commitContext, commitCancel = context.WithTimeout(
+			context.WithoutCancel(r.Context()), durableUploadCommitTimeout,
+		)
+	}
+	defer commitCancel()
 	if err := store.CompleteWorkerUpload(
-		r.Context(), identity, claim.ID, claim.Fence, digest, written,
+		commitContext, identity, claim.ID, claim.Fence, digest, written,
 	); err != nil {
 		_ = target.root.Remove(tmp)
 		http.Error(w, "upload fence is stale", http.StatusConflict)
+		return
+	}
+	if uploadSink != nil {
+		// Object storage owns the durable bytes; keeping a replica-local copy
+		// would leak one scratch generation per completed build on API nodes.
+		_ = target.root.Remove(tmp)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(CollectResult{SHA256: digest, Size: written})
 		return
 	}
 	if err := target.root.Rename(tmp, target.relative); err != nil {

@@ -233,6 +233,20 @@ export function PVEPanel({
           />
           <TextField
             form={form}
+            control="pve_ip_config"
+            labelKey="set.ipconfig"
+            hintKey="set.ipconfig.hint"
+            placeholder="dhcp or 10.31.0.105/24"
+          />
+          <TextField
+            form={form}
+            control="pve_gateway"
+            labelKey="set.gateway"
+            hintKey="set.gateway.hint"
+            placeholder="10.31.0.1"
+          />
+          <TextField
+            form={form}
             control="pve_cicustom"
             labelKey="set.cicustom"
             hintKey="set.cicustom.hint"

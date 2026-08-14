@@ -1,6 +1,6 @@
 # Portage Engine 后续待办与验收计划
 
-更新日期：2026-08-08
+更新日期：2026-08-14
 
 ## 当前结论
 
@@ -12,15 +12,15 @@ Scan 与 PR Build Verification 在 `main` 上全绿，`evidence/public-beta/repo
 persistent executor 模板与 fail-closed Gate、CLI device authorization、公开 edge
 与身份 Gate、lease/projection observability、签名 OCI release promotion、恢复演练
 框架、GTK/Qt/WebView GUI matrix，以及默认关闭的 Distributed Build Alpha。数据库
-authority 为 schema v30，迁移顺序固定为 00027 → 00028 → 00029 → 00030。
+authority 为 schema v31；00031 为陈旧 worker 清理补齐按 worker 查询的索引。
 
-真实 PVE、正式 IdP、Vault HA、生产备份/对象存储/signer、真实 distccd、GitHub
-发布和 30 天运行窗口仍依赖部署凭据或外部环境；这些 Gate 保持 `not-run`，不能
-用 repository/static 结果代替。
+真实 PVE SCHED-2B 正向生命周期已在隔离数据库和内网 PVE 完成。正式 IdP、Vault
+HA、生产备份/对象存储/signer、真实 distccd、GitHub 发布和 30 天运行窗口仍依赖
+外部环境；这些 Gate 保持 `not-run`，不能用 repository/static 结果代替。
 
 | 工作流 | 仓库/本地 Gate | 真实环境 Gate |
 | --- | --- | --- |
-| Persistent Executor | `scripts/persistent-executor-gate.sh repo` 通过；capacity 删除边界需要 `PORTAGE_TEST_DATABASE_URL`，无数据库时记为 `not-run` | PVE SCHED-2B `not-run` |
+| Persistent Executor | `scripts/persistent-executor-gate.sh repo` 与真实 PostgreSQL 删除边界通过 | 2026-08-14 PVE 正向生命周期和 live-work 删除拒绝均通过 |
 | Identity / Public Edge | 配置、Nginx/Compose 与 redacted Gate 通过 | 三个 IdP 与公网主机 `not-run` |
 | Recovery | 静态 7 项通过，4 个外部阶段明确 `not-run` | Vault/PostgreSQL/object/signer `not-run` |
 | Distributed Build | 单元、race 与 PostgreSQL 并发 Gate 通过 | distccd/PVE/双 job/disconnect `not-run` |
@@ -42,9 +42,8 @@ authority 为 schema v30，迁移顺序固定为 00027 → 00028 → 00029 → 0
   golangci-lint 拒绝加载语言版本高于自身构建工具链的模块配置，`v2.7.2` 用
   go1.25 构建，对 `go 1.26.5` 的 go.mod 直接 exit 3，`main` 上的 Lint 与 GoSec
   job 因此一直是红的。
-- [x] 把 `go.mod` 的下界从 `1.26.5` 降到 `1.26.4`。Gentoo 稳定版 `dev-lang/go`
-  是 1.26.4，`Dockerfile.test` 里 `go mod download` 因此失败，CI 的 Test job
-  停在构建测试镜像这一步；同时这个下界会把所有源码构建者推到 `~amd64` 编译器上。
+- [x] 将 `go.mod`、构建镜像和全部 workflow 统一到 Go 1.26.6。patch-level 下界是
+  真实工具链要求；Docker 构建固定上游 1.26.6，不再依赖 Gentoo 稳定树的更新节奏。
 - [x] 让 `release-candidate.yml` 在构建二进制前构建 console bundle。缺它时签名
   发布的 `portage-dashboard` 内嵌空 bundle，对所有 console 路由返回 503，而
   checksum 与 cosign 签名都会如实通过。
@@ -102,19 +101,17 @@ authority 为 schema v30，迁移顺序固定为 00027 → 00028 → 00029 → 0
   - CodeQL 此前根本没有运行。工作流被 GitHub 以 `disabled_inactivity` 停用，
     最后一次执行是 2026-03-02，因此 PR 的检查列表里从头到尾都没有它。重新启用后
     在 `main` 上对 Go 报 0 条结果。
-  - Security 页签仍有 26 条 `go/path-injection` 与 `go/request-forgery` 处于
-    open，最后一次出现在合并前的 `db9e32e`。它们的 `analysis_key` 指向
-    `security-scan.yml:codeql-analysis`——一个已经删除的 job。GitHub 按 analysis
-    category 维护告警生命周期，创建它们的 category 不再运行，所以没有任何一次
-    分析会把它们标成 fixed。同一套默认查询在当前树上返回 0 条，这些告警需要手动
-    dismiss，不是待修的缺陷。
+  - 旧 `security-scan.yml:codeql-analysis` category 的 26 条历史告警已由恢复后的
+    同 category 分析收口。2026-08-14 复核 Code Scanning、Dependabot 和 Secret
+    Scanning 三类 open alert 均为 0；同日 `main` 的 CI、Security Scan 与 PR Build
+    Verification 均成功。
 
 退出标准：工作区干净，远端 `main` 包含当前提交，CI 全绿，路线图不存在与
 当前实现相矛盾的调度描述。
 
 ## P1：Persistent Executor 与真实 SCHED-2B Gate
 
-仓库切片已实现；当前只缺真实 PVE 现场验收。
+仓库切片和真实 PVE 正向生命周期均已验收。
 
 - [x] 构建独立的 persistent-executor Gentoo 模板，不复用一次性 job builder。
 - [x] 模板只包含 executor 所需组件，不包含签名私钥、PVE/PBS 管理凭证或 API
@@ -127,12 +124,22 @@ authority 为 schema v30，迁移顺序固定为 00027 → 00028 → 00029 → 0
   设置 `PORTAGE_TEST_DATABASE_URL` 时执行。Gate 会核对该用例的 `--- PASS` 行，
   没有数据库时打印 `NOT-RUN capacity delete boundaries` 而不是继续声称通过；
   CI 的 `operational-gates` job 挂了 PostgreSQL service 并断言这行不出现。
-- [ ] 在真实 PVE 完成 scale-up → heartbeat → job → drain → delete，并通过 PVE API
-  readback 确认 VM 不存在；当前状态 **not-run**。
+- [x] 2026-08-14 在真实 PVE 完成 scale-up → heartbeat → `app-misc/hello` → drain →
+  delete。g7 模板 VMID159 自主启动 executor；容量 VM 使用预留 `.101/24`，disposable
+  VM 使用预留 `.105/24`；四个 phase、Worker Gateway/S3 upload、安装验证和发布均
+  完成。scale-up action `d557f438-2af8-46a8-8da6-57fdb1de7e2e` 与 scale-down action
+  `868ec433-36cc-4d0e-a1f8-94f922fc57f9` 均 completed，instance
+  `202c0e03-dd2a-4d6e-8f92-32dc37f11023` generation 1 为 deleted，PVE API readback
+  无容量/构建残留。脱敏证据见
+  `evidence/pve/persistent-executor-gate-20260814.json`。
+- [x] 在真实 provider 生命周期中保留 live admission lease，scale-down action
+  `23e1a5fc-dbc3-4763-b2e4-2880a20213f2` 第一次尝试因 drain deadline 安全回队列；
+  PVE VMID153 仍存在且名称、SMBIOS UUID 与数据库 instance
+  `90d409ed-f8b3-4ed9-9370-1adf78f79acb` 精确匹配。释放 lease 后同一 action 完成，
+  instance 为 deleted，PVE 精确名称 readback 为 0；既有 VMID133 保留。
 
-退出标准：完成一次真实的 scale-up → heartbeat → 执行任务 → drain → delete；
-同时完成“有 live work 时拒绝删除”的负向 Gate，并保存数据库、PVE API、日志和
-监控证据。
+退出标准：正向生命周期和“有 live work 时拒绝删除”的真实 provider 负向 Gate
+均完成；数据库、PVE API、日志和 artifact 脱敏证据已保存。
 
 ## P1：Public Beta 生产环境 Gate
 
@@ -169,7 +176,7 @@ membership，不来自 email 或可变 group claim。
 
 - [x] 恢复 Gate 从部署的 `portage-migrate supported-schema` 动态取得 authority，
   并在临时 PostgreSQL 18 上执行当前 migration/恢复 SQL；不再硬编码 v26。
-- [ ] 在最终整合后的生产 schema v30（00027 → 00028 → 00029 → 00030）上配置 full、
+- [ ] 在最终整合后的生产 schema v31 上配置 full、
   differential 和 WAL/PITR 备份。
 - [ ] 将 backup/WAL repository 放到 NAS，并纳入 PBS VM 备份。
 - [ ] 保持 PostgreSQL `PGDATA` 位于可靠本地块存储，不直接放在 NFS。
@@ -340,7 +347,7 @@ distcc 应作为独立里程碑，不能直接打开全局开关。
 1. 审阅、合并并推送 `codex/next-steps-integration`，确认 GitHub CI/CodeQL/安全扫描。
 2. 用真实 PVE 完成 persistent-executor SCHED-2B 与签名 GUI matrix Gate。
 3. 部署正式 HTTPS edge，完成 Authentik、Google、GitHub 回调与 real-host Gate。
-4. 完成 Vault HA、schema v30 PostgreSQL/PBS、对象存储和 signer 现场恢复演练。
+4. 完成 Vault HA、schema v31 PostgreSQL/PBS、对象存储和 signer 现场恢复演练。
 5. 以受保护 GitHub environment 执行真实 candidate/stable/rollback 发布。
 6. Public Beta 不依赖 distcc；有隔离网络后再执行真实 distccd 双 job/disconnect Gate。
 7. 选择实际 billing export 后实现 invoice reconciliation，随后开始 30 天稳定窗口。

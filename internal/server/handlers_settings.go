@@ -211,6 +211,10 @@ func (s *Server) updateCloudSettings(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("build_mode %q is no longer supported; only native-gentoo is available", in.BuildMode), http.StatusBadRequest)
 		return
 	}
+	if err := in.ValidatePVEStaticNetwork(); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	in.BuildMode = "native-gentoo"
 
 	s.settingsMu.Lock()

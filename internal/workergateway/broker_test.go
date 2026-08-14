@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -225,6 +226,152 @@ func durableAttemptBroker(t *testing.T, identity Identity) (*Broker, *memoryDura
 		t.Fatal(err)
 	}
 	return broker, store
+}
+
+func TestBrokerDurableUploadCapabilityIsPortableAcrossReplicaRoots(t *testing.T) {
+	identity := testIdentity(t)
+	issuer, store := durableAttemptBroker(t, identity)
+	issuerRoot := t.TempDir()
+	receiverRoot := t.TempDir()
+	issuer.SetUploadRoot(issuerRoot)
+	receiver := NewBroker(nil)
+	receiver.SetDurableStore(store)
+	receiver.SetUploadRoot(receiverRoot)
+
+	relative := filepath.Join("0f9c", "app-misc", "hello-2.12.1.gpkg.tar")
+	uploadID, err := issuer.PrepareUploadID(
+		identity, uuid.NewString(), filepath.Join(issuerRoot, relative), 1024,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := store.uploads[uploadID].Destination; got != relative {
+		t.Fatalf("durable destination = %q, want portable %q", got, relative)
+	}
+	data := []byte("cross-replica artifact")
+	if recorder := putArtifact(t, receiver, identity, uploadID, data); recorder.Code != http.StatusOK {
+		t.Fatalf("receiver upload status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if _, err := os.Stat(filepath.Join(issuerRoot, relative)); !os.IsNotExist(err) {
+		t.Fatalf("receiving replica wrote into issuer root: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(receiverRoot, relative))
+	if err != nil || !bytes.Equal(got, data) {
+		t.Fatalf("receiver artifact = %q err=%v", got, err)
+	}
+}
+
+func TestBrokerObjectSinkPrecedesDurableCompletionAndSupportsReplicaReplay(t *testing.T) {
+	identity := testIdentity(t)
+	issuer, store := durableAttemptBroker(t, identity)
+	issuerRoot := t.TempDir()
+	issuer.SetUploadRoot(issuerRoot)
+	relative := filepath.Join("0f9c", "app-misc", "hello-2.12.1.gpkg.tar")
+	uploadID, err := issuer.PrepareUploadID(
+		identity, uuid.NewString(), filepath.Join(issuerRoot, relative), 1024,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	receiver := NewBroker(nil)
+	receiver.SetDurableStore(store)
+	receiverRoot := t.TempDir()
+	receiver.SetUploadRoot(receiverRoot)
+	var sunkRelative string
+	var sunk []byte
+	receiver.SetUploadObjectSink(func(
+		relative string, source io.Reader, size int64, digest string,
+	) error {
+		if store.uploads[uploadID].Completed {
+			t.Fatal("durable row completed before object sink")
+		}
+		sunkRelative = relative
+		var readErr error
+		sunk, readErr = io.ReadAll(source)
+		return readErr
+	})
+	data := []byte("shared object artifact")
+	if recorder := putArtifact(t, receiver, identity, uploadID, data); recorder.Code != http.StatusOK {
+		t.Fatalf("object upload status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if sunkRelative != relative || !bytes.Equal(sunk, data) ||
+		!store.uploads[uploadID].Completed {
+		t.Fatalf("sink relative=%q bytes=%q claim=%+v", sunkRelative, sunk, store.uploads[uploadID])
+	}
+	if _, err := os.Stat(filepath.Join(receiverRoot, relative)); !os.IsNotExist(err) {
+		t.Fatalf("object-backed upload leaked a replica-local final file: %v", err)
+	}
+
+	replay := NewBroker(nil)
+	replay.SetDurableStore(store)
+	replay.SetUploadRoot(t.TempDir())
+	replay.SetUploadObjectSink(func(string, io.Reader, int64, string) error {
+		t.Fatal("completed replay called object sink again")
+		return nil
+	})
+	if recorder := putArtifact(t, replay, identity, uploadID, data); recorder.Code != http.StatusOK {
+		t.Fatalf("completed replica replay status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestBrokerObjectSinkCompletesRowAfterRequestCancellation(t *testing.T) {
+	identity := testIdentity(t)
+	broker, store := durableAttemptBroker(t, identity)
+	root := t.TempDir()
+	broker.SetUploadRoot(root)
+	destination := filepath.Join(root, "0f9c", "pkg.gpkg.tar")
+	uploadID, err := broker.PrepareUploadID(identity, uuid.NewString(), destination, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestContext, cancelRequest := context.WithCancel(context.Background())
+	broker.SetUploadObjectSink(func(string, io.Reader, int64, string) error {
+		cancelRequest()
+		return nil
+	})
+	data := []byte("object durable before client disconnect")
+	sum := sha256.Sum256(data)
+	request := authenticatedRequest(
+		t, http.MethodPut, "/v1/uploads/"+uploadID, bytes.NewReader(data), identity,
+	).WithContext(requestContext)
+	request.ContentLength = int64(len(data))
+	request.Header.Set("X-Content-SHA256", hex.EncodeToString(sum[:]))
+	recorder := httptest.NewRecorder()
+	broker.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK || !store.uploads[uploadID].Completed {
+		t.Fatalf("canceled request status=%d claim=%+v body=%s",
+			recorder.Code, store.uploads[uploadID], recorder.Body.String())
+	}
+}
+
+func TestSetUploadRootSweepsOnlyExpiredFencedGenerations(t *testing.T) {
+	root := t.TempDir()
+	uploadID := uuid.NewString()
+	old := filepath.Join(root, "token", "pkg.gpkg.tar.uploading."+uploadID+".1")
+	recent := filepath.Join(root, "token", "pkg.gpkg.tar.uploading."+uploadID+".2")
+	unrelated := filepath.Join(root, "token", "operator-file")
+	if err := os.MkdirAll(filepath.Dir(old), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{old, recent, unrelated} {
+		if err := os.WriteFile(name, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	expired := time.Now().Add(-2 * defaultUploadLease)
+	if err := os.Chtimes(old, expired, expired); err != nil {
+		t.Fatal(err)
+	}
+	NewBroker(nil).SetUploadRoot(root)
+	if _, err := os.Stat(old); !os.IsNotExist(err) {
+		t.Fatalf("expired generation survived startup sweep: %v", err)
+	}
+	for _, name := range []string{recent, unrelated} {
+		if _, err := os.Stat(name); err != nil {
+			t.Fatalf("startup sweep removed %s: %v", filepath.Base(name), err)
+		}
+	}
 }
 
 func putArtifact(
@@ -864,9 +1011,12 @@ func (s *memoryDurableStore) ClaimWorkerUpload(
 }
 
 func (s *memoryDurableStore) CompleteWorkerUpload(
-	_ context.Context, identity Identity, uploadID string,
+	ctx context.Context, identity Identity, uploadID string,
 	fence int64, digest string, size int64,
 ) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.activeLocked(identity); err != nil {

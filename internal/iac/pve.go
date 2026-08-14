@@ -291,7 +291,7 @@ func (p *PVEProvisioner) GenerateMainTF(spec *PVEInstanceSpec, instanceName stri
 	smbiosBlock := ""
 	if spec.SMBIOSUUID != "" {
 		smbiosBlock = fmt.Sprintf(
-			"\n  smbios1     = \"uuid=%s\"",
+			"\n  smbios {\n    uuid = \"%s\"\n  }",
 			strings.ToLower(spec.SMBIOSUUID),
 		)
 	}

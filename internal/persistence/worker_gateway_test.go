@@ -20,15 +20,16 @@ func gatewayTestIdentity() workergateway.Identity {
 	}
 }
 
-// The destination column is what the gateway ultimately hands to the
-// filesystem. A row that spells a relative name or leaves ".." unresolved
-// cannot have come from the control plane, so neither writing nor reading one
-// is allowed to succeed.
-func TestGatewayDestinationMustBeAbsoluteAndNormalized(t *testing.T) {
+// The destination column is portable across replicas, but it remains a strict
+// normalized relative name (or a legacy normalized absolute name). Resolution
+// under the serving replica's spool happens in the Broker.
+func TestGatewayDestinationMustBePortableAndNormalized(t *testing.T) {
 	for _, destination := range []string{
 		"",
-		"quarantine/token/pkg.gpkg.tar",
 		"../../etc/cron.d/portage-engine",
+		"token/../../etc/cron.d/portage-engine",
+		"token/./pkg.gpkg.tar",
+		"token/pkg.gpkg.tar/",
 		"/srv/binpkgs/.portage-engine-quarantine/../../../etc/cron.d/portage-engine",
 		"/srv/binpkgs/./quarantine/pkg.gpkg.tar",
 		"/srv/binpkgs/quarantine/",
@@ -39,6 +40,7 @@ func TestGatewayDestinationMustBeAbsoluteAndNormalized(t *testing.T) {
 		}
 	}
 	for _, destination := range []string{
+		"0f9c/app-misc/jq-1.8-1.gpkg.tar",
 		"/srv/binpkgs/.portage-engine-quarantine/0f9c/app-misc/jq-1.8-1.gpkg.tar",
 		"/tmp/gateway-spool-artifact",
 	} {

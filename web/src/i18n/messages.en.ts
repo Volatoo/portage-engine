@@ -546,6 +546,11 @@ export const EN = {
   'set.nameserver': 'DNS server for build VMs (optional)',
   'set.nameserver.hint':
     'Pushed via cloud-init; set your internal DNS so mirror/registry domains resolve on build VMs',
+  'set.ipconfig': 'Build VM IP configuration (optional)',
+  'set.ipconfig.hint':
+    'Use DHCP normally; an IPv4 CIDR is an operator-only fallback for a reserved lab address',
+  'set.gateway': 'Static gateway (optional)',
+  'set.gateway.hint': 'Required with a static build VM IPv4 CIDR and must be in the same subnet',
   'set.no': 'no',
   'set.node': 'Target node',
   'set.nodes': 'Candidate nodes (optional, comma-separated)',

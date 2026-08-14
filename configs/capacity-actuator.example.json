@@ -26,7 +26,8 @@
           "machine": "q35",
           "disk_type": "scsi",
           "ip_config": "dhcp",
-          "agent": "true"
+          "agent": "true",
+          "cicustom": "user=shared-snippets:snippets/persistent-executor-g1.yaml"
         },
         "egress_policy": {
           "id": "egress/persistent-executor-example",

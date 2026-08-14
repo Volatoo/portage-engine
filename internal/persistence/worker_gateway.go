@@ -648,20 +648,23 @@ func checkGatewayUploadID(uploadID string) error {
 	return nil
 }
 
-// checkGatewayDestination holds the capability row to the only shape the
-// control plane can produce: an absolute, already-normalized path. It runs on
-// the way in and again on the way out, because the row is what the gateway
-// ultimately hands to the filesystem, and a row written by anything other than
-// PrepareWorkerUpload — a direct UPDATE, a restored dump, a compromised
-// replica — must not be able to name a relative or unresolved location.
+// checkGatewayDestination admits the portable root-relative form produced by
+// the Broker and the legacy absolute form needed by capabilities minted before
+// an upgrade. Both must be already normalized and traversal-free. The serving
+// replica resolves either form through its configured upload root and os.Root,
+// so a database row can never select a path outside that replica's spool.
 func checkGatewayDestination(destination string) error {
 	if destination == "" || len(destination) > maxGatewayDestinationBytes {
 		return fmt.Errorf("invalid durable worker upload capability")
 	}
-	if !filepath.IsAbs(destination) || filepath.Clean(destination) != destination {
-		return fmt.Errorf(
-			"durable worker upload destination must be an absolute normalized path",
-		)
+	clean := filepath.Clean(destination)
+	if clean != destination || clean == "." || clean == ".." {
+		return fmt.Errorf("durable worker upload destination must be normalized")
+	}
+	if !filepath.IsAbs(clean) &&
+		(strings.HasPrefix(clean, ".."+string(filepath.Separator)) ||
+			filepath.VolumeName(clean) != "") {
+		return fmt.Errorf("durable worker upload destination escapes its spool root")
 	}
 	return nil
 }

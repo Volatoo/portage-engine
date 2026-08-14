@@ -84,6 +84,7 @@ Desktop.ini
 /var/cache/binpkgs/
 /backups/
 image-factory/packer/output/
+image-factory/persistent-executor/output/
 image-factory/common.local.json
 /.local/worker-pki/
 /.local/recovery-evidence/

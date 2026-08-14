@@ -851,6 +851,8 @@ export interface CloudSettings {
   pve_template: string;
   pve_cicustom: string;
   pve_nameserver: string;
+  pve_ip_config: string;
+  pve_gateway: string;
   ssh_key_path: string;
   ssh_user: string;
   ssh_known_hosts?: string;

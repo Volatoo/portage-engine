@@ -20,6 +20,23 @@ import (
 	"github.com/slchris/portage-engine/pkg/config"
 )
 
+func TestSeparatedRoleFailsClosedWhenArtifactStorageCannotInitialize(t *testing.T) {
+	for _, role := range []string{"api", "executor"} {
+		t.Run(role, func(t *testing.T) {
+			s := New(&config.ServerConfig{
+				DeploymentMode: config.DeploymentModeTrusted,
+				RuntimeRole:    role, StorageType: "s3",
+				StorageS3Region: "us-east-1",
+			})
+			defer s.builder.Shutdown()
+			err := s.Initialize()
+			if err == nil || !strings.Contains(err.Error(), "initialize artifact storage") {
+				t.Fatalf("separated role continued without object storage: %v", err)
+			}
+		})
+	}
+}
+
 func TestLoadBuildCatalog(t *testing.T) {
 	t.Run("configured example", func(t *testing.T) {
 		cfg := &config.ServerConfig{CatalogPath: filepath.Join("..", "..", "configs", "catalog.example.json")}

@@ -558,6 +558,7 @@ func WaitForPVEGuestIP(endpoint string, auth PVEAuth, node string, vmid string, 
 	attempt := 0
 	for time.Now().Before(deadline) {
 		attempt++
+		guestAgentReady := false
 		req, err := http.NewRequest(http.MethodGet, reqURL, nil)
 		if err != nil {
 			return "", err
@@ -584,6 +585,7 @@ func WaitForPVEGuestIP(endpoint string, auth PVEAuth, node string, vmid string, 
 			decodeErr := json.NewDecoder(resp.Body).Decode(&payload)
 			_ = resp.Body.Close()
 			if decodeErr == nil {
+				guestAgentReady = true
 				for _, iface := range payload.Data.Result {
 					if iface.Name == "lo" || strings.HasPrefix(iface.Name, "docker") {
 						continue
@@ -599,6 +601,24 @@ func WaitForPVEGuestIP(endpoint string, auth PVEAuth, node string, vmid string, 
 			_ = resp.Body.Close()
 		}
 
+		// PVE can boot a successor with the source template's rendered
+		// networkd file, then replace it only when cloud-init's delayed network
+		// stage runs. QGA is already reachable in that state, but the new NIC
+		// never acquires DHCP until networkd reloads the current renderer output.
+		// Retry a fixed, no-input recovery while there is still no IPv4 address;
+		// newly built templates also carry the equivalent boot-time unit.
+		if guestAgentReady && attempt%6 == 0 {
+			recoveryDeadline := time.Now().Add(10 * time.Second)
+			if deadline.Before(recoveryDeadline) {
+				recoveryDeadline = deadline
+			}
+			recoveryCtx, cancel := context.WithDeadline(context.Background(), recoveryDeadline)
+			recoveryErr := recoverPVEGuestNetwork(recoveryCtx, endpoint, auth, node, vmid)
+			cancel()
+			if recoveryErr == nil && sink != nil {
+				sink("[provision] guest agent is ready without IPv4; reloaded the clone's cloud-init network configuration")
+			}
+		}
 		if attempt%6 == 0 && sink != nil {
 			sink(fmt.Sprintf("[provision] still waiting for the guest agent to report an IP (%ds)…", attempt*5))
 		}
@@ -607,10 +627,34 @@ func WaitForPVEGuestIP(endpoint string, auth PVEAuth, node string, vmid string, 
 	return "", fmt.Errorf("guest agent did not report an IPv4 address within %s (is qemu-guest-agent installed in the template?)", timeout)
 }
 
+const pveGuestNetworkRecoveryScript = `set -eu
+network_file=/etc/systemd/network/10-cloud-init-eth0.network
+dropin_dir=${network_file}.d
+if [ -f "$network_file" ]; then
+  install -d -m 0755 "$dropin_dir"
+  printf '[DHCPv4]\nClientIdentifier=mac\n' >"$dropin_dir/90-portage-engine-dhcp.conf"
+  chmod 0644 "$dropin_dir/90-portage-engine-dhcp.conf"
+fi
+systemctl --no-block restart systemd-networkd.service`
+
+func recoverPVEGuestNetwork(
+	ctx context.Context,
+	endpoint string,
+	auth PVEAuth,
+	node string,
+	vmid string,
+) error {
+	_, err := PVEGuestExec(ctx, endpoint, auth, node, vmid, []string{
+		"/bin/sh", "-c", pveGuestNetworkRecoveryScript,
+	})
+	return err
+}
+
 // PVEGuestExec runs one bounded command through the authenticated PVE/QEMU
 // guest-agent channel. Callers must not retry stateful commands after an
-// ambiguous response. It is used by the image smoke gate only for read-only
-// identity material that must be bound before opening SSH.
+// ambiguous response. It is used for read-only image identity material and
+// for the fixed, idempotent networkd recovery above; arbitrary user commands
+// must never be passed to it.
 func PVEGuestExec(ctx context.Context, endpoint string, auth PVEAuth, node, vmid string, command []string) (string, error) {
 	if !auth.valid() {
 		return "", fmt.Errorf("PVE guest exec requires credentials")
@@ -629,10 +673,10 @@ func PVEGuestExec(ctx context.Context, endpoint string, auth PVEAuth, node, vmid
 		values.Add("command", argument)
 	}
 
-	ticket := ""
+	ticket, csrf := "", ""
 	if auth.TokenID == "" || auth.TokenSecret == "" {
 		var err error
-		ticket, err = pveTicket(endpoint, auth)
+		ticket, csrf, err = pveLogin(ctx, endpoint, auth)
 		if err != nil {
 			return "", err
 		}
@@ -640,6 +684,9 @@ func PVEGuestExec(ctx context.Context, endpoint string, auth PVEAuth, node, vmid
 	authorize := func(request *http.Request) {
 		if ticket != "" {
 			request.AddCookie(pveAuthCookie(ticket))
+			if request.Method != http.MethodGet && request.Method != http.MethodHead {
+				request.Header.Set("CSRFPreventionToken", csrf)
+			}
 		} else {
 			request.Header.Set("Authorization", fmt.Sprintf("PVEAPIToken=%s=%s", auth.TokenID, auth.TokenSecret))
 		}

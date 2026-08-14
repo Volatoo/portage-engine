@@ -36,6 +36,10 @@ PUB-1B and PUB-1C make the artifact data plane shared-filesystem-free:
 
 `BINPKG_PATH` remains a compatibility authority only when
 `STORAGE_TYPE=local`. In S3 mode it is not a cross-replica hand-off.
+Separated active-phase deployments (`SERVER_RUNTIME_ROLE=api|executor`) are
+therefore rejected at startup unless `STORAGE_TYPE=s3`: the persistent
+executor and Worker Gateway terminate on different hosts, so an absolute local
+quarantine path cannot be a shared artifact authority.
 
 ## External namespace
 

@@ -62,6 +62,8 @@ export const FIELD_CONTROLS: Readonly<Record<string, ControlID>> = {
   pve_template: 'pve_template',
   pve_cicustom: 'pve_cicustom',
   pve_nameserver: 'pve_nameserver',
+  pve_ip_config: 'pve_ip_config',
+  pve_gateway: 'pve_gateway',
   gentoo_mirror: 'gentoo_mirror',
   portage_sync_uri: 'portage_sync_uri',
   portage_sync_method: 'portage_sync_method',

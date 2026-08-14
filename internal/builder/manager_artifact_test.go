@@ -2,6 +2,8 @@ package builder
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -51,6 +53,59 @@ func TestCollectionFenceRejectsDownloadedOutputBeforeStagingCommit(t *testing.T)
 	if status.StagingRoot != "" || status.VerificationToken != "" ||
 		len(status.StagedArtifacts) != 0 || status.StagedPrimary != "" {
 		t.Fatalf("fenced output advanced into staging: %+v", status)
+	}
+}
+
+func TestObjectGatewayUploadRematerializesAcrossReplicaScratch(t *testing.T) {
+	parent := t.TempDir()
+	objectStore, err := artifactstorage.NewLocalStorage(filepath.Join(parent, "objects"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	api := NewManager(&config.ServerConfig{
+		MaxWorkers: 0, BinpkgPath: filepath.Join(parent, "api-binpkgs"),
+		DataDir: filepath.Join(parent, "api"), StorageType: "s3",
+	})
+	executor := NewManager(&config.ServerConfig{
+		MaxWorkers: 0, BinpkgPath: filepath.Join(parent, "executor-binpkgs"),
+		DataDir: filepath.Join(parent, "executor"), StorageType: "s3",
+	})
+	api.SetArtifactStorage(objectStore)
+	executor.SetArtifactStorage(objectStore)
+	defer api.Shutdown()
+	defer executor.Shutdown()
+
+	executor.jobsMu.Lock()
+	executor.jobs["gateway-object-job"] = &BuildStatus{JobID: "gateway-object-job"}
+	executor.jobsMu.Unlock()
+	root, err := executor.beginArtifactQuarantine("gateway-object-job")
+	if err != nil {
+		t.Fatal(err)
+	}
+	executor.jobsMu.RLock()
+	token := executor.jobs["gateway-object-job"].VerificationToken
+	executor.jobsMu.RUnlock()
+	const rel = "app-misc/hello/hello-2.12.1.gpkg.tar"
+	data := []byte("artifact received by another API replica")
+	digest := sha256.Sum256(data)
+	if err := api.storeGatewayUpload(
+		filepath.Join(token, filepath.FromSlash(rel)), bytes.NewReader(data),
+		int64(len(data)), hex.EncodeToString(digest[:]),
+	); err != nil {
+		t.Fatal(err)
+	}
+	destination := filepath.Join(root, filepath.FromSlash(rel))
+	if err := executor.materializeGatewayArtifact(
+		"gateway-object-job", rel, destination,
+	); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(destination)
+	if err != nil || !bytes.Equal(got, data) {
+		t.Fatalf("materialized artifact = %q err=%v", got, err)
+	}
+	if strings.HasPrefix(destination, filepath.Join(parent, "api")+string(filepath.Separator)) {
+		t.Fatalf("executor materialized into API scratch: %s", destination)
 	}
 }
 

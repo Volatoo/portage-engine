@@ -74,6 +74,8 @@ const SAVED: CloudSettingsResponse = {
   pve_template: 'gentoo-native-cloudinit-template',
   pve_cicustom: '',
   pve_nameserver: '',
+  pve_ip_config: '',
+  pve_gateway: '',
   ssh_key_path: '/var/lib/portage-engine/id_ed25519',
   ssh_user: 'root',
   ssh_known_hosts: '',
@@ -596,7 +598,7 @@ describe('the form the sweep measured', () => {
     const controls = page.container.querySelectorAll<HTMLElement>(
       '#settings-form input, #settings-form select, #settings-form textarea',
     );
-    expect(controls).toHaveLength(45);
+    expect(controls).toHaveLength(47);
     const unlabelled = [...controls].filter(
       (node) => page.container.querySelector(`label[for="${node.id}"]`) === null,
     );
@@ -741,7 +743,7 @@ describe('the section table is the form', () => {
       'place_manual',
     ];
     expect([...placed].sort()).toEqual([...expected].sort());
-    expect(placed).toHaveLength(45);
+    expect(placed).toHaveLength(47);
   });
 });
 

@@ -6,6 +6,11 @@ VM runs the listener-free `portage-server` executor role and carries a pinned
 `portage-builder` binary only so phase execution can provision a fresh,
 single-use builder VM.
 
+The runtime configuration must select S3-compatible object storage. A
+persistent executor prepares uploads while the API-side Worker Gateway writes
+their bytes, so `STORAGE_TYPE=local` cannot represent the same quarantine on
+both hosts and is rejected during startup.
+
 The candidate is bound to exactly one provider/zone/architecture/build-mode/
 profile/worker-image generation. `run.sh` derives the same capacity-pool hash
 as the scheduler, while `provision.sh` recomputes it inside the guest before it
@@ -26,6 +31,11 @@ gate rejects PVE/PBS management secrets, signing key material, Terraform
 state, Worker Gateway listener keys, a pre-baked capacity UUID, SSH host keys,
 and Packer's bootstrap authorization.
 
+The systemd service loads this root-owned runtime file as both the server
+configuration and the process environment. This is required for standard SDK
+credential chains such as `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`; the
+immutable `/etc/portage-engine/executor.env` remains secret-free.
+
 Before Packer runs, `run.sh` hashes the accepted source image manifest and
 reads the source VMID back through authenticated PVE HTTPS. The VM must be the
 expected template with `ciupgrade=0`, `ciuser=root`, `ipconfig0=ip=dhcp`, and a
@@ -41,6 +51,13 @@ The example at `/usr/share/portage-engine-executor-runtime.example` contains
 names and paths only. An executor never receives `WORKER_GATEWAY_TLS_KEY`; it
 uses the advertise URL and public CA bundles so the disposable worker it
 creates can connect outbound to the control-plane Worker Gateway.
+
+The `pve-dmi-v1` capacity provider requires a custom user-data reference in
+the allowlist: `spec.cicustom` must contain
+`user=<shared-storage>:snippets/<file>`. Use a snippet storage shared by every
+eligible node. The document writes `executor.conf` and its credential files
+and starts `portage-capacity-executor.service`; keep the snippet protected and
+rotate or remove one-off Gate documents after their instances are deleted.
 
 ## Build
 
@@ -61,6 +78,10 @@ SSH credentials remain runner-only inputs:
 export PKR_VAR_proxmox_url=https://pve.example.internal:8006/api2/json
 export PKR_VAR_proxmox_username='packer@pve!persistent-executor'
 export PKR_VAR_proxmox_token='<from-secret-provider>'
+# Password authentication is also supported when an API token is unavailable:
+# export PKR_VAR_proxmox_username='terraform-prov@pve'
+# export PKR_VAR_proxmox_password='<from-secret-provider>'
+# unset PKR_VAR_proxmox_token
 export PKR_VAR_proxmox_node=pve01
 export PKR_VAR_proxmox_pool=portage-engine
 export PKR_VAR_proxmox_storage=ceph-vm
@@ -70,7 +91,10 @@ export PKR_VAR_source_image_manifest=/srv/offline/images/base-systemd.image-mani
 export PKR_VAR_source_image_manifest_sha256='<64 lowercase hex>'
 export PKR_VAR_template_name=pe-gentoo-amd64-persistent-executor-g1
 export PKR_VAR_template_description='Portage persistent executor g1; pve-dmi-v1'
-export PKR_VAR_ssh_private_key_file=/run/secrets/packer-ssh
+# Optional. When omitted, Packer injects and later removes an ephemeral
+# Cloud-Init SSH key. A supplied key must be a regular non-symlink file with
+# mode 0400 or 0600.
+# export PKR_VAR_ssh_private_key_file=/run/secrets/packer-ssh
 export PKR_VAR_executor_template_generation=g1
 export PKR_VAR_capacity_provider=pve
 export PKR_VAR_execution_zone=zone-a

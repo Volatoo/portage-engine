@@ -26,8 +26,8 @@ const (
 	// Migrations 27, 28, 29, and 30 respectively add CLI device authorization,
 	// scheduler observability, Distributed Build Alpha state, and CLI session
 	// derivation.
-	MinSchemaVersion int64 = 30
-	MaxSchemaVersion int64 = 30
+	MinSchemaVersion int64 = 31
+	MaxSchemaVersion int64 = 31
 )
 
 // Querier is the narrow database surface repositories may use. Keeping
