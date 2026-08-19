@@ -1,0 +1,75 @@
+{
+  "schema_version": 1,
+  "observed_at": "2026-08-19T14:04:13Z",
+  "environment": "private-pve-read-only-audit",
+  "gate": "postgres-pbs-production-recovery-readiness",
+  "result": "not_run",
+  "pve_inventory": {
+    "pbs_vm": {
+      "vmid": 134,
+      "name": "pbs",
+      "node": "infra-node6",
+      "status": "running",
+      "cpu_count": 4,
+      "memory_bytes": 8589934592,
+      "system_disk": "local-lvm:vm-134-disk-0",
+      "system_disk_size_bytes": 34359738368,
+      "snapshots": 0,
+      "guest_agent_available": false,
+      "network_address_proven": false
+    },
+    "pbs_storage": {
+      "storage_id": "pbs-portage-engine",
+      "server": "10.31.0.3",
+      "datastore": "portage-engine",
+      "shared": true,
+      "api_reachable": true,
+      "unauthenticated_api_status": 401
+    },
+    "scheduled_backup_jobs": 0,
+    "backup_inventory": [
+      {
+        "vmid": 9200,
+        "name": "gentoo-cloudinit-template",
+        "backup_time": "2026-07-22T15:11:39Z",
+        "size_bytes": 32212796443,
+        "protected": false
+      },
+      {
+        "vmid": 9200,
+        "name": "gentoo-cloudinit-template",
+        "backup_time": "2026-07-22T15:44:32Z",
+        "size_bytes": 32212796441,
+        "protected": true
+      },
+      {
+        "vmid": 9201,
+        "name": "gentoo-cloudinit-bootstrap-g2",
+        "backup_time": "2026-07-23T02:26:48Z",
+        "size_bytes": 32212796739,
+        "protected": true
+      }
+    ],
+    "pbs_vm_backup_count": 0
+  },
+  "repository_readback": {
+    "production_postgres_endpoint_present": false,
+    "production_postgres_credentials_present": false,
+    "pgbackrest_full_diff_wal_pitr_contract_present": true,
+    "current_authoritative_schema": 31
+  },
+  "not_run_reasons": [
+    "no production PostgreSQL endpoint or restore credentials were supplied",
+    "PVE has no scheduled backup job and PBS contains no backup of VMID 134",
+    "the current PVE role can enumerate PBS-backed content but cannot authenticate to the PBS API for datastore policy or retention verification"
+  ],
+  "required_next_inputs": [
+    "production PostgreSQL deployment location and least-privilege drill access",
+    "the production pgBackRest repository path and cipher secret from its secret provider",
+    "an isolated restore target with explicit destruction approval",
+    "PBS API audit access or an exported datastore, verify, prune and retention report",
+    "a reviewed PVE backup job covering the PostgreSQL VM and VMID 134 without snapshotting external NAS data twice"
+  ],
+  "credentials_persisted": false,
+  "pve_resources_modified": false
+}

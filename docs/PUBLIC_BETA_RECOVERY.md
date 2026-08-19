@@ -123,7 +123,9 @@ and switches WAL again. It writes the two timestamps to an owner-only state
 file inside the evidence directory. The recovery target minus the durable
 marker time is the measured RPO. A valid restore must contain the durable
 marker and exclude the post-target marker. The harness measures RTO around the
-restore command and records the backup repository size.
+restore command and records the backup repository size. The restore hook keeps
+the ISO-8601 timestamp in evidence and converts it to pgBackRest's equivalent
+space-separated, numeric-timezone form only for the restore invocation.
 
 Example commands for the checked-in Compose pgBackRest topology:
 

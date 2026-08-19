@@ -180,6 +180,14 @@ membership，不来自 email 或可变 group claim。
 
 - [x] 恢复 Gate 从部署的 `portage-migrate supported-schema` 动态取得 authority，
   并在临时 PostgreSQL 18 上执行当前 migration/恢复 SQL；不再硬编码 v26。
+- [x] 2026-08-19 在独立 Compose project 上完成 schema v31 的 full、differential、
+  WAL 和时间点物理恢复，8/8 检查通过，RPO 0 秒、RTO 9 秒；同时修复
+  pgBackRest 2.59 目标时间格式和 macOS 文件系统识别缺陷。脱敏结果见
+  `evidence/public-beta/postgres-pitr-isolated-20260819.json`。该库业务表为空，且
+  repository 为本地隔离目录，所以不替代生产现场验收。
+- [x] 2026-08-19 对 PVE VMID 134 与 `pbs-portage-engine` 做只读盘点；PBS 可达，
+  但 PVE 没有定时备份任务，现有 3 份备份不包含 VMID 134，也没有生产
+  PostgreSQL DSN。盘点见 `evidence/pve/postgres-pbs-readiness-audit-20260819.json`。
 - [ ] 在最终整合后的生产 schema v31 上配置 full、
   differential 和 WAL/PITR 备份。
 - [ ] 将 backup/WAL repository 放到 NAS，并纳入 PBS VM 备份。

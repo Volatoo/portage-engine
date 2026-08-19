@@ -1,0 +1,73 @@
+{
+  "schema_version": 1,
+  "observed_at": "2026-08-19T14:02:33Z",
+  "gate": "postgres-full-diff-wal-pitr",
+  "scope": "isolated-local-empty-current-schema",
+  "result": "passed",
+  "production_acceptance": false,
+  "baseline_commit": "5d68c1156724ab44f7f4b1d41746e718fa7b91ba",
+  "tree_basis": "repository_head_plus_worktree",
+  "run_id": "20260819-postgres-pitr-local-03",
+  "isolated_target": "local-recovery-drill-20260819",
+  "database": {
+    "postgresql_major": 18,
+    "pgbackrest_version": "2.59.0",
+    "authoritative_schema": 31,
+    "source_pgdata_filesystem": "btrfs",
+    "restore_pgdata_filesystem": "apfs",
+    "full_backup_label": "20260819-140216F",
+    "differential_backup_label": "20260819-140216F_20260819-140219D",
+    "wal_archive_check": "passed",
+    "backup_repository_size_bytes": 12857344
+  },
+  "recovery": {
+    "rpo_seconds": 0,
+    "rto_seconds": 9,
+    "maximum_rpo_seconds": 60,
+    "maximum_rto_seconds": 1800,
+    "expected_marker_present": true,
+    "post_target_marker_absent": true,
+    "schema_version": 31,
+    "least_privilege_roles": [
+      "portage_app",
+      "portage_signer",
+      "portage_actuator"
+    ],
+    "row_counts": {
+      "jobs": 0,
+      "attempts": 0,
+      "signing_tasks": 0,
+      "workload_issuers": 0,
+      "workload_certificates": 0,
+      "capacity_pools": 0,
+      "capacity_actions": 0,
+      "capacity_instances": 0,
+      "targets": 0,
+      "monitor_outcomes": 0,
+      "project_memberships": 0
+    }
+  },
+  "checks": {
+    "passed": 8,
+    "failed": 0,
+    "not_run": 0
+  },
+  "defects_found_and_fixed": [
+    "pgBackRest 2.59 rejected the PostgreSQL T/Z PITR target spelling; the restore hook now normalizes an equivalent numeric-timezone value",
+    "the restore filesystem check used GNU stat syntax on macOS and recorded a file-type placeholder; detection now reports the containing filesystem on Linux and macOS"
+  ],
+  "limitations": [
+    "the isolated database had the full schema and database roles but no production business rows, so non-empty production job, signing, identity and capacity lineage remains unproven",
+    "the backup repository was local and was not the production NAS/PBS repository",
+    "this evidence does not satisfy the production PostgreSQL/PBS recovery exit criterion"
+  ],
+  "cleanup": {
+    "isolated_database_container_removed": true,
+    "isolated_postgres_volume_removed": true,
+    "isolated_pgbackrest_spool_removed": true,
+    "isolated_network_removed": true,
+    "redacted_evidence_preserved": true,
+    "local_backup_repository_preserved": true
+  },
+  "credentials_persisted": false
+}

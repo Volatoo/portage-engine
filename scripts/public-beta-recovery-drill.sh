@@ -261,7 +261,9 @@ run_static() {
   run_argv_check python-syntax false "Python recovery helper syntax" \
     "evidence helpers compile" env "PYTHONPYCACHEPREFIX=${evidence_dir}/pycache" \
     python3 -m py_compile \
-    scripts/recovery/evidence.py scripts/recovery/validate.py
+    scripts/recovery/evidence.py scripts/recovery/validate.py \
+    scripts/recovery/pgbackrest-target-time.py \
+    scripts/recovery/filesystem-type.py
   run_shell_check shell-syntax false "recovery shell syntax" \
     "bash -n scripts/public-beta-recovery-drill.sh scripts/pgbackrest-pitr-prepare.sh scripts/pgbackrest-restore-drill.sh scripts/postgres-restore-check.sh scripts/recovery/current-schema-version.sh scripts/test-vault-issuer.sh tests/recovery-drill-test.sh" \
     "recovery shell entry points parse"
