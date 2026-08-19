@@ -263,6 +263,18 @@ set +a
 [[ "${PORTAGE_PITR_TARGET_TIME}" == '2026-08-01T03:00:01.000000Z' ]] ||
   fail "PITR target timestamp was not preserved"
 python3 -m json.tool "${test_root}/marker-output.json" >/dev/null
+python3 - "${test_root}/marker-output.json" <<'PY'
+import json
+import sys
+
+payload = json.load(open(sys.argv[1], encoding="utf-8"))
+counts = payload["fixture"]["row_counts"]
+assert counts, payload
+assert all(value == 1 for value in counts.values()), counts
+PY
+rg -q "restore has no recovery lineage" \
+  scripts/recovery/schema-current-restore-check.sql ||
+  fail "current-schema restore check does not reject an empty business lineage"
 if scripts/postgres-restore-check.sh /nonexistent.dump >/dev/null 2>&1; then
   fail "logical restore drill ran without isolation confirmation"
 fi

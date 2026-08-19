@@ -13,7 +13,10 @@ DECLARE
     schema_version bigint;
     expected_schema bigint := current_setting('portage.drill.expected_schema')::bigint;
     missing_relations text[];
+    empty_relations text[] := ARRAY[]::text[];
     membership_constraint text;
+    relation_name text;
+    relation_rows bigint;
     role_name text;
 BEGIN
     SELECT COALESCE(max(version_id) FILTER (WHERE is_applied), 0)
@@ -43,6 +46,29 @@ BEGIN
     WHERE to_regclass(required.name) IS NULL;
     IF missing_relations IS NOT NULL THEN
         RAISE EXCEPTION 'restore is missing required current-schema relations: %', missing_relations;
+    END IF;
+
+    FOREACH relation_name IN ARRAY ARRAY[
+        'build_jobs',
+        'build_attempts',
+        'signing_tasks',
+        'workload_issuer_generations',
+        'workload_certificates',
+        'scheduler_capacity_pool_state',
+        'scheduler_capacity_actions',
+        'scheduler_capacity_instances',
+        'targets',
+        'monitor_job_outcomes',
+        'project_memberships'
+    ] LOOP
+        EXECUTE format('SELECT count(*) FROM %I', relation_name)
+        INTO relation_rows;
+        IF relation_rows < 1 THEN
+            empty_relations := array_append(empty_relations, relation_name);
+        END IF;
+    END LOOP;
+    IF cardinality(empty_relations) > 0 THEN
+        RAISE EXCEPTION 'restore has no recovery lineage in required relations: %', empty_relations;
     END IF;
 
     IF EXISTS (

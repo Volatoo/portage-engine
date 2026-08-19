@@ -1,6 +1,6 @@
 # Portage Engine 后续待办与验收计划
 
-更新日期：2026-08-14
+更新日期：2026-08-19
 
 ## 当前结论
 
@@ -22,7 +22,7 @@ HA、生产备份/对象存储/signer、真实 distccd、GitHub 发布和 30 天
 | --- | --- | --- |
 | Persistent Executor | `scripts/persistent-executor-gate.sh repo` 与真实 PostgreSQL 删除边界通过 | 2026-08-14 PVE 正向生命周期和 live-work 删除拒绝均通过 |
 | Identity / Public Edge | 配置、Nginx/Compose 与 redacted Gate 通过 | 三个 IdP 与公网主机 `not-run` |
-| Recovery | 静态 7 项通过，4 个外部阶段明确 `not-run` | Vault/PostgreSQL/object/signer `not-run` |
+| Recovery | PostgreSQL 18 schema v31 非空 full/diff/WAL/PITR 8 项通过，其余外部阶段明确 `not-run` | 生产 PostgreSQL/PBS、Vault/object/signer `not-run` |
 | Distributed Build | 单元、race 与 PostgreSQL 并发 Gate 通过 | distccd/PVE/双 job/disconnect `not-run` |
 | GUI E2E | 签名候选契约与 GTK/Qt/WebView 场景通过 | 真实 digest/fingerprint/PVE matrix `not-run` |
 | Release | workflow/manifest/SBOM/provenance/promotion 契约通过 | GHCR push/sign/promote/rollback `not-run` |
@@ -188,11 +188,16 @@ membership，不来自 email 或可变 group claim。
 - [x] 2026-08-19 对 PVE VMID 134 与 `pbs-portage-engine` 做只读盘点；PBS 可达，
   但 PVE 没有定时备份任务，现有 3 份备份不包含 VMID 134，也没有生产
   PostgreSQL DSN。盘点见 `evidence/pve/postgres-pbs-readiness-audit-20260819.json`。
+- [x] 2026-08-19 为隔离恢复源加入确定性的非秘密业务 lineage，覆盖 job、attempt、
+  signing task、workload issuer/leaf、capacity pool/action/instance、target outcome 与
+  project membership；恢复端会拒绝其中任一类为 0。PostgreSQL 18 schema v31 的
+  full、differential、WAL 与 PITR 再次 8/8 通过，RPO 0 秒、RTO 5 秒。脱敏结果见
+  `evidence/public-beta/postgres-pitr-nonempty-isolated-20260819.json`。
 - [ ] 在最终整合后的生产 schema v31 上配置 full、
   differential 和 WAL/PITR 备份。
 - [ ] 将 backup/WAL repository 放到 NAS，并纳入 PBS VM 备份。
 - [ ] 保持 PostgreSQL `PGDATA` 位于可靠本地块存储，不直接放在 NFS。
-- [ ] 在隔离数据库中恢复并核验 schema、job、attempt、signing task、workload
+- [x] 在隔离数据库中恢复并核验 schema、job、attempt、signing task、workload
   issuer、capacity action/instance、target outcome 和角色权限。
 - [ ] 记录实际 RPO、RTO、备份大小、恢复耗时和负责人。
 
