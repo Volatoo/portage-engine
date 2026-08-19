@@ -4,6 +4,7 @@
 
 set -euo pipefail
 
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 owner="${PORTAGE_DRILL_OWNER:-}"
 isolated_target="${PORTAGE_DRILL_TARGET:-}"
 present_marker="${PORTAGE_PITR_ASSERT_RESOURCE_ID:-}"
@@ -54,6 +55,11 @@ psql_drill() {
     sh "$@"
 }
 
+fixture_result="$(
+  psql_drill --set=fixture_key="${present_marker}" --set=owner="${owner}" \
+    <"${script_dir}/recovery/current-schema-fixture.sql"
+)"
+
 last_durable_utc="$(
   psql_drill --set=marker="${present_marker}" --set=owner="${owner}" <<'SQL'
 INSERT INTO audit_events (
@@ -99,7 +105,8 @@ mv "${temporary_state}" "${state_file}"
 trap - EXIT
 
 python3 - "${owner}" "${isolated_target}" "${present_marker}" \
-  "${absent_marker}" "${last_durable_utc}" "${target_time}" "${state_file}" <<'PY'
+  "${absent_marker}" "${last_durable_utc}" "${target_time}" "${state_file}" \
+  "${fixture_result}" <<'PY'
 import json
 import sys
 print(json.dumps({
@@ -113,5 +120,6 @@ print(json.dumps({
     "last_durable_time": sys.argv[5],
     "target_time": sys.argv[6],
     "state_file": sys.argv[7],
+    "fixture": json.loads(sys.argv[8]),
 }, sort_keys=True))
 PY

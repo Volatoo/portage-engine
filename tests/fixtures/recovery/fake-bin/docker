@@ -2,8 +2,13 @@
 set -euo pipefail
 
 arguments="$*"
-input="$(sed -n '1,240p')"
-if [[ "${input}" == *"recovery.pitr.before"* ]]; then
+input=""
+if [[ ! -t 0 ]]; then
+  input="$(sed -n '1,240p')"
+fi
+if [[ "${input}" == *"non-secret-drill-fixture"* ]]; then
+  printf '%s\n' '{"fixture_key":"before-marker","classification":"non-secret-drill-fixture","row_counts":{"jobs":1,"attempts":1,"signing_tasks":1,"workload_issuers":1,"workload_certificates":1,"capacity_pools":1,"capacity_actions":1,"capacity_instances":1,"targets":1,"monitor_outcomes":1,"project_memberships":1}}'
+elif [[ "${input}" == *"recovery.pitr.before"* ]]; then
   printf '%s\n' '2026-08-01T03:00:00.000000Z'
 elif [[ "${arguments}" == *"clock_timestamp"* ]]; then
   printf '%s\n' '2026-08-01T03:00:01.000000Z'

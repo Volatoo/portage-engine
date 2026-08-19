@@ -117,14 +117,18 @@ SSHFS are rejected. NFS is allowed only for the encrypted backup/WAL
 repository and retained evidence.
 
 After the full and differential backups, the checked-in preparation script
-inserts a unique non-secret durable `audit_events.resource_id` marker, switches
-WAL, selects a later recovery target, inserts a distinct post-target marker,
-and switches WAL again. It writes the two timestamps to an owner-only state
-file inside the evidence directory. The recovery target minus the durable
-marker time is the measured RPO. A valid restore must contain the durable
-marker and exclude the post-target marker. The harness measures RTO around the
-restore command and records the backup repository size. The restore hook keeps
-the ISO-8601 timestamp in evidence and converts it to pgBackRest's equivalent
+first inserts a deterministic, non-secret business lineage into the explicitly
+isolated source: project membership, target, terminal job and attempt, signing
+task, workload issuer and leaf, capacity pool/action/instance, and the target
+outcome view. It then inserts a unique durable `audit_events.resource_id`
+marker, switches WAL, selects a later recovery target, inserts a distinct
+post-target marker, and switches WAL again. It writes the two timestamps to an
+owner-only state file inside the evidence directory. The recovery target minus
+the durable marker time is the measured RPO. A valid restore must contain the
+durable marker, exclude the post-target marker, and retain at least one row in
+every required lineage relation. The harness measures RTO around the restore
+command and records the backup repository size. The restore hook keeps the
+ISO-8601 timestamp in evidence and converts it to pgBackRest's equivalent
 space-separated, numeric-timezone form only for the restore invocation.
 
 Example commands for the checked-in Compose pgBackRest topology:

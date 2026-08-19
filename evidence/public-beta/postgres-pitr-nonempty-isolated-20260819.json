@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "observed_at": "2026-08-19T14:51:29Z",
+  "gate": "postgres-full-diff-wal-pitr-nonempty-lineage",
+  "scope": "isolated-local-nonempty-current-schema",
+  "result": "passed",
+  "production_acceptance": false,
+  "baseline_commit": "c779a80b4debb0349d1e3b025d691b58fafd7da8",
+  "tree_basis": "repository_head_plus_worktree",
+  "run_id": "20260819-postgres-pitr-nonempty-03",
+  "isolated_target": "local-recovery-drill-nonempty-20260819",
+  "database": {
+    "postgresql_major": 18,
+    "pgbackrest_version": "2.59.0",
+    "authoritative_schema": 31,
+    "source_pgdata_filesystem": "btrfs",
+    "restore_pgdata_filesystem": "apfs",
+    "full_backup_label": "20260819-145118F",
+    "differential_backup_label": "20260819-145118F_20260819-145120D",
+    "wal_archive_check": "passed",
+    "backup_repository_size_bytes": 12718080
+  },
+  "recovery": {
+    "rpo_seconds": 0,
+    "rto_seconds": 5,
+    "maximum_rpo_seconds": 60,
+    "maximum_rto_seconds": 1800,
+    "expected_marker_present": true,
+    "post_target_marker_absent": true,
+    "schema_version": 31,
+    "least_privilege_roles": [
+      "portage_app",
+      "portage_signer",
+      "portage_actuator"
+    ],
+    "row_counts": {
+      "jobs": 2,
+      "attempts": 2,
+      "signing_tasks": 2,
+      "workload_issuers": 2,
+      "workload_certificates": 2,
+      "capacity_pools": 2,
+      "capacity_actions": 2,
+      "capacity_instances": 2,
+      "targets": 2,
+      "monitor_outcomes": 2,
+      "project_memberships": 2
+    },
+    "current_run_fixture_rows_per_relation": 1
+  },
+  "checks": {
+    "passed": 8,
+    "failed": 0,
+    "not_run": 0
+  },
+  "defects_found_and_fixed": [
+    "the physical restore check accepted an empty business lineage; isolated preparation now seeds and the restore requires every reviewed lineage relation to be non-empty",
+    "the first fixture revision reused one active issuer_id across runs; issuer identity is now derived from the audit marker so repeated drills remain isolated"
+  ],
+  "limitations": [
+    "the rows are deterministic non-secret recovery fixtures rather than production business records",
+    "the backup repository was local and was not the production NAS/PBS repository",
+    "this evidence does not satisfy the production PostgreSQL/PBS recovery exit criterion"
+  ],
+  "credentials_persisted": false,
+  "pve_resources_modified": false
+}
