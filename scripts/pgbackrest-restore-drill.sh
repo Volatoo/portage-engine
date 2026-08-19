@@ -49,6 +49,9 @@ isolated_target_lower="$(printf '%s' "${isolated_target}" | tr '[:upper:]' '[:lo
 [[ "${max_rto_seconds}" =~ ^[0-9]+$ ]] || fail_input "PORTAGE_PITR_MAX_RTO_SECONDS must be an integer"
 
 expected_schema="$("${repo_root}/scripts/recovery/current-schema-version.sh")"
+pgbackrest_target_time="$(
+  python3 "${repo_root}/scripts/recovery/pgbackrest-target-time.py" "${target_time}"
+)"
 
 started_epoch_ms="$(python3 -c 'import time; print(time.time_ns() // 1000000)')"
 drill_root="$(mktemp -d "${TMPDIR:-/tmp}/portage-pitr.XXXXXX")"
@@ -61,16 +64,9 @@ cleanup() {
 }
 trap cleanup EXIT
 
-filesystem_type() {
-  local path="$1"
-  if stat -f -c '%T' "${path}" >/dev/null 2>&1; then
-    stat -f -c '%T' "${path}"
-  else
-    stat -f '%T' "${path}"
-  fi
-}
-
-restore_filesystem="$(filesystem_type "${drill_root}")"
+restore_filesystem="$(
+  python3 "${repo_root}/scripts/recovery/filesystem-type.py" "${drill_root}"
+)"
 restore_filesystem_lower="$(printf '%s' "${restore_filesystem}" | tr '[:upper:]' '[:lower:]')"
 if [[ "${restore_filesystem_lower}" =~ (nfs|cifs|smbfs|fuse\.sshfs) ]]; then
   fail_input "restored PGDATA must not use NFS/SMB/SSHFS (found ${restore_filesystem})"
@@ -79,7 +75,7 @@ repo_size_kib="$(du -sk "${source_repo}" | awk '{print $1}')"
 
 restore_args=(
   --stanza=portage-engine --pg1-path=/restore --repo1-path=/repo
-  --type=time "--target=${target_time}" --target-action=promote
+  --type=time "--target=${pgbackrest_target_time}" --target-action=promote
 )
 
 docker run --rm \

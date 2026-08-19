@@ -216,6 +216,28 @@ PY
 if scripts/pgbackrest-restore-drill.sh '2026-08-01T00:00:00Z' >/dev/null 2>&1; then
   fail "pgBackRest drill ran without isolation confirmation"
 fi
+normalized_target="$(
+  python3 scripts/recovery/pgbackrest-target-time.py \
+    '2026-08-01T03:00:01.123456Z'
+)"
+[[ "${normalized_target}" == '2026-08-01 03:00:01.123456+00' ]] ||
+  fail "pgBackRest target time did not normalize the PostgreSQL T/Z spelling"
+normalized_offset_target="$(
+  python3 scripts/recovery/pgbackrest-target-time.py \
+    '2026-08-01T11:00:01.123456+08:00'
+)"
+[[ "${normalized_offset_target}" == '2026-08-01 03:00:01.123456+00' ]] ||
+  fail "pgBackRest target time did not normalize an explicit UTC offset"
+if python3 scripts/recovery/pgbackrest-target-time.py \
+  '2026-08-01T03:00:01.123456' >/dev/null 2>&1; then
+  fail "pgBackRest target time accepted a timezone-free timestamp"
+fi
+restore_filesystem="$(
+  python3 scripts/recovery/filesystem-type.py "${test_root}"
+)"
+[[ -n "${restore_filesystem}" && "${restore_filesystem}" != '/' && \
+  "${restore_filesystem}" != '@' ]] ||
+  fail "restore filesystem detection returned a file-type placeholder"
 if scripts/pgbackrest-pitr-prepare.sh >/dev/null 2>&1; then
   fail "PITR marker preparation ran without isolation confirmation"
 fi
