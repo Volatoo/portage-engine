@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "observed_at": "2026-08-19T15:34:57Z",
+  "environment": "private-pve-disposable-recovery-drill",
+  "gate": "pve-pbs-vm-backup-restore",
+  "result": "passed_with_cleanup_action",
+  "production_acceptance": false,
+  "pve": {
+    "node": "infra-node1",
+    "source_template_vmid": 9002,
+    "source_template_name": "prod-debian-12-server-template",
+    "source_vmid": 9400,
+    "restore_vmid": 9401,
+    "reserved_drill_address": "10.31.0.105",
+    "guest_agent_declared": true,
+    "guest_agent_available": false,
+    "validation_transport": "temporary injected SSH key"
+  },
+  "backup": {
+    "storage": "pbs-portage-engine",
+    "volid": "pbs-portage-engine:backup/vm/9400/2026-08-19T15:29:02Z",
+    "mode": "snapshot",
+    "logical_size_bytes": 10737419400,
+    "started_at": "2026-08-19T15:29:02Z",
+    "completed_at": "2026-08-19T15:32:39Z",
+    "duration_seconds": 217,
+    "task_status": "OK"
+  },
+  "restore": {
+    "started_at": "2026-08-19T15:32:41Z",
+    "archive_restored_at": "2026-08-19T15:33:59Z",
+    "vm_started_at": "2026-08-19T15:34:04Z",
+    "marker_validated_by": "2026-08-19T15:34:39Z",
+    "archive_restore_duration_seconds": 78,
+    "backup_complete_to_validation_seconds": 120,
+    "task_status": "OK"
+  },
+  "payload_validation": {
+    "classification": "non-secret-recovery-marker",
+    "source_sha256": "0d967f65e1997f1ebc8bd6c4614e0377dfa4687b06d8f17770dfb1de5ebd10d7",
+    "restored_sha256": "0d967f65e1997f1ebc8bd6c4614e0377dfa4687b06d8f17770dfb1de5ebd10d7",
+    "digest_match": true
+  },
+  "cleanup": {
+    "source_vm_removed": true,
+    "restored_vm_removed": true,
+    "temporary_vm_readback_count": 0,
+    "temporary_backup_removed": false,
+    "backup_removal_error": "missing Datastore.Modify or Datastore.Prune on the PBS datastore"
+  },
+  "limitations": [
+    "the payload was a synced non-secret marker, not a production PostgreSQL data directory",
+    "the current role cannot run or read a PBS server-side verification task or retention/prune policy",
+    "the source template declares a guest agent but the agent did not respond, so the successful backup is crash-consistent rather than guest-frozen",
+    "PVE still has no scheduled backup job and this drill does not define production retention"
+  ],
+  "required_follow_up": [
+    "delete the exact temporary backup volume with a PBS principal that has Datastore.Modify or Datastore.Prune",
+    "run PBS server-side verify and capture datastore retention/prune policy",
+    "repeat against the production PostgreSQL VM after its deployment location and backup repository are defined"
+  ],
+  "credentials_persisted": false,
+  "existing_vms_modified": false
+}

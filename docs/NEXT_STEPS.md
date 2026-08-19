@@ -22,7 +22,7 @@ HA、生产备份/对象存储/signer、真实 distccd、GitHub 发布和 30 天
 | --- | --- | --- |
 | Persistent Executor | `scripts/persistent-executor-gate.sh repo` 与真实 PostgreSQL 删除边界通过 | 2026-08-14 PVE 正向生命周期和 live-work 删除拒绝均通过 |
 | Identity / Public Edge | 配置、Nginx/Compose 与 redacted Gate 通过 | 三个 IdP 与公网主机 `not-run` |
-| Recovery | PostgreSQL 18 schema v31 非空 full/diff/WAL/PITR 8 项通过，其余外部阶段明确 `not-run` | 生产 PostgreSQL/PBS、Vault/object/signer `not-run` |
+| Recovery | PostgreSQL 18 schema v31 非空 full/diff/WAL/PITR 8 项通过，其余外部阶段明确 `not-run` | PVE→PBS 临时 VM 备份/恢复通过；生产 PostgreSQL/PBS 策略、Vault/object/signer `not-run` |
 | Distributed Build | 单元、race 与 PostgreSQL 并发 Gate 通过 | distccd/PVE/双 job/disconnect `not-run` |
 | GUI E2E | 签名候选契约与 GTK/Qt/WebView 场景通过 | 真实 digest/fingerprint/PVE matrix `not-run` |
 | Release | workflow/manifest/SBOM/provenance/promotion 契约通过 | GHCR push/sign/promote/rollback `not-run` |
@@ -193,6 +193,13 @@ membership，不来自 email 或可变 group claim。
   project membership；恢复端会拒绝其中任一类为 0。PostgreSQL 18 schema v31 的
   full、differential、WAL 与 PITR 再次 8/8 通过，RPO 0 秒、RTO 5 秒。脱敏结果见
   `evidence/public-beta/postgres-pitr-nonempty-isolated-20260819.json`。
+- [x] 2026-08-19 在 PVE 创建临时 VMID 9400，将同步写盘的非秘密 marker 备份到
+  `pbs-portage-engine`，再恢复为 VMID 9401；备份 217 秒，archive restore 78 秒，
+  从备份完成到恢复 VM 中 marker 可读为 120 秒，源/恢复 SHA-256 一致。两台临时 VM
+  已删除并回读 absent。当前账号缺 PBS `Datastore.Modify|Datastore.Prune`，所以精确
+  测试卷 `backup/vm/9400/2026-08-19T15:29:02Z` 仍待 PBS 管理员删除；证据见
+  `evidence/pve/pbs-vm-recovery-gate-20260819.json`。这只证明 PVE→PBS 数据路径，
+  不替代生产 PostgreSQL、server-side verify 和 retention/prune 验收。
 - [ ] 在最终整合后的生产 schema v31 上配置 full、
   differential 和 WAL/PITR 备份。
 - [ ] 将 backup/WAL repository 放到 NAS，并纳入 PBS VM 备份。
