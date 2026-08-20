@@ -11,6 +11,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -617,13 +618,19 @@ func (s *Server) loadBuildCatalog() error {
 }
 
 type binhostProfile struct {
-	ID          string `json:"profile_id"`
-	Arch        string `json:"arch"`
-	ProfilePath string `json:"profile_path"`
-	BinhostPath string `json:"binhost_path"`
-	Channel     string `json:"channel,omitempty"`
-	Default     bool   `json:"default"`
-	SyncPath    string `json:"sync_path"`
+	ID                 string   `json:"profile_id"`
+	Arch               string   `json:"arch"`
+	ProfilePath        string   `json:"profile_path"`
+	RepositoryIDs      []string `json:"repository_ids,omitempty"`
+	RepositoryNames    []string `json:"repository_names,omitempty"`
+	ResourceClass      string   `json:"resource_class,omitempty"`
+	RequiredFeatures   []string `json:"required_features,omitempty"`
+	ImageDigest        string   `json:"image_digest,omitempty"`
+	MirrorBundleDigest string   `json:"mirror_bundle_digest,omitempty"`
+	BinhostPath        string   `json:"binhost_path"`
+	Channel            string   `json:"channel,omitempty"`
+	Default            bool     `json:"default"`
+	SyncPath           string   `json:"sync_path"`
 }
 
 // configureBinhostStores materializes one independent PKGDIR for each catalog
@@ -636,6 +643,18 @@ func (s *Server) configureBinhostStores() error {
 	}
 	stores := make(map[string]*binpkg.Store, len(c.Profiles))
 	profiles := make(map[string]binhostProfile, len(c.Profiles))
+	repositoryNames := make(map[string]string, len(c.Repositories))
+	images := make(map[string]catalog.ImageManifest, len(c.Images))
+	bundles := make(map[string]catalog.MirrorBundle, len(c.MirrorBundles))
+	for _, repository := range c.Repositories {
+		repositoryNames[repository.ID] = repository.Name
+	}
+	for _, image := range c.Images {
+		images[image.ID] = image
+	}
+	for _, bundle := range c.MirrorBundles {
+		bundles[bundle.ID] = bundle
+	}
 	defaultPath := ""
 	var defaultStore *binpkg.Store
 	for _, profile := range c.Profiles {
@@ -644,8 +663,21 @@ func (s *Server) configureBinhostStores() error {
 		}
 		store := binpkg.NewStore(filepath.Join(s.binpkgRoot, filepath.FromSlash(profile.BinhostPath)))
 		stores[profile.BinhostPath] = store
+		names := make([]string, 0, len(profile.RepositoryIDs))
+		for _, id := range profile.RepositoryIDs {
+			names = append(names, repositoryNames[id])
+		}
+		ids := append([]string(nil), profile.RepositoryIDs...)
+		sort.Strings(ids)
+		sort.Strings(names)
+		image := images[profile.ImageID]
+		bundle := bundles[profile.MirrorBundleID]
 		profiles[profile.ID] = binhostProfile{
 			ID: profile.ID, Arch: profile.Arch, ProfilePath: profile.ProfilePath,
+			RepositoryIDs:   ids,
+			RepositoryNames: names, ResourceClass: profile.DefaultResourceClass,
+			RequiredFeatures: append([]string(nil), profile.RequiredFeatures...),
+			ImageDigest:      image.Digest, MirrorBundleDigest: bundle.Digest,
 			BinhostPath: profile.BinhostPath, Channel: profile.Channel,
 			Default: profile.Default, SyncPath: "/binpkgs/" + profile.BinhostPath,
 		}

@@ -80,6 +80,7 @@ func TestAssembleCandidateCatalogBindsSignedBundle(t *testing.T) {
 	writeTestJSON(t, dir, "bundle-manifest.json", bundle)
 	writeTestJSON(t, dir, "bundle-manifest.sig.json", signature)
 	spec := CandidateCatalogAssembly{SchemaVersion: 1, CatalogVersion: 1, DefaultProfileID: plan.ProfileID, DefaultResourceClass: "medium",
+		RequiredFeatures: []string{"binpkg-multi-instance", "sandbox", "userpriv"},
 		ResourceClasses: []catalog.ResourceClass{{
 			ID: "medium", MachineSpec: map[string]string{"cores": "4", "memory": "8192", "disk_size": "50"},
 			MaxRuntimeMinutes: 90, CloudCostMicrounitsPerMinute: 2000,

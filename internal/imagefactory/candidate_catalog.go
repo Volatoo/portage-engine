@@ -17,6 +17,7 @@ type CandidateCatalogAssembly struct {
 	CatalogVersion       int                        `json:"catalog_version"`
 	DefaultProfileID     string                     `json:"default_profile_id"`
 	DefaultResourceClass string                     `json:"default_resource_class,omitempty"`
+	RequiredFeatures     []string                   `json:"required_features"`
 	ResourceClasses      []catalog.ResourceClass    `json:"resource_classes,omitempty"`
 	DefaultEgressPolicy  string                     `json:"default_egress_policy_id"`
 	EgressPolicies       []catalog.EgressPolicy     `json:"egress_policies"`
@@ -268,6 +269,7 @@ func (state *candidateCatalogState) addProfileAndImage(
 		RepositoryIDs: repositoryIDs, ImageID: manifest.ImageID,
 		MirrorBundleID:       manifest.MirrorBundleID,
 		DefaultResourceClass: spec.DefaultResourceClass,
+		RequiredFeatures:     slices.Clone(spec.RequiredFeatures),
 		EgressPolicyID:       spec.DefaultEgressPolicy,
 		Default:              manifest.ProfileID == spec.DefaultProfileID, Channel: "candidate",
 	}

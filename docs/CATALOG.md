@@ -68,7 +68,7 @@ allocated.
 
 | Object | Required role |
 | --- | --- |
-| Profile | Maps a stable ID to arch, profile path, binhost namespace, repository allowlist, image, mirror bundle and egress policy |
+| Profile | Maps a stable ID to arch, profile path, binhost namespace, repository allowlist, required Portage FEATURES, image, mirror bundle and egress policy |
 | Repository | Owns name, location, transport, immutable commit/digest and channel |
 | Image | Owns provider, execution zone, build mode, generation, template, display model, installed package-set IDs and provenance digests |
 | MirrorBundle | Names the approved offline input set, digest, freshness and advisory watermark |
@@ -162,7 +162,11 @@ for that path and atomically regenerates that store's `Packages`. It also
 uploads the same namespaced artifacts and index to the configured internal
 mirror. A request, builder or artifact filename cannot select a different
 namespace. `GET /api/v1/binhosts` exposes the safe profile-to-consume-path
-mapping used by `portage-client configure`.
+mapping used by `portage-client configure`. It also publishes the non-secret
+immutable target metadata needed by distribution clients: repository IDs and
+names, resource class, required FEATURES, builder image digest and mirror
+bundle digest. Candidate entries remain visibly marked and must not be
+published as stable client bindings.
 
 Image manifests may contain `package_sets` and a
 `package_set_catalog_digest`. They must appear together. These fields describe
@@ -179,6 +183,9 @@ candidate catalog and resolved job context.
 
 Stable entries have stronger validation:
 
+- candidate and stable profiles require a sorted, unique `required_features`
+  policy; the server replaces any client metadata with that policy and records
+  it in the resolved build context before the builder constructs `FEATURES`;
 - stable Git repositories require a full immutable commit;
 - stable non-Git repositories are rejected until a later milestone implements
   snapshot digest verification in the builder;

@@ -221,7 +221,7 @@ func TestPromotionAndRollbackBindAllEvidence(t *testing.T) {
 	candidate := &catalog.Catalog{Version: 1,
 		Profiles: []catalog.ProfileDefinition{{ID: profileID, Arch: "amd64", ProfilePath: image.ProfilePath, BinhostPath: "releases/amd64/binpackages/23.0/x86-64_test", ProfileRepositoryID: "pe-profiles/rev-" + image.Repositories["pe-profiles"],
 			Parents: []catalog.ProfileParentDefinition{{RepositoryID: "gentoo/rev-" + image.Repositories["gentoo"], ProfilePath: catalystOfficialProfile}}, RepositoryIDs: []string{"gentoo/rev-" + image.Repositories["gentoo"], "pe-profiles/rev-" + image.Repositories["pe-profiles"]},
-			ImageID: imageID, MirrorBundleID: bundle.BundleID, EgressPolicyID: "egress/candidate", Default: true, Channel: "candidate"}},
+			ImageID: imageID, MirrorBundleID: bundle.BundleID, RequiredFeatures: []string{"binpkg-multi-instance", "sandbox", "userpriv"}, EgressPolicyID: "egress/candidate", Default: true, Channel: "candidate"}},
 		Repositories: []catalog.RepositoryDefinition{
 			{ID: "gentoo/rev-" + image.Repositories["gentoo"], Name: "gentoo", Location: "/var/db/repos/gentoo", SyncType: "git", SyncURI: "https://git.internal/gentoo.git", Revision: image.Repositories["gentoo"], Channel: "candidate"},
 			{ID: "pe-profiles/rev-" + image.Repositories["pe-profiles"], Name: "pe-profiles", Location: "/var/db/repos/pe-profiles", SyncType: "git", SyncURI: "https://git.internal/pe-profiles.git", Revision: image.Repositories["pe-profiles"], Channel: "candidate"}},
