@@ -1,6 +1,6 @@
 # Portage Engine 后续待办与验收计划
 
-更新日期：2026-08-19
+更新日期：2026-08-20
 
 ## 当前结论
 
@@ -200,6 +200,15 @@ membership，不来自 email 或可变 group claim。
   测试卷 `backup/vm/9400/2026-08-19T15:29:02Z` 仍待 PBS 管理员删除；证据见
   `evidence/pve/pbs-vm-recovery-gate-20260819.json`。这只证明 PVE→PBS 数据路径，
   不替代生产 PostgreSQL、server-side verify 和 retention/prune 验收。
+- [x] 2026-08-20 重新只读盘点 98 个 PVE VM/模板：仍无 distcc/compile-worker，
+  唯一桌面模板仍是 schema v1 `desktop-g6`，定时备份作业仍为 0。上一次
+  drill 备份仍存在、没有 server-side verification，当前账号仍无删除/修剪权限。
+  一次性 VMID9400 诊断还证明 SSH 就绪时 cloud-init 可能仍持有包管理锁；
+  等待后 PVE `guest-ping` 通过，但 `get-fsinfo` 在该环境返回 HTTP 501。因此
+  备份 Gate 必须单独等待 `guest-ping`，不能用 SSH ready 代替，也不能将可选的
+  filesystem 枚举当作 Agent 就绪条件。诊断未重复备份、未修改模板，
+  所有临时 VM 已删除并回读 absent。脱敏结果见
+  `evidence/pve/live-readiness-refresh-20260820.json`。
 - [ ] 在最终整合后的生产 schema v31 上配置 full、
   differential 和 WAL/PITR 备份。
 - [ ] 将 backup/WAL repository 放到 NAS，并纳入 PBS VM 备份。
@@ -325,11 +334,12 @@ distcc 应作为独立里程碑，不能直接打开全局开关。
   output fence 在 collection 前及下载后/staging commit 前复验，失败清理隔离结果。
 - [ ] 以真实 distccd/PVE、至少两个并行 job 和 worker disconnect 完成现场 Gate，
   保存数据库、网络策略、日志、metrics 与对照 receipt；当前状态 **not-run**，仓库
-  不伪造现场结果。2026-08-14 PVE inventory 回读没有 distcc/compile-worker VM 或
+  不伪造现场结果。2026-08-20 PVE inventory 再次回读没有 distcc/compile-worker VM 或
   模板，部署配置仍显式关闭 Alpha，也没有隔离 CIDR、工具链 identity 或 lease
   enforcement sidecar。PostgreSQL 并发 slot/fence 用例以及 distcc/builder race Gate
   已重新通过；脱敏 readiness 证据见
-  `evidence/pve/distcc-readiness-audit-20260814.json`。
+  `evidence/pve/distcc-readiness-audit-20260814.json` 与
+  `evidence/pve/live-readiness-refresh-20260820.json`。
 
 退出标准：至少两个 job 并行，reviewed C/C++ workload 能借用同构 compile pool；
 资源不超卖，断开 worker 可控降级，产物仍通过同一签名、安装和发布 Gate。
@@ -348,6 +358,8 @@ distcc 应作为独立里程碑，不能直接打开全局开关。
   已删除并回读为 absent。脱敏证据见
   `evidence/pve/desktop-matrix-readiness-audit-20260814.json`。现场继续前必须构建新桌面
   generation，并提供签名 GTK/Qt/WebView candidate manifest 与独立批准的主密钥指纹。
+  2026-08-20 只读回读确认 VMID145 仍是同一个 `desktop-g6` schema-v1 模板，见
+  `evidence/pve/live-readiness-refresh-20260820.json`。
 - [ ] 基线稳定后再扩展 KDE/GNOME 模板。
 - [x] 视觉 AI 只用于失败 triage 和候选 selector/needle 建议，不作为 release
   oracle。
@@ -377,13 +389,17 @@ distcc 应作为独立里程碑，不能直接打开全局开关。
 
 ## 推荐执行顺序
 
-1. 审阅、合并并推送 `codex/next-steps-integration`，确认 GitHub CI/CodeQL/安全扫描。
-2. 用真实 PVE 完成 persistent-executor SCHED-2B 与签名 GUI matrix Gate。
-3. 部署正式 HTTPS edge，完成 Authentik、Google、GitHub 回调与 real-host Gate。
-4. 完成 Vault HA、schema v31 PostgreSQL/PBS、对象存储和 signer 现场恢复演练。
-5. 以受保护 GitHub environment 执行真实 candidate/stable/rollback 发布。
-6. Public Beta 不依赖 distcc；有隔离网络后再执行真实 distccd 双 job/disconnect Gate。
-7. 选择实际 billing export 后实现 invoice reconciliation，随后开始 30 天稳定窗口。
+1. 为生产 PostgreSQL schema v31 配置 full/differential/WAL，增加 PVE 定时备份与
+   PBS server-side verify/retention/prune，并由 PBS 管理员删除遗留 drill 备份。
+2. 构建 schema-v2 桌面 generation，注入真实签名 candidate digest/fingerprint，在
+   PVE 完成 GTK/Qt/WebView matrix。
+3. 完成 Vault HA、对象存储和 signer 现场恢复，再用受保护 GitHub
+   environment 执行 candidate/stable/rollback 发布。
+4. Public Beta 不依赖 distcc；准备 compile-worker 镜像和隔离网络后，执行真实
+   distccd 双 job/disconnect Gate。
+5. 部署正式 HTTPS edge，最后注入 Authentik、Google、GitHub 生产应用并执行
+   real-host IdP Gate。
+6. 选择实际 billing export 后实现 invoice reconciliation，随后开始 30 天稳定窗口。
 
 ## 相关文档
 

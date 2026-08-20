@@ -1,0 +1,77 @@
+{
+  "schema_version": 1,
+  "observed_at": "2026-08-20T00:35:39Z",
+  "environment": "isolated-private-pve-gate",
+  "gate": "remaining-pve-readiness-refresh",
+  "result": "not_run",
+  "transport": {
+    "endpoint_hostname": "pve.infra.plz.ac.ac",
+    "resolved_private_address": "10.31.0.200",
+    "hostname_dns_reached_private_address": false,
+    "private_ca_trusted_by_operator_host": false,
+    "credentials_persisted": false
+  },
+  "inventory": {
+    "virtual_machines_and_templates": 98,
+    "distcc_or_compile_worker_matches": 0,
+    "desktop_template": {
+      "vmid": 145,
+      "node": "infra-node4",
+      "name": "pe-gentoo-amd64-no-multilib-desktop-verifier-g6",
+      "image_generation": "desktop-g6",
+      "schema_version": 1,
+      "display": "qxl",
+      "snapshot_names": [
+        "current"
+      ]
+    },
+    "disposable_gate_vmids_present": []
+  },
+  "pbs": {
+    "storage": "pbs-portage-engine",
+    "configured": true,
+    "scheduled_backup_jobs": 0,
+    "backup_count": 4,
+    "recovery_gate_backup": {
+      "volid": "pbs-portage-engine:backup/vm/9400/2026-08-19T15:29:02Z",
+      "present": true,
+      "logical_size_bytes": 10737419400,
+      "server_verification": null,
+      "protected": null
+    },
+    "delete_or_prune_permission": false
+  },
+  "guest_agent_diagnostic": {
+    "source_template": {
+      "vmid": 9002,
+      "node": "infra-node1",
+      "name": "prod-debian-12-server-template",
+      "agent_declared": true
+    },
+    "disposable_vmid": 9400,
+    "ssh_ready_while_cloud_init_package_manager_active": true,
+    "virtio_guest_agent_port_present": true,
+    "qemu_guest_agent_service_active": true,
+    "pve_guest_ping_after_readiness_wait": "passed",
+    "pve_get_fsinfo": "unsupported_http_501",
+    "backup_repeated": false,
+    "source_template_modified": false,
+    "disposable_vm_absence_readback": true,
+    "interpretation": "guest-ping readiness and optional filesystem enumeration are separate capabilities; a recovery gate must wait for guest-ping and must not infer application consistency from SSH readiness"
+  },
+  "remaining_live_inputs": [
+    "a schema-version 2 desktop image generation with locked fixtures",
+    "an immutable signed GTK, Qt and WebView candidate plus approved primary fingerprint",
+    "a reviewed distcc compile-worker image and exact compiler identity",
+    "an isolated lease-enforced distcc network and at least two concurrent jobs",
+    "a production PostgreSQL deployment, scheduled backup policy and server-side PBS verification",
+    "PBS Datastore.Modify or Datastore.Prune authority for the exact disposable backup"
+  ],
+  "not_run_reasons": [
+    "no distcc or compile-worker resource exists in PVE",
+    "the only desktop verifier template is still schema version 1",
+    "PVE has no scheduled backup job",
+    "the current account cannot verify or remove the retained PBS drill backup",
+    "no production PostgreSQL deployment or DSN was supplied"
+  ]
+}
