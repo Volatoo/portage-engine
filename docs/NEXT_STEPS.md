@@ -359,7 +359,14 @@ distcc 应作为独立里程碑，不能直接打开全局开关。
   `evidence/pve/desktop-matrix-readiness-audit-20260814.json`。现场继续前必须构建新桌面
   generation，并提供签名 GTK/Qt/WebView candidate manifest 与独立批准的主密钥指纹。
   2026-08-20 只读回读确认 VMID145 仍是同一个 `desktop-g6` schema-v1 模板，见
-  `evidence/pve/live-readiness-refresh-20260820.json`。
+  `evidence/pve/live-readiness-refresh-20260820.json`。同日进一步用一次性 linked clone
+  VMID9402 核对来宾：三种 GUI 包、两份 fixture 与 `assert-image`/`launch-fixture`
+  均缺失；clone 已删除且 VMID145 保持 stopped。追溯还确认 g6/g6-base 的最终
+  image manifest 不在来宾、工作区、内网镜像或 PBS，前代 VMID144 已被删除并复用，
+  所以不能安全猜造 successor provenance。现场结果见
+  `evidence/pve/desktop-schema2-readiness-audit-20260820.json`。仓库已让后续 output stamp
+  内嵌并回读校验原始 manifest bytes，并提供 digest 绑定的 PVE 恢复命令；既有 g6
+  仍必须由受保护的原始制品恢复，或从具备完整 manifest 的可信 base 新建 generation。
 - [ ] 基线稳定后再扩展 KDE/GNOME 模板。
 - [x] 视觉 AI 只用于失败 triage 和候选 selector/needle 建议，不作为 release
   oracle。

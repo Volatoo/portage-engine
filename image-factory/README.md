@@ -408,7 +408,21 @@ and output stamping writes then reads back the disabled value.
 
 The base candidate initially carries the locked BuildPlan digest. After its
 Terraform smoke succeeds and the disposable VM is destroyed, the smoke runner
-stamps the PVE template with the exact generated image-manifest file digest.
+stamps the PVE template with the exact generated image-manifest file digest and
+a bounded base64url copy of those exact file bytes. `source-check` re-hashes and
+validates that recoverable copy for every image-derived build; a digest-only
+legacy stamp is not sufficient. Retain the normal evidence copy. If that copy
+is lost but the template and independently reviewed output-stamp evidence
+remain, recover it without reformatting:
+
+```bash
+portage-image-factory pve-manifest-recover \
+  -common image-factory/common.local.json \
+  -template pe-gentoo-amd64-no-multilib-base-g1 \
+  -expected-digest sha256:<output-stamp-manifest-digest> \
+  -output /srv/recovery/base-systemd.image-manifest.json
+```
+
 Before building `desktop-verifier`, copy that base manifest to
 `offline-root/images/`, set the desktop plan's `source_vmid` to the accepted
 base VMID, and rebuild the lock. The desktop plan references

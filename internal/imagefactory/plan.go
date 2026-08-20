@@ -755,6 +755,10 @@ func validateSourceImageManifest(path string, plan *BuildPlan) error {
 	if err != nil {
 		return fmt.Errorf("load source image manifest: %w", err)
 	}
+	return validateSourceImageManifestValue(manifest, plan)
+}
+
+func validateSourceImageManifestValue(manifest *ImageManifest, plan *BuildPlan) error {
 	if plan == nil {
 		return fmt.Errorf("source image requires a BuildPlan")
 	}
@@ -983,9 +987,18 @@ func CheckPVESource(ctx context.Context, common *CommonConfig, plan *BuildPlan, 
 			return fmt.Errorf("PVE source VMID %d display model %q does not match approved %q", plan.SourceVMID, actualDisplay, plan.SourceDisplayModel)
 		}
 	}
-	marker := "portage-engine-provenance=" + evidence.SourceProvenanceDigest
-	if !strings.Contains(payload.Data.Description, marker) {
-		return fmt.Errorf("PVE source template lacks approved provenance marker %q", marker)
+	provenance, err := pveDescriptionField(payload.Data.Description, pveProvenanceField)
+	if err != nil || provenance != evidence.SourceProvenanceDigest {
+		return fmt.Errorf("PVE source template lacks approved provenance marker %q", pveProvenanceField+"="+evidence.SourceProvenanceDigest)
+	}
+	if expectedSourceObjectKind(plan) == "image-manifest" {
+		recovered, _, err := decodePVEManifestDescription(payload.Data.Description, evidence.SourceProvenanceDigest)
+		if err != nil {
+			return fmt.Errorf("PVE source template lacks a recoverable approved image manifest: %w", err)
+		}
+		if err := validateSourceImageManifestValue(recovered, plan); err != nil {
+			return fmt.Errorf("recoverable PVE source image manifest does not match the BuildPlan: %w", err)
+		}
 	}
 	if common.ProxmoxHostMemoryHeadroomMB > 0 {
 		var status struct {
@@ -1019,7 +1032,7 @@ func StampPVEOutput(ctx context.Context, common *CommonConfig, manifest *ImageMa
 	if username == "" || token == "" {
 		return nil, fmt.Errorf("PVE token credentials are required")
 	}
-	manifestDigest, err := digestFile(manifestPath)
+	description, markerDigest, err := stampedPVEManifestDescription(manifest, manifestPath)
 	if err != nil {
 		return nil, err
 	}
@@ -1063,8 +1076,6 @@ func StampPVEOutput(ctx context.Context, common *CommonConfig, manifest *ImageMa
 	if matches != 1 || vmid < 100 || node == "" {
 		return nil, fmt.Errorf("expected exactly one PVE template named %q, found %d", manifest.Template, matches)
 	}
-	markerDigest := "sha256:" + manifestDigest
-	description := fmt.Sprintf("Portage Engine candidate %s | portage-engine-provenance=%s | portage-engine-image=%s", manifest.ImageID, markerDigest, manifest.ImageDigest)
 	// PVE's default ciupgrade=1 makes cloud-init run a distribution package
 	// update on first boot. That is an uncontrolled network mutation on Gentoo,
 	// so make the disabled state part of the stamped template contract.

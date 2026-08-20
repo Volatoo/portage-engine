@@ -119,6 +119,13 @@ func LoadImageManifest(path string) (*ImageManifest, error) {
 	if err := decodeStrictFile(path, &manifest); err != nil {
 		return nil, err
 	}
+	return validateLoadedImageManifest(&manifest)
+}
+
+func validateLoadedImageManifest(manifest *ImageManifest) (*ImageManifest, error) {
+	if manifest == nil {
+		return nil, fmt.Errorf("candidate image manifest is incomplete")
+	}
 	if manifest.SchemaVersion != 1 || manifest.CreatedAt.IsZero() || manifest.PackerArtifactID == "" ||
 		!repoComponentPattern.MatchString(manifest.ProfileRepository) || manifest.Repositories[manifest.ProfileRepository] == "" || (manifest.ProfileRepository == "gentoo" && len(manifest.ProfileParents) != 0) || (manifest.ProfileRepository != "gentoo" && len(manifest.ProfileParents) == 0) ||
 		!prefixedSHA256Pattern.MatchString(manifest.ImageDigest) || !prefixedSHA256Pattern.MatchString(manifest.InputLockDigest) ||
@@ -127,7 +134,7 @@ func LoadImageManifest(path string) (*ImageManifest, error) {
 		!prefixedSHA256Pattern.MatchString(manifest.RootfsManifestDigest) || !prefixedSHA256Pattern.MatchString(manifest.PackageSetCatalogDigest) || len(manifest.PackageSets) == 0 {
 		return nil, fmt.Errorf("candidate image manifest is incomplete")
 	}
-	return &manifest, nil
+	return manifest, nil
 }
 
 func (m *ImageManifest) ValidateForPlan(plan *BuildPlan) error {
