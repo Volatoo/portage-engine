@@ -22,8 +22,9 @@ func validCatalog() *Catalog {
 			LegacyProfiles:      []string{"default/linux/amd64/23.0"},
 			RepositoryIDs:       []string{"gentoo", "pe-profiles"}, ImageID: "image/base-g1",
 			MirrorBundleID: "mirror/2026-07-22", DefaultResourceClass: "small",
-			EgressPolicyID: "egress/internal",
-			Default:        true, Channel: "stable",
+			RequiredFeatures: []string{"binpkg-multi-instance", "sandbox", "userpriv"},
+			EgressPolicyID:   "egress/internal",
+			Default:          true, Channel: "stable",
 		}},
 		Repositories: []RepositoryDefinition{{
 			ID: "gentoo", Name: "gentoo", Location: "/var/db/repos/gentoo",
@@ -85,6 +86,9 @@ func TestCatalogResolve(t *testing.T) {
 	}
 	if len(ctx.PackageSetIDs) != 2 || ctx.PackageSetCatalogDigest != testDigest {
 		t.Fatalf("package sets not resolved: %+v", ctx)
+	}
+	if strings.Join(ctx.RequiredFeatures, " ") != "binpkg-multi-instance sandbox userpriv" {
+		t.Fatalf("required Portage FEATURES not resolved: %+v", ctx.RequiredFeatures)
 	}
 	if ctx.EgressPolicy.ID != "egress/internal" || !strings.HasPrefix(ctx.EgressPolicyDigest, "sha256:") {
 		t.Fatalf("egress policy not resolved: %+v", ctx)
@@ -194,6 +198,9 @@ func TestCatalogRejectsUnsafeExecutionMetadata(t *testing.T) {
 			c.Profiles[0].RepositoryIDs = append(c.Profiles[0].RepositoryIDs, "gentoo/other")
 		}},
 		{name: "image profile mismatch", mutate: func(c *Catalog) { c.Images[0].ProfileID = "pe/amd64/other" }},
+		{name: "missing required features", mutate: func(c *Catalog) { c.Profiles[0].RequiredFeatures = nil }},
+		{name: "unsorted required features", mutate: func(c *Catalog) { c.Profiles[0].RequiredFeatures = []string{"userpriv", "sandbox"} }},
+		{name: "duplicate required features", mutate: func(c *Catalog) { c.Profiles[0].RequiredFeatures = []string{"sandbox", "sandbox"} }},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

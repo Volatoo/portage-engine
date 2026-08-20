@@ -3383,6 +3383,9 @@ func (m *Manager) resolveBuildRequest(req *BuildRequest) error {
 		})
 	}
 	req.ConfigBundle.Metadata.TargetArch = resolved.Arch
+	req.ConfigBundle.Metadata.RequiredFeatures = append(
+		[]string(nil), resolved.RequiredFeatures...,
+	)
 	if req.ConfigBundle.Config != nil {
 		repos := make([]RepoConfig, 0, len(resolved.Repositories))
 		for _, repo := range resolved.Repositories {

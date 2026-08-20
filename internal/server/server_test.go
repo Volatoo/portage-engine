@@ -206,6 +206,13 @@ func TestCatalogBinhostStoresAndInventory(t *testing.T) {
 	if inventory.Binhosts[0].SyncPath != "/binpkgs/"+inventory.Binhosts[0].BinhostPath {
 		t.Fatalf("sync path does not bind the profile namespace: %#v", inventory.Binhosts[0])
 	}
+	profile := inventory.Binhosts[0]
+	if profile.Channel != "candidate" || profile.ImageDigest == "" ||
+		profile.MirrorBundleDigest == "" || profile.ResourceClass != "medium" ||
+		strings.Join(profile.RequiredFeatures, " ") != "binpkg-multi-instance sandbox userpriv" ||
+		strings.Join(profile.RepositoryNames, " ") != "gentoo pe-profiles" {
+		t.Fatalf("inventory omitted target binding metadata: %#v", profile)
+	}
 }
 
 // TestRouter tests the HTTP router setup.

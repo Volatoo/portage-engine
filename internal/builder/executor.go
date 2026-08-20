@@ -211,6 +211,9 @@ func (be *BuildExecutor) buildEnvironment(pkg PackageSpec, bundle *ConfigBundle,
 
 	// Collect any user-supplied FEATURES so we extend rather than clobber them.
 	features := map[string]bool{"buildpkg": true}
+	for _, feature := range bundle.Metadata.RequiredFeatures {
+		features[feature] = true
+	}
 
 	appendUserEnv := func(m map[string]string) {
 		for key, value := range m {

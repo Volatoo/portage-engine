@@ -18,6 +18,7 @@
       "image_id": "pe/amd64/base-g1",
       "mirror_bundle_id": "mirror/candidate-2026-07-22",
       "default_resource_class": "medium",
+	  "required_features": ["binpkg-multi-instance", "sandbox", "userpriv"],
       "egress_policy_id": "egress/candidate-internal",
       "default": true,
       "channel": "candidate"
@@ -38,6 +39,7 @@
       "image_id": "pe/amd64/desktop-verifier-g1",
       "mirror_bundle_id": "mirror/candidate-2026-07-22",
       "default_resource_class": "medium",
+	  "required_features": ["binpkg-multi-instance", "sandbox", "userpriv"],
       "egress_policy_id": "egress/candidate-internal",
       "channel": "candidate"
     }

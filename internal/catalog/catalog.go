@@ -64,6 +64,7 @@ type ProfileDefinition struct {
 	ImageID              string                    `json:"image_id"`
 	MirrorBundleID       string                    `json:"mirror_bundle_id"`
 	DefaultResourceClass string                    `json:"default_resource_class,omitempty"`
+	RequiredFeatures     []string                  `json:"required_features,omitempty"`
 	EgressPolicyID       string                    `json:"egress_policy_id"`
 	Default              bool                      `json:"default,omitempty"`
 	Channel              string                    `json:"channel"`
@@ -171,6 +172,7 @@ type ResolvedBuildContext struct {
 	MirrorBundleDigest           string                  `json:"mirror_bundle_digest,omitempty"`
 	MirrorBundleChannel          string                  `json:"mirror_bundle_channel"`
 	ResourceClass                string                  `json:"resource_class,omitempty"`
+	RequiredFeatures             []string                `json:"required_features,omitempty"`
 	MachineSpec                  map[string]string       `json:"machine_spec,omitempty"`
 	MaxRuntimeMinutes            int                     `json:"max_runtime_minutes"`
 	CloudCostMicrounitsPerMinute int64                   `json:"cloud_cost_microunits_per_minute"`
@@ -577,6 +579,7 @@ func (c *Catalog) ResolveAt(req ResolveRequest, now time.Time) (*ResolvedBuildCo
 		MirrorBundleDigest:           bundle.Digest,
 		MirrorBundleChannel:          bundle.Channel,
 		ResourceClass:                resourceClass,
+		RequiredFeatures:             append([]string(nil), profile.RequiredFeatures...),
 		MachineSpec:                  machineSpec,
 		MaxRuntimeMinutes:            maxRuntimeMinutes,
 		CloudCostMicrounitsPerMinute: cloudCostMicrounitsPerMinute,
@@ -621,6 +624,9 @@ func (c *Catalog) validateProfile(p *ProfileDefinition) error {
 	if !validChannel(p.Channel) {
 		return fmt.Errorf("invalid channel %q", p.Channel)
 	}
+	if err := validateRequiredFeatures(p.RequiredFeatures, p.Channel); err != nil {
+		return err
+	}
 	if err := c.validateProfileBindings(p); err != nil {
 		return err
 	}
@@ -641,6 +647,21 @@ func (c *Catalog) validateProfile(p *ProfileDefinition) error {
 	for _, legacy := range p.LegacyProfiles {
 		if !idPattern.MatchString(legacy) {
 			return fmt.Errorf("invalid legacy profile %q", legacy)
+		}
+	}
+	return nil
+}
+
+func validateRequiredFeatures(features []string, channel string) error {
+	if channel != "compatibility" && len(features) == 0 {
+		return fmt.Errorf("candidate/stable profile requires required_features")
+	}
+	for index, feature := range features {
+		if !repoNameRegex.MatchString(feature) {
+			return fmt.Errorf("invalid required Portage feature %q", feature)
+		}
+		if index > 0 && features[index-1] >= feature {
+			return fmt.Errorf("required_features must be sorted and unique")
 		}
 	}
 	return nil

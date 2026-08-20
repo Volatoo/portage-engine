@@ -88,8 +88,9 @@ func TestSubmitBuildResolvesServerOwnedCatalogInputs(t *testing.T) {
 			BinhostPath:         "releases/amd64/binpackages/23.0/x86-64",
 			ProfileRepositoryID: "gentoo", RepositoryIDs: []string{"gentoo"}, ImageID: "pve/amd64-001",
 			MirrorBundleID: "offline/001", DefaultResourceClass: "small",
-			EgressPolicyID: "egress/internal",
-			Default:        true, Channel: "stable",
+			RequiredFeatures: []string{"binpkg-multi-instance", "sandbox", "userpriv"},
+			EgressPolicyID:   "egress/internal",
+			Default:          true, Channel: "stable",
 		}},
 		Repositories: []catalog.RepositoryDefinition{{
 			ID: "gentoo", Name: "gentoo", Location: "/var/db/repos/gentoo",
@@ -121,6 +122,7 @@ func TestSubmitBuildResolvesServerOwnedCatalogInputs(t *testing.T) {
 	mgr.SetBuildCatalog(c)
 
 	bundle := validSecurityTestBundle()
+	bundle.Metadata.RequiredFeatures = []string{"test"}
 	bundle.Config.Repos[0].RegistryID = "gentoo"
 	bundle.Config.Repos[0].SyncURI = "https://client.example/untrusted-but-valid.git"
 	req := &BuildRequest{
@@ -136,6 +138,9 @@ func TestSubmitBuildResolvesServerOwnedCatalogInputs(t *testing.T) {
 	}
 	if got := req.ConfigBundle.Config.Repos[0].Revision; got != "0123456789abcdef0123456789abcdef01234567" {
 		t.Fatalf("repository revision was not pinned: %q", got)
+	}
+	if got := strings.Join(req.ConfigBundle.Metadata.RequiredFeatures, " "); got != "binpkg-multi-instance sandbox userpriv" {
+		t.Fatalf("client feature policy was not replaced by catalog policy: %q", got)
 	}
 	status, err := mgr.GetStatus(jobID)
 	if err != nil {

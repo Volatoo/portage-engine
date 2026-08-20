@@ -353,6 +353,14 @@ func validateMetadata(metadata BundleMetadata) error {
 	if len(metadata.Description) > maxMetadataDescription || !validDisplayText(metadata.Description) {
 		return fmt.Errorf("invalid bundle description")
 	}
+	for index, feature := range metadata.RequiredFeatures {
+		if !repoNamePattern.MatchString(feature) {
+			return fmt.Errorf("invalid required Portage feature %q", feature)
+		}
+		if index > 0 && metadata.RequiredFeatures[index-1] >= feature {
+			return fmt.Errorf("required Portage features must be sorted and unique")
+		}
+	}
 	return nil
 }
 

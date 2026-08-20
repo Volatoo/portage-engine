@@ -66,6 +66,20 @@ func TestBuildEnvironment_UserCannotEnableSigning(t *testing.T) {
 	}
 }
 
+func TestBuildEnvironmentIncludesCatalogRequiredFeatures(t *testing.T) {
+	be := NewBuildExecutorWithOptions("/work", "/art", BuildOptions{Format: "gpkg"})
+	bundle := &ConfigBundle{
+		Config: &PortageConfig{},
+		Metadata: BundleMetadata{RequiredFeatures: []string{
+			"binpkg-multi-instance", "sandbox", "userpriv",
+		}},
+	}
+	env := envMap(be.buildEnvironment(PackageSpec{Atom: "app-misc/jq"}, bundle, "/work/packages", ""))
+	if env["FEATURES"] != "binpkg-multi-instance buildpkg sandbox userpriv" {
+		t.Fatalf("FEATURES = %q, want catalog policy plus buildpkg", env["FEATURES"])
+	}
+}
+
 func TestBuildEnvironment_XpakIsUnsigned(t *testing.T) {
 	be := NewBuildExecutorWithOptions("/work", "/art", BuildOptions{Format: "xpak"})
 	bundle := &ConfigBundle{Config: &PortageConfig{}}

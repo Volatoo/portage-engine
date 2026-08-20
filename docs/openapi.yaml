@@ -229,6 +229,12 @@ components:
         arch: {type: string}
         profile_path: {type: string}
         channel: {type: string}
+        repository_ids: {type: array, items: {type: string}}
+        repository_names: {type: array, items: {type: string}}
+        resource_class: {type: string}
+        required_features: {type: array, items: {type: string}}
+        image_digest: {type: string, pattern: '^sha256:[0-9a-f]{64}$'}
+        mirror_bundle_digest: {type: string, pattern: '^sha256:[0-9a-f]{64}$'}
         binhost_path: {type: string}
         sync_path: {type: string}
         default: {type: boolean}

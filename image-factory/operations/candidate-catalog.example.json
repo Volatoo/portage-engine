@@ -3,6 +3,7 @@
   "catalog_version": 1,
   "default_profile_id": "pe/amd64/no-multilib/systemd/base-v2",
   "default_resource_class": "medium",
+  "required_features": ["binpkg-multi-instance", "sandbox", "userpriv"],
   "default_egress_policy_id": "egress/candidate-internal",
   "resource_classes": [
     {

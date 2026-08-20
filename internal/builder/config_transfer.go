@@ -75,6 +75,7 @@ type BundleMetadata struct {
 	ProfileRepositoryID   string             `json:"profile_repository_id,omitempty"`
 	ProfileRepositoryName string             `json:"profile_repository_name,omitempty"`
 	ProfileParents        []ProfileParentRef `json:"profile_parents,omitempty"`
+	RequiredFeatures      []string           `json:"required_features,omitempty"`
 	CreatedAt             string             `json:"created_at"`
 	Description           string             `json:"description,omitempty"`
 }
