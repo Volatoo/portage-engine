@@ -24,34 +24,35 @@ func main() {
 		os.Exit(2)
 	}
 	commands := map[string]func([]string){
-		"preflight":         runPreflight,
-		"lock-materialize":  runLockMaterialize,
-		"plan":              runPlan,
-		"source-check":      runSourceCheck,
-		"pbs-attest":        runPBSAttest,
-		"pbs-stamp-source":  runPBSStampSource,
-		"manifest":          runManifest,
-		"catalog-assemble":  runCatalogAssemble,
-		"smoke-config":      runSmokeConfig,
-		"guest-ip":          runGuestIP,
-		"guest-host-key":    runGuestHostKey,
-		"stamp-output":      runStampOutput,
-		"catalyst-plan":     runCatalystPlan,
-		"catalyst-gate":     runCatalystGate,
-		"catalyst-manifest": runCatalystManifest,
-		"qcow2-manifest":    runQCOW2Manifest,
-		"qcow2-check":       runQCOW2Check,
-		"ops-keygen":        runOpsKeygen,
-		"bundle-seal":       runBundleSeal,
-		"bundle-verify":     runBundleVerify,
-		"ops-digest":        runOpsDigest,
-		"promote":           runPromote,
-		"rollback":          runRollback,
-		"cleanup-plan":      runCleanupPlan,
-		"state-sign":        runStateSign,
-		"rebuild-plan":      runRebuildPlan,
-		"status-compile":    runStatusCompile,
-		"package-sets":      runPackageSets,
+		"preflight":            runPreflight,
+		"lock-materialize":     runLockMaterialize,
+		"plan":                 runPlan,
+		"source-check":         runSourceCheck,
+		"pbs-attest":           runPBSAttest,
+		"pbs-stamp-source":     runPBSStampSource,
+		"manifest":             runManifest,
+		"catalog-assemble":     runCatalogAssemble,
+		"smoke-config":         runSmokeConfig,
+		"guest-ip":             runGuestIP,
+		"guest-host-key":       runGuestHostKey,
+		"stamp-output":         runStampOutput,
+		"pve-manifest-recover": runPVEManifestRecover,
+		"catalyst-plan":        runCatalystPlan,
+		"catalyst-gate":        runCatalystGate,
+		"catalyst-manifest":    runCatalystManifest,
+		"qcow2-manifest":       runQCOW2Manifest,
+		"qcow2-check":          runQCOW2Check,
+		"ops-keygen":           runOpsKeygen,
+		"bundle-seal":          runBundleSeal,
+		"bundle-verify":        runBundleVerify,
+		"ops-digest":           runOpsDigest,
+		"promote":              runPromote,
+		"rollback":             runRollback,
+		"cleanup-plan":         runCleanupPlan,
+		"state-sign":           runStateSign,
+		"rebuild-plan":         runRebuildPlan,
+		"status-compile":       runStatusCompile,
+		"package-sets":         runPackageSets,
 	}
 	command, ok := commands[os.Args[1]]
 	if !ok {
@@ -577,6 +578,31 @@ func runStampOutput(args []string) {
 	fmt.Printf("stamped PVE template %s with %s\n", evidence.Template, evidence.ManifestDigest)
 }
 
+func runPVEManifestRecover(args []string) {
+	fs := flag.NewFlagSet("pve-manifest-recover", flag.ExitOnError)
+	commonPath := fs.String("common", "", "Site-local common config JSON")
+	template := fs.String("template", "", "Exact PVE template name")
+	expectedDigest := fs.String("expected-digest", "", "Reviewed sha256: image-manifest file digest")
+	output := fs.String("output", "", "Recovered image-manifest output path")
+	_ = fs.Parse(args)
+	if *commonPath == "" || *template == "" || *expectedDigest == "" || *output == "" {
+		log.Fatal("pve-manifest-recover requires -common, -template, -expected-digest, and -output")
+	}
+	common, err := imagefactory.LoadCommonConfig(*commonPath)
+	if err != nil {
+		log.Fatal(err)
+	}
+	recovered, err := imagefactory.RecoverPVEOutputManifest(context.Background(), common, *template, *expectedDigest,
+		os.Getenv("PKR_VAR_proxmox_username"), os.Getenv("PKR_VAR_proxmox_token"))
+	if err != nil {
+		log.Fatal(err)
+	}
+	if err := imagefactory.WriteTextAtomic(*output, string(recovered.RawManifest)); err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("recovered %s from PVE VMID %d on %s (%s)\n", *output, recovered.VMID, recovered.Node, recovered.ManifestDigest)
+}
+
 func runSmokeConfig(args []string) {
 	fs := flag.NewFlagSet("smoke-config", flag.ExitOnError)
 	commonPath := fs.String("common", "", "Site-local common config JSON")
@@ -869,5 +895,5 @@ func runStatusCompile(args []string) {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: portage-image-factory <preflight|lock-materialize|plan|source-check|pbs-attest|pbs-stamp-source|manifest|catalog-assemble|smoke-config|guest-ip|guest-host-key|stamp-output|catalyst-plan|catalyst-gate|catalyst-manifest|qcow2-manifest|qcow2-check|ops-keygen|bundle-seal|bundle-verify|ops-digest|promote|rollback|state-sign|cleanup-plan|rebuild-plan|status-compile|package-sets> [flags]")
+	fmt.Fprintln(os.Stderr, "usage: portage-image-factory <preflight|lock-materialize|plan|source-check|pbs-attest|pbs-stamp-source|manifest|catalog-assemble|smoke-config|guest-ip|guest-host-key|stamp-output|pve-manifest-recover|catalyst-plan|catalyst-gate|catalyst-manifest|qcow2-manifest|qcow2-check|ops-keygen|bundle-seal|bundle-verify|ops-digest|promote|rollback|state-sign|cleanup-plan|rebuild-plan|status-compile|package-sets> [flags]")
 }

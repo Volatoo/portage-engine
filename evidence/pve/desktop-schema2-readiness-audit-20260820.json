@@ -1,0 +1,84 @@
+{
+  "schema_version": 1,
+  "observed_at": "2026-08-20T07:09:22Z",
+  "environment": "isolated-private-pve-gate",
+  "pve_version": "9.2.10",
+  "gate": "desktop-schema2-successor-readiness",
+  "result": "not_run",
+  "source_template": {
+    "vmid": 145,
+    "node": "infra-node4",
+    "name": "pe-gentoo-amd64-no-multilib-desktop-verifier-g6",
+    "template": true,
+    "status_after_audit": "stopped",
+    "image_id": "pe/amd64/no-multilib/desktop-verifier-g6",
+    "image_generation": "desktop-g6",
+    "build_plan_schema_version": 1,
+    "display_model": "qxl",
+    "image_digest": "sha256:2005cc2760994e843bdc8af64a35a7fe160fbbc9fe06db88afb6e2a7c63e8b6b",
+    "manifest_file_digest": "sha256:a33b6cc008033452f22d7ee84b6dc1d57025ea6414142737a219e58003b2ac67",
+    "guest_agent_sha256": "f195b35d48a2db49df3f1327fc448f4ae4d92174088c6c4455c1fe928ddd15ea"
+  },
+  "audit_clone": {
+    "vmid": 9402,
+    "node": "infra-node4",
+    "name": "portage-desktop-schema2-audit-9402",
+    "clone_type": "same-node-linked",
+    "source_mutated": false,
+    "network_change": "runtime-only-disposable-static-address"
+  },
+  "guest_readback": {
+    "assert_image": false,
+    "launch_fixture": false,
+    "dump_accessibility": true,
+    "evidence_info": true,
+    "read_evidence": true,
+    "editor_fixture_present": false,
+    "webview_fixture_present": false,
+    "mousepad_installed": false,
+    "featherpad_installed": false,
+    "surf_installed": false
+  },
+  "provenance_recovery": {
+    "final_manifest_in_guest": false,
+    "final_manifest_in_workspace": false,
+    "final_manifest_on_visible_internal_mirror": false,
+    "pbs_backups_for_vmid_145": 0,
+    "historical_source_vmid": 144,
+    "historical_source_vmid_still_available": false,
+    "historical_source_vmid_reused": true,
+    "base_vmid": 141,
+    "base_has_digest_only_legacy_stamp": true,
+    "recoverable_exact_manifest_bytes_available": false
+  },
+  "not_run_reasons": [
+    "the accepted desktop-g6 template predates the schema-version 2 guest contract and lacks the required applications and locked fixtures",
+    "the exact accepted image-manifest file is unavailable, so a successor manifest cannot be reconstructed without fabricating provenance",
+    "no independently approved candidate signing fingerprint and signed GTK/Qt/WebView candidate were supplied"
+  ],
+  "repository_remediation": {
+    "future_output_stamp_embeds_exact_manifest_bytes": true,
+    "future_image_source_check_requires_recoverable_manifest": true,
+    "digest_bound_recovery_command_added": true,
+    "legacy_digest_only_templates_remain_fail_closed": true
+  },
+  "repository_validation": {
+    "imagefactory_unit": "pass",
+    "imagefactory_race": "pass",
+    "full_go_test_after_web_build": "pass",
+    "golangci_lint": "pass",
+    "gosec": "pass",
+    "complexity": "pass",
+    "web_lint": "pass",
+    "web_tests": "389_pass"
+  },
+  "cleanup": {
+    "audit_clone_vmid": 9402,
+    "stop_task_state": "OK",
+    "delete_task_state": "OK",
+    "pve_absence_readback": true,
+    "source_template_preserved": true,
+    "source_template_status": "stopped",
+    "credentials_persisted": false
+  }
+}

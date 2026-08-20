@@ -462,16 +462,17 @@ func TestStampPVEOutputBindsManifestDigest(t *testing.T) {
 			}
 			stampedDescription = r.Form.Get("description")
 			putSeen = strings.Contains(stampedDescription, "portage-engine-provenance=sha256:") &&
+				strings.Contains(stampedDescription, pveManifestField+"=") &&
 				r.Form.Get("ciupgrade") == "0" && r.Form.Get("ciuser") == "root" && r.Form.Get("ipconfig0") == "ip=dhcp"
 			_, _ = w.Write([]byte(`{"data":null}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/api2/json/nodes/pve01/qemu/9200/config":
-			_, _ = fmt.Fprintf(w, `{"data":{"description":%q,"ciupgrade":0,"ciuser":"root","ipconfig0":"ip=dhcp","vga":"memory=64,type=std"}}`, stampedDescription)
+			_, _ = fmt.Fprintf(w, `{"data":{"name":"pe-base-g1","template":1,"description":%q,"ciupgrade":0,"ciuser":"root","ipconfig0":"ip=dhcp","vga":"memory=64,type=std"}}`, stampedDescription)
 		default:
 			http.NotFound(w, r)
 		}
 	}))
 	defer server.Close()
-	manifest := &ImageManifest{SchemaVersion: 1, ImageID: "pe/amd64/base-g1", Template: "pe-base-g1", ImageDigest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", PackerArtifactID: "9200", DisplayModel: "std"}
+	manifest := stampedTestImageManifest("pe/amd64/base-g1", "pe-base-g1", "std")
 	manifestPath := writeTestJSON(t, t.TempDir(), "manifest.json", manifest)
 	common := &CommonConfig{ProxmoxURL: server.URL + "/api2/json", ProxmoxNode: "pve01", ProxmoxInsecure: true}
 	evidence, err := StampPVEOutput(context.Background(), common, manifest, manifestPath, "user@pve!factory", "secret")
@@ -480,6 +481,17 @@ func TestStampPVEOutputBindsManifestDigest(t *testing.T) {
 	}
 	if !putSeen || !evidence.Verified || evidence.VMID != 9200 {
 		t.Fatalf("output was not stamped: %+v", evidence)
+	}
+	recovered, err := RecoverPVEOutputManifest(context.Background(), common, manifest.Template, evidence.ManifestDigest, "user@pve!factory", "secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantRaw, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(recovered.RawManifest, wantRaw) || recovered.Manifest.Template != manifest.Template || recovered.VMID != 9200 {
+		t.Fatalf("unexpected recovered manifest: %+v", recovered)
 	}
 }
 
@@ -497,7 +509,7 @@ func TestStampPVEOutputRejectsReadBackDrift(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	manifest := &ImageManifest{SchemaVersion: 1, ImageID: "pe/amd64/base-g1", Template: "pe-base-g1", ImageDigest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", PackerArtifactID: "9200"}
+	manifest := stampedTestImageManifest("pe/amd64/base-g1", "pe-base-g1", "std")
 	manifestPath := writeTestJSON(t, t.TempDir(), "manifest.json", manifest)
 	common := &CommonConfig{ProxmoxURL: server.URL + "/api2/json", ProxmoxNode: "pve01", ProxmoxInsecure: true}
 	if _, err := StampPVEOutput(context.Background(), common, manifest, manifestPath, "user@pve!factory", "secret"); err == nil || !strings.Contains(err.Error(), "read-back mismatch") {
@@ -537,11 +549,63 @@ func TestStampPVEOutputRejectsVGADrift(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	manifest := &ImageManifest{SchemaVersion: 1, ImageID: "pe/amd64/desktop-g1", Template: "pe-desktop-g1", ImageDigest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", PackerArtifactID: "9200", DisplayModel: "qxl"}
+	manifest := stampedTestImageManifest("pe/amd64/desktop-g1", "pe-desktop-g1", "qxl")
 	manifestPath := writeTestJSON(t, t.TempDir(), "manifest.json", manifest)
 	common := &CommonConfig{ProxmoxURL: server.URL + "/api2/json", ProxmoxNode: "pve01", ProxmoxInsecure: true}
 	if _, err := StampPVEOutput(context.Background(), common, manifest, manifestPath, "user@pve!factory", "secret"); err == nil || !strings.Contains(err.Error(), "read-back mismatch") {
 		t.Fatalf("accepted drifted PVE VGA: %v", err)
+	}
+}
+
+func stampedTestImageManifest(imageID, template, displayModel string) *ImageManifest {
+	digest := "sha256:" + strings.Repeat("a", 64)
+	return &ImageManifest{
+		SchemaVersion: 1, CreatedAt: time.Unix(100, 0).UTC(), Target: "base-systemd", ImageID: imageID, Generation: "g1",
+		Provider: "pve", Arch: "amd64", BuildMode: "native-gentoo", SourceTemplate: "seed", SourceVMID: 9000,
+		SourceProvenanceObjectID: "seed/test", SourceProvenanceDigest: digest, Template: template, ProfileID: "pe/amd64/base-v1",
+		ProfilePath: "default/linux/amd64/23.0/systemd", ProfileRepository: "gentoo", PackageSets: []string{"pe/runtime-v1"},
+		PackageSetCatalogDigest: digest, MirrorBundleID: "mirror/test", Repositories: map[string]string{"gentoo": strings.Repeat("1", 40)},
+		RootfsSource: "approved-qcow2", DisplayModel: displayModel, Channel: "candidate", InputLockDigest: digest,
+		CommonConfigDigest: digest, BuildPlanDigest: digest, PackerManifestDigest: digest, PackerArtifactID: "9200",
+		ImageDigest: digest, RootfsManifestDigest: digest,
+	}
+}
+
+func TestRecoverablePVEManifestRejectsTampering(t *testing.T) {
+	manifest := stampedTestImageManifest("pe/amd64/base-g1", "pe-base-g1", "std")
+	manifestPath := writeTestJSON(t, t.TempDir(), "manifest.json", manifest)
+	description, digest, err := stampedPVEManifestDescription(manifest, manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tampered := strings.Replace(description, pveManifestField+"=", pveManifestField+"=A", 1)
+	if _, _, err := decodePVEManifestDescription(tampered, digest); err == nil {
+		t.Fatal("accepted a tampered recoverable PVE manifest")
+	}
+}
+
+func TestStampedPVEManifestRejectsDescriptionOverflow(t *testing.T) {
+	manifest := stampedTestImageManifest(strings.Repeat("a", maxPVEVMDescriptionBytes), "pe-base-g1", "std")
+	manifestPath := writeTestJSON(t, t.TempDir(), "manifest.json", manifest)
+	if _, _, err := stampedPVEManifestDescription(manifest, manifestPath); err == nil || !strings.Contains(err.Error(), "maximum") {
+		t.Fatalf("accepted a recoverable PVE stamp above the description limit: %v", err)
+	}
+}
+
+func TestCheckPVESourceRequiresRecoverableImageManifest(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("a", 64)
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"data":{"template":1,"name":"pe-base-g1","description":"approved | portage-engine-provenance=` + digest + `","ciupgrade":0,"ciuser":"root","ipconfig0":"ip=dhcp","vga":"std"}}`))
+	}))
+	defer server.Close()
+	plan := testBuildPlan()
+	plan.RootfsSource = "packer-base-image"
+	plan.SourceTemplate = "pe-base-g1"
+	plan.SourceDisplayModel = "std"
+	common := &CommonConfig{ProxmoxURL: server.URL, ProxmoxNode: "pve01", ProxmoxInsecure: true}
+	evidence := &PlanEvidence{SourceProvenanceDigest: digest}
+	if err := CheckPVESource(context.Background(), common, &plan, evidence, "user@pve!factory", "secret"); err == nil || !strings.Contains(err.Error(), "recoverable approved image manifest") {
+		t.Fatalf("accepted an image-derived PVE source without a recoverable manifest: %v", err)
 	}
 }
 

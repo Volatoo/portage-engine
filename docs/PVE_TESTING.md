@@ -522,7 +522,13 @@ without managing the NIC and SSH never becomes reachable.
 The output stamp writes and reads back both fields together with
 `ciupgrade=0`; Packer template conversion is not allowed to leave the
 successor/source contract implicit merely because Terraform sets the same
-values on a later clone.
+values on a later clone. The same stamp embeds a bounded base64url copy of the
+exact generated image-manifest bytes in the PVE description. Image-derived
+`source-check` verifies that the embedded bytes hash to the reviewed provenance
+digest, parse as the strict manifest schema, and match the successor BuildPlan.
+This is a recovery copy, not a new trust root: `pve-manifest-recover` requires
+the independently retained digest from output-stamp evidence, and the primary
+manifest still belongs in the immutable offline bundle/catalog evidence root.
 
 When PBS is the seed recovery store, acceptance requires more than a successful
 backup task: pin the PBS certificate fingerprint, use separate write and
