@@ -9,9 +9,21 @@ updates:
       timezone: Etc/UTC
     open-pull-requests-limit: 5
     groups:
+      # CodeQL stores one shared configuration between init/autobuild/analyze.
+      # Moving only one action across a major release makes the scan unloadable,
+      # so Dependabot must update the complete action family in one pull request.
+      codeql-actions:
+        patterns:
+          - "github/codeql-action/*"
+        update-types:
+          - major
+          - minor
+          - patch
       workflow-actions:
         patterns:
           - "*"
+        exclude-patterns:
+          - "github/codeql-action/*"
         update-types:
           - minor
           - patch

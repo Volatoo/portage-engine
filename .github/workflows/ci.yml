@@ -347,6 +347,7 @@ jobs:
   operational-gates:
     name: Recovery, public edge, and executor gates
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     services:
       # The executor gate's drain and live-work delete boundaries are SQL
       # decisions. Without a database here the case that carries them skips, and
@@ -381,10 +382,24 @@ jobs:
       - name: Install gate tooling
         run: |
           set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y ripgrep unzip
+          missing_packages=()
+          command -v rg >/dev/null 2>&1 || missing_packages+=(ripgrep)
+          command -v unzip >/dev/null 2>&1 || missing_packages+=(unzip)
+          if (( ${#missing_packages[@]} > 0 )); then
+            sudo timeout --kill-after=10s 5m apt-get \
+              -o Acquire::Retries=3 \
+              -o Acquire::http::Timeout=30 \
+              -o Acquire::https::Timeout=30 \
+              update
+            sudo timeout --kill-after=10s 5m apt-get \
+              -o Dpkg::Use-Pty=0 \
+              install -y --no-install-recommends "${missing_packages[@]}"
+          fi
           packer_archive="${RUNNER_TEMP}/packer_1.15.4_linux_amd64.zip"
-          curl --fail --location --silent --show-error \
+          timeout --kill-after=10s 5m curl \
+            --fail --location --silent --show-error \
+            --connect-timeout 15 --max-time 180 \
+            --retry 3 --retry-all-errors --retry-delay 2 \
             --output "${packer_archive}" \
             https://releases.hashicorp.com/packer/1.15.4/packer_1.15.4_linux_amd64.zip
           echo "15f97a6a99645c7d5308c609973b5280837b38e112beac413ccbce80da927cf1  ${packer_archive}" | \

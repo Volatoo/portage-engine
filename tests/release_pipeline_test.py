@@ -852,6 +852,36 @@ class ReleasePipelineStaticTest(unittest.TestCase):
             "a second CodeQL workflow splits the result category and leaves old alerts stale",
         )
 
+    def test_dependabot_updates_the_codeql_action_family_atomically(self) -> None:
+        dependabot = (ROOT / ".github" / "dependabot.yml").read_text(encoding="utf-8")
+        github_actions = dependabot.split("  - package-ecosystem: npm", 1)[0]
+        codeql_group = github_actions.split("      codeql-actions:\n", 1)[1].split(
+            "      workflow-actions:\n", 1
+        )[0]
+        workflow_group = github_actions.split("      workflow-actions:\n", 1)[1]
+
+        self.assertIn('          - "github/codeql-action/*"', codeql_group)
+        for update_type in ("major", "minor", "patch"):
+            self.assertIn(f"          - {update_type}", codeql_group)
+        self.assertIn("        exclude-patterns:\n", workflow_group)
+        self.assertIn('          - "github/codeql-action/*"', workflow_group)
+
+    def test_operational_gate_network_installs_are_bounded(self) -> None:
+        ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        jobs = dict(self._workflow_jobs(ci))
+        gate = jobs["operational-gates"]
+
+        self.assertIn("    timeout-minutes: 30", gate)
+        self.assertIn("command -v rg", gate)
+        self.assertIn("command -v unzip", gate)
+        self.assertGreaterEqual(gate.count("sudo timeout --kill-after=10s 5m apt-get"), 2)
+        self.assertIn("Acquire::Retries=3", gate)
+        self.assertIn("Acquire::http::Timeout=30", gate)
+        self.assertIn("Acquire::https::Timeout=30", gate)
+        self.assertIn("timeout --kill-after=10s 5m curl", gate)
+        for option in ("--connect-timeout 15", "--max-time 180", "--retry 3", "--retry-all-errors"):
+            self.assertIn(option, gate)
+
     def test_ci_authenticates_the_packer_version_required_by_templates(self) -> None:
         versions = set()
         for template in (ROOT / "image-factory").glob("**/*.pkr.hcl"):
