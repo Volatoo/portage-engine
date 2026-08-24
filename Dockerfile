@@ -42,7 +42,7 @@ RUN CGO_ENABLED=0 go build -trimpath -o /out/portage-server ./cmd/server && \
     CGO_ENABLED=0 go build -trimpath -o /out/portage-capacity-actuator ./cmd/capacity-actuator && \
     CGO_ENABLED=0 go build -trimpath -o /out/portage-artifact-lifecycle ./cmd/artifact-lifecycle
 
-FROM hashicorp/terraform:1.15.8@sha256:7ae513256f7ce67879e218ae8593d6fbe216ec9e123abe6c94e4e10704857963 AS terraform
+FROM hashicorp/terraform:1.15.9@sha256:fd5debae63188975d6febc6aa5bd1a982a588f55e4a4ddb7de28be923f250456 AS terraform
 
 # Minimal common runtime. Production targets below contain one trust-domain
 # binary and run as the same unprivileged numeric identity so deliberately
