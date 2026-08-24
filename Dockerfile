@@ -18,7 +18,7 @@ RUN npm run build
 
 # Build the control-plane binaries. Package builds are deliberately excluded:
 # portage-builder runs only in a disposable native Gentoo root/VM.
-FROM golang:1.26.6@sha256:0d1d3a794be25f809dd2cb3160d8c73276c4056a9f8242a138e908ddeee7b6b6 AS go-build
+FROM golang:1.26.7@sha256:45a5f7a810238aabcbad211d70b9ae082022d96f7c7259e94041ad1b933575ac AS go-build
 
 WORKDIR /app
 
