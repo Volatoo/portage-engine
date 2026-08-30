@@ -1345,6 +1345,79 @@ func testActivePhaseContextAndFinalization(
 	if err := jobRepo.CompletePhaseWork(ctx, publish); err == nil {
 		t.Fatal("finalized phase accepted a duplicate completion")
 	}
+	testLedgerJanitorBatches(t, ctx, db, jobRepo)
+}
+
+func testLedgerJanitorBatches(
+	t *testing.T,
+	ctx context.Context,
+	db *persistence.Database,
+	repo *persistence.JobRepository,
+) {
+	t.Helper()
+	const fixtureCount = 300
+	workerIDs := make([]uuid.UUID, fixtureCount)
+	workerNames := make([]string, fixtureCount)
+	jobIDs := make([]uuid.UUID, fixtureCount)
+	for index := range fixtureCount {
+		workerIDs[index] = uuid.New()
+		workerNames[index] = "janitor-batch-worker-" + uuid.NewString()
+		jobIDs[index] = uuid.New()
+	}
+	if _, err := db.Pool().Exec(ctx, `
+		INSERT INTO workers (id, stable_name, max_slots, last_seen_at)
+		SELECT fixture.id, fixture.name, 1,
+		       clock_timestamp() - interval '48 hours'
+		FROM unnest($1::uuid[], $2::text[]) AS fixture(id, name)
+	`, workerIDs, workerNames); err != nil {
+		t.Fatalf("seed batched stale workers: %v", err)
+	}
+	pruned, err := repo.PruneStaleWorkers(ctx, time.Now().Add(-24*time.Hour))
+	if err != nil || pruned < fixtureCount {
+		t.Fatalf("batched stale worker prune=%d err=%v", pruned, err)
+	}
+	var remainingWorkers int
+	if err := db.Pool().QueryRow(ctx, `
+		SELECT count(*) FROM workers WHERE id = ANY($1::uuid[])
+	`, workerIDs).Scan(&remainingWorkers); err != nil || remainingWorkers != 0 {
+		t.Fatalf("batched stale worker residue=%d err=%v", remainingWorkers, err)
+	}
+
+	if _, err := db.Pool().Exec(ctx, `
+		INSERT INTO build_jobs (
+		  id, project_id, package_atom, state, request, request_digest,
+		  created_at, updated_at, completed_at
+		)
+		SELECT fixture.id, (SELECT id FROM projects WHERE name = 'default'),
+		       'app-misc/janitor-batch', 'failed', '{}'::jsonb,
+		       'janitor-batch-fixture',
+		       clock_timestamp() - interval '48 hours',
+		       clock_timestamp() - interval '48 hours',
+		       clock_timestamp() - interval '48 hours'
+		FROM unnest($1::uuid[]) AS fixture(id)
+	`, jobIDs); err != nil {
+		t.Fatalf("seed batched terminal jobs: %v", err)
+	}
+	expired, err := repo.ExpireTerminal(ctx, time.Now().Add(-24*time.Hour))
+	if err != nil || expired != fixtureCount {
+		t.Fatalf("batched terminal retention=%d err=%v", expired, err)
+	}
+	var visibleJobs, retentionEvents int
+	if err := db.Pool().QueryRow(ctx, `
+		SELECT
+		  count(*) FILTER (WHERE legacy_visible),
+		  (SELECT count(*) FROM job_events
+		   WHERE job_id = ANY($1::uuid[])
+		     AND event_type = 'job.retention_hidden')
+		FROM build_jobs
+		WHERE id = ANY($1::uuid[])
+	`, jobIDs).Scan(&visibleJobs, &retentionEvents); err != nil ||
+		visibleJobs != 0 || retentionEvents != fixtureCount {
+		t.Fatalf(
+			"batched terminal residue visible=%d events=%d err=%v",
+			visibleJobs, retentionEvents, err,
+		)
+	}
 }
 
 func TestProjectResourceAndArtifactMigrationsRequireDrainedAttempts(t *testing.T) {

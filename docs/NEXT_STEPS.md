@@ -1,12 +1,16 @@
 # Portage Engine 后续待办与验收计划
 
-更新日期：2026-08-20
+更新日期：2026-08-30
 
 ## 当前结论
 
 P0 已关闭：整合分支的 51 个提交已 rebase 进 `origin/main`，CI、CodeQL、Security
 Scan 与 PR Build Verification 在 `main` 上全绿，`evidence/public-beta/repository-gate.json`
 在合并后的干净树上重新生成且十项全 pass。下一步是 P1，全部依赖真实环境。
+
+2026-08-30 的复核又关闭三项仓库缺口：GitHub 私密漏洞报告入口已启用并回读；
+启动时的 stale-worker/terminal-job 清理改为带 5 秒 deadline 的 256 行事务批次；
+API-only replica 会在初始化和周期清理中回收过期的对象上传 scratch。
 
 `codex/next-steps-integration` 已补齐本文件中可以在仓库内安全实现和验证的切片：
 persistent executor 模板与 fail-closed Gate、CLI device authorization、公开 edge
@@ -29,6 +33,11 @@ HA、生产备份/对象存储/signer、真实 distccd、GitHub 发布和 30 天
 
 ## P0：仓库收口
 
+- [x] 启用 GitHub private vulnerability reporting，使 `SECURITY.md` 公布的私密入口
+  与仓库配置一致。
+- [x] 限制启动 ledger janitor 的时间和事务大小；为 API-only 角色补齐
+  `.object-upload/.generation-*` 崩溃残留的启动与周期回收，并以真实 PostgreSQL
+  300 行跨批次用例及文件年龄边界测试验证。
 - [x] 检查本地 `.playwright-mcp/` 浏览器测试输出并加入本地 exclude，避免测试
   日志进入版本控制。
 - [x] 审阅并将 `codex/next-steps-integration` 合并/推送到 `origin/main`。以 rebase

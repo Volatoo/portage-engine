@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -193,6 +194,25 @@ func TestLedgerConsistencyIntervalIsConfigurable(t *testing.T) {
 		if got := ledgerConsistencyInterval(cfg); got != test.want {
 			t.Errorf("%d seconds -> %s, want %s", test.seconds, got, test.want)
 		}
+	}
+}
+
+func TestLedgerJanitorOperationHasStartupDeadline(t *testing.T) {
+	called := false
+	count, err := runLedgerJanitorOperation(func(ctx context.Context) (int64, error) {
+		called = true
+		deadline, ok := ctx.Deadline()
+		if !ok {
+			t.Fatal("ledger janitor context has no deadline")
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 || remaining > ledgerJanitorTimeout {
+			t.Fatalf("ledger janitor deadline remaining=%s", remaining)
+		}
+		return 7, nil
+	})
+	if err != nil || !called || count != 7 {
+		t.Fatalf("ledger janitor count=%d called=%v err=%v", count, called, err)
 	}
 }
 

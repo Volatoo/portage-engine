@@ -62,6 +62,12 @@ begin. Entries describe operator-visible changes, not every internal refactor.
 
 ### Fixed
 
+- Boot-time PostgreSQL retention and stale-worker pruning now use bounded
+  transactions under a five-second deadline per operation, so historical
+  ledger volume or lock contention cannot indefinitely delay startup.
+- API-only replicas now start artifact cleanup and remove expired
+  `.object-upload/.generation-*` scratch left by a process crash, while keeping
+  active generations and unrelated files.
 - `portage_scheduler_lease_expiries_total` no longer drops to zero when the
   scheduler status read times out. Prometheus read that as a counter reset, and
   `increase()` over the reset re-counted the whole lifetime total, firing
