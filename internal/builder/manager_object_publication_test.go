@@ -240,6 +240,66 @@ func TestObjectQuarantineCleanupSparesInFlightGeneration(t *testing.T) {
 	}
 }
 
+func TestArtifactCleanupRemovesOnlyExpiredGatewayObjectScratch(t *testing.T) {
+	store := newVersionedMemoryStorage()
+	dataDir := filepath.Join(t.TempDir(), "data")
+	manager := NewManager(&config.ServerConfig{
+		MaxWorkers: 0, StorageType: "s3",
+		BinpkgPath: filepath.Join(t.TempDir(), "binpkgs"),
+		DataDir:    dataDir,
+	})
+	defer manager.Shutdown()
+
+	scratch := filepath.Join(dataDir, "quarantine-cache", ".object-upload")
+	if err := os.MkdirAll(scratch, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	expired := filepath.Join(scratch, ".generation-expired")
+	active := filepath.Join(scratch, ".generation-active")
+	unrelated := filepath.Join(scratch, "operator-note")
+	for _, path := range []string{expired, active, unrelated} {
+		if err := os.WriteFile(path, []byte("scratch"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := time.Now().Add(-quarantineOrphanAge - time.Hour)
+	if err := os.Chtimes(expired, old, old); err != nil {
+		t.Fatal(err)
+	}
+	manager.SetArtifactStorage(store)
+	if _, err := os.Stat(expired); !os.IsNotExist(err) {
+		t.Fatalf("startup retained expired gateway object scratch: %v", err)
+	}
+
+	if err := os.WriteFile(expired, []byte("scratch"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(expired, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	manager.StartArtifactCleanup()
+	deadline := time.Now().Add(time.Second)
+	for {
+		_, err := os.Stat(expired)
+		if os.IsNotExist(err) {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("expired gateway object scratch was not removed at startup")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	for _, path := range []string{active, unrelated} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("cleanup removed protected scratch %s: %v", filepath.Base(path), err)
+		}
+	}
+}
+
 func TestSignedGenerationManifestRecordsTheSignerReportedKey(t *testing.T) {
 	store := newVersionedMemoryStorage()
 	manager := NewManager(&config.ServerConfig{

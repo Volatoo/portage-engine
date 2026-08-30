@@ -37,6 +37,8 @@ var (
 	BuildTime = "unknown"
 )
 
+const ledgerJanitorTimeout = 5 * time.Second
+
 // Server represents the Portage Engine server.
 type Server struct {
 	config               *config.ServerConfig
@@ -423,6 +425,9 @@ func (s *Server) Initialize() error {
 		}
 		s.startBinhostRefresher(5 * time.Minute)
 	}
+	// Artifact cleanup is role-independent: API replicas own Worker Gateway
+	// object-upload scratch even though they never receive provider credentials.
+	s.builder.StartArtifactCleanup()
 	// The public API role never receives provider/SSH credentials and therefore
 	// cannot own Terraform cleanup. Combined trusted mode retains the legacy
 	// behavior; separated executors own cleanup in the public topology.
@@ -946,17 +951,28 @@ func (s *Server) initPersistence() error {
 // without repeating it on every tick.
 func (s *Server) pruneLedgerOnce() {
 	s.ledgerPruneOnce.Do(func() {
-		if pruned, err := s.jobLedger.PruneStaleWorkers(context.Background(), time.Now().Add(-time.Hour)); err != nil {
+		if pruned, err := runLedgerJanitorOperation(func(ctx context.Context) (int64, error) {
+			return s.jobLedger.PruneStaleWorkers(ctx, time.Now().Add(-time.Hour))
+		}); err != nil {
 			log.Printf("Warning: stale scheduler worker pruning failed: %v", err)
 		} else if pruned > 0 {
 			log.Printf("Pruned %d stale scheduler worker slot(s)", pruned)
 		}
-		if expired, err := s.jobLedger.ExpireTerminal(context.Background(), time.Now().Add(-7*24*time.Hour)); err != nil {
+		if expired, err := runLedgerJanitorOperation(func(ctx context.Context) (int64, error) {
+			count, err := s.jobLedger.ExpireTerminal(ctx, time.Now().Add(-7*24*time.Hour))
+			return int64(count), err
+		}); err != nil {
 			log.Printf("Warning: PostgreSQL job retention failed: %v", err)
 		} else if expired > 0 {
 			log.Printf("PostgreSQL job retention hid %d terminal job(s)", expired)
 		}
 	})
+}
+
+func runLedgerJanitorOperation(operation func(context.Context) (int64, error)) (int64, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), ledgerJanitorTimeout)
+	defer cancel()
+	return operation(ctx)
 }
 
 func (s *Server) startLedgerReconciler(interval time.Duration) {

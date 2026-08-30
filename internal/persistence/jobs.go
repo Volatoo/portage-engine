@@ -19,7 +19,10 @@ import (
 	"github.com/slchris/portage-engine/internal/catalog"
 )
 
-const maxLedgerErrorBytes = 64 * 1024
+const (
+	maxLedgerErrorBytes        = 64 * 1024
+	terminalRetentionBatchSize = 256
+)
 
 // LedgerReconcileReport compares the in-memory job view with the visible
 // PostgreSQL rows. Two callers produce one: the migration-era Reconcile, which
@@ -1009,44 +1012,63 @@ func (r *JobRepository) HideJob(ctx context.Context, status *builder.BuildStatus
 // ExpireTerminal hides old terminal jobs from operator listings while
 // retaining their attempts, events, logs, and artifact lineage for audit.
 func (r *JobRepository) ExpireTerminal(ctx context.Context, before time.Time) (int, error) {
-	var expired []string
-	err := r.db.WithTx(ctx, pgx.TxOptions{}, func(q Querier) error {
-		rows, err := q.Query(ctx, `
-			UPDATE build_jobs
-			SET legacy_visible = false, deleted_at = clock_timestamp(),
-			    ledger_revision = ledger_revision + 1
-			WHERE legacy_visible = true
-			  AND state IN ('completed','success','failed','canceled')
-			  AND updated_at < $1
-			RETURNING id::text
-		`, before)
-		if err != nil {
-			return err
-		}
-		for rows.Next() {
-			var jobID string
-			if err := rows.Scan(&jobID); err != nil {
+	total := 0
+	for {
+		var expired []string
+		err := r.db.WithTx(ctx, pgx.TxOptions{}, func(q Querier) error {
+			rows, err := q.Query(ctx, `
+				WITH candidates AS (
+				  SELECT id
+				  FROM build_jobs
+				  WHERE legacy_visible = true
+				    AND state IN ('completed','success','failed','canceled')
+				    AND updated_at < $1
+				  ORDER BY updated_at, id
+				  LIMIT $2
+				  FOR UPDATE SKIP LOCKED
+				)
+				UPDATE build_jobs AS job
+				SET legacy_visible = false, deleted_at = clock_timestamp(),
+				    ledger_revision = job.ledger_revision + 1
+				FROM candidates
+				WHERE job.id = candidates.id
+				RETURNING job.id::text
+			`, before, terminalRetentionBatchSize)
+			if err != nil {
+				return err
+			}
+			for rows.Next() {
+				var jobID string
+				if err := rows.Scan(&jobID); err != nil {
+					rows.Close()
+					return err
+				}
+				expired = append(expired, jobID)
+			}
+			if err := rows.Err(); err != nil {
 				rows.Close()
 				return err
 			}
-			expired = append(expired, jobID)
-		}
-		if err := rows.Err(); err != nil {
 			rows.Close()
-			return err
-		}
-		rows.Close()
-		for _, jobID := range expired {
-			if err := r.insertJobEvent(ctx, q, jobID, "job.retention_hidden", map[string]any{
-				"before": before,
-			}); err != nil {
-				return err
+			for _, jobID := range expired {
+				if err := r.insertJobEvent(ctx, q, jobID, "job.retention_hidden", map[string]any{
+					"before": before,
+				}); err != nil {
+					return err
+				}
 			}
+			return nil
+		})
+		if err != nil {
+			r.recordWrite(err)
+			return total, err
 		}
-		return nil
-	})
-	r.recordWrite(err)
-	return len(expired), err
+		total += len(expired)
+		if len(expired) < terminalRetentionBatchSize {
+			r.recordWrite(nil)
+			return total, nil
+		}
+	}
 }
 
 func (r *JobRepository) insertJobEvent(ctx context.Context, q Querier, jobID, eventType string, payload map[string]any) error {

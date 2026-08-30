@@ -683,14 +683,15 @@ type Manager struct {
 	// workersMu guards workersStarted. A sync.Once is deliberately not used:
 	// a start that fails must stay retryable, because the executor pool is the
 	// only thing that ever polls for accepted builds.
-	workersMu      sync.Mutex
-	workersStarted bool
-	cleanupOnce    sync.Once
-	stopped        bool // guarded by submitMu
-	schedulerID    string
-	executorCaps   []string
-	wakeHook       func()
-	eventHook      func(BuildStatus)
+	workersMu           sync.Mutex
+	workersStarted      bool
+	artifactCleanupOnce sync.Once
+	infraCleanupOnce    sync.Once
+	stopped             bool // guarded by submitMu
+	schedulerID         string
+	executorCaps        []string
+	wakeHook            func()
+	eventHook           func(BuildStatus)
 
 	// onArtifactStored, when set, is called after an artifact lands in the
 	// binhost PKGDIR (the server uses it to refresh the Packages index).
@@ -730,6 +731,7 @@ func (m *Manager) SetArtifactPromotionHook(f func(string, []string, string, stri
 func (m *Manager) SetArtifactStorage(store artifactstorage.Storage) {
 	m.artifactStore = store
 	if m.objectQuarantineEnabled() {
+		m.cleanupExpiredGatewayObjectScratch()
 		m.workerBroker.SetUploadRoot(m.artifactQuarantineBase())
 		m.workerBroker.SetUploadObjectSink(m.storeGatewayUpload)
 		return
@@ -884,12 +886,22 @@ func (m *Manager) SetJobLedger(ledger JobLedger) {
 	}
 }
 
-// StartInfrastructureCleanup starts exactly one cleanup authority after cloud
-// credentials/settings are loaded. PostgreSQL mode must never also run the
-// process-local instances.json scanner.
-func (m *Manager) StartInfrastructureCleanup() {
-	m.cleanupOnce.Do(func() {
+// StartArtifactCleanup starts process-local quarantine cleanup for every role
+// that can receive artifacts. It is deliberately independent from provider
+// cleanup because an API-only replica owns Worker Gateway object-upload
+// scratch but must never receive infrastructure credentials.
+func (m *Manager) StartArtifactCleanup() {
+	m.artifactCleanupOnce.Do(func() {
 		go m.artifactQuarantineCleanupLoop()
+	})
+}
+
+// StartInfrastructureCleanup starts exactly one provider cleanup authority
+// after cloud credentials/settings are loaded. PostgreSQL mode must never also
+// run the process-local instances.json scanner.
+func (m *Manager) StartInfrastructureCleanup() {
+	m.StartArtifactCleanup()
+	m.infraCleanupOnce.Do(func() {
 		if m.infraCleanup != nil {
 			go m.infraCleanupLoop(m.infraCleanup)
 			return
@@ -914,6 +926,7 @@ func (m *Manager) artifactQuarantineCleanupLoop() {
 
 func (m *Manager) cleanupExpiredArtifactQuarantines() {
 	if m.objectQuarantineEnabled() {
+		m.cleanupExpiredGatewayObjectScratch()
 		m.cleanupExpiredObjectQuarantines()
 	}
 	base := m.artifactQuarantineBase()
@@ -939,6 +952,25 @@ func (m *Manager) cleanupExpiredArtifactQuarantines() {
 		if statErr == nil && now.Sub(info.ModTime()) > quarantineOrphanAge {
 			_ = os.RemoveAll(root)
 		}
+	}
+}
+
+func (m *Manager) cleanupExpiredGatewayObjectScratch() {
+	scratch := filepath.Join(m.artifactQuarantineBase(), ".object-upload")
+	entries, err := os.ReadDir(scratch)
+	if err != nil {
+		return
+	}
+	now := time.Now()
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasPrefix(entry.Name(), ".generation-") {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil || now.Sub(info.ModTime()) <= quarantineOrphanAge {
+			continue
+		}
+		_ = os.Remove(filepath.Join(scratch, entry.Name()))
 	}
 }
 
