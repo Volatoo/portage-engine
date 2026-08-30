@@ -2683,7 +2683,7 @@ func testDurablePhaseWorkQueue(
 	}
 
 	first, err := jobRepo.ClaimPhaseWork(
-		ctx, "phase-executor-a", 100*time.Millisecond,
+		ctx, "phase-executor-a", time.Minute,
 		legacyExecutorCapabilities, "provision",
 	)
 	if err != nil || first == nil || first.Phase != "provision" {
