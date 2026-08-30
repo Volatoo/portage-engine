@@ -89,6 +89,8 @@ begin. Entries describe operator-visible changes, not every internal refactor.
 
 ### Security
 
+- Upgrade `golang.org/x/crypto` to v0.55.0, including the fix for
+  CVE-2026-56854; the matching `golang.org/x/text` dependency moves to v0.41.0.
 - Device and platform bearer capabilities are persisted only as SHA-256
   digests; approval requires an existing federated platform session, and
   denial, expiry, concurrent consumption and replay fail closed.
