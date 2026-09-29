@@ -62,6 +62,10 @@ begin. Entries describe operator-visible changes, not every internal refactor.
 
 ### Fixed
 
+- Executor startup and capacity-pool diagnostics now report the matching
+  catalog profile and its failed resolution, including a stale MirrorBundle's
+  `fresh_until` deadline. A bundle expiry no longer appears only as a false
+  provider/zone mismatch; expired bundles remain ineligible for execution.
 - Boot-time PostgreSQL retention and stale-worker pruning now use bounded
   transactions under a five-second deadline per operation, so historical
   ledger volume or lock contention cannot indefinitely delay startup.

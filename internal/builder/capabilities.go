@@ -184,22 +184,10 @@ func (m *Manager) resolveCapacityPools() ([]SchedulerCapacityPoolDefinition, err
 	if len(zones) == 0 {
 		zones[defaultExecutionZone] = struct{}{}
 	}
+	resolvedProfiles, rejected := resolveExecutorProfiles(buildCatalog, provider, zones)
 	seen := make(map[string]struct{})
-	pools := make([]SchedulerCapacityPoolDefinition, 0, len(buildCatalog.Profiles))
-	for _, profile := range buildCatalog.Profiles {
-		resolved, err := buildCatalog.Resolve(catalog.ResolveRequest{
-			ProfileID: profile.ID,
-		})
-		if err != nil || resolved.Provider != provider {
-			continue
-		}
-		zone := strings.TrimSpace(resolved.ExecutionZone)
-		if zone == "" {
-			zone = defaultExecutionZone
-		}
-		if _, supported := zones[zone]; !supported {
-			continue
-		}
+	pools := make([]SchedulerCapacityPoolDefinition, 0, len(resolvedProfiles))
+	for _, resolved := range resolvedProfiles {
 		pool, err := capacityPoolDefinition(resolved)
 		if err != nil {
 			return nil, err
@@ -212,10 +200,7 @@ func (m *Manager) resolveCapacityPools() ([]SchedulerCapacityPoolDefinition, err
 	}
 	sort.Slice(pools, func(i, j int) bool { return pools[i].ID < pools[j].ID })
 	if len(pools) == 0 {
-		return nil, fmt.Errorf(
-			"no capacity pool matches provider %q and executor zones %v",
-			provider, m.config.ExecutorZones,
-		)
+		return nil, unresolvedExecutorProfilesError("capacity pool", provider, m.config.ExecutorZones, rejected)
 	}
 	return pools, nil
 }
@@ -243,19 +228,9 @@ func (m *Manager) resolveExecutorCapabilities() ([]string, error) {
 		zones[defaultExecutionZone] = struct{}{}
 	}
 
+	resolvedProfiles, rejected := resolveExecutorProfiles(buildCatalog, provider, zones)
 	var labels []string
-	for _, profile := range buildCatalog.Profiles {
-		resolved, err := buildCatalog.Resolve(catalog.ResolveRequest{ProfileID: profile.ID})
-		if err != nil || resolved.Provider != provider {
-			continue
-		}
-		zone := strings.TrimSpace(resolved.ExecutionZone)
-		if zone == "" {
-			zone = defaultExecutionZone
-		}
-		if _, supported := zones[zone]; !supported {
-			continue
-		}
+	for _, resolved := range resolvedProfiles {
 		request := &BuildRequest{ResolvedContext: resolved}
 		for _, phase := range []string{"provision", "build", "verify", "publish"} {
 			required, requirementErr := PhaseCapabilityRequirements(request, phase)
@@ -266,12 +241,51 @@ func (m *Manager) resolveExecutorCapabilities() ([]string, error) {
 		}
 	}
 	if len(labels) == 0 {
-		return nil, fmt.Errorf(
-			"no catalog profile matches provider %q and executor zones %v",
-			provider, m.config.ExecutorZones,
-		)
+		return nil, unresolvedExecutorProfilesError("catalog profile", provider, m.config.ExecutorZones, rejected)
 	}
 	return m.bindCapacityInstance(labels)
+}
+
+// Resolve only profiles whose catalog image targets this executor. A stale
+// bundle prevents Resolve from returning an image, so filtering after Resolve
+// loses the precise rejection and reports a false provider/zone mismatch.
+func resolveExecutorProfiles(buildCatalog *catalog.Catalog, provider string, zones map[string]struct{}) ([]*catalog.ResolvedBuildContext, []string) {
+	images := make(map[string]catalog.ImageManifest, len(buildCatalog.Images))
+	for _, image := range buildCatalog.Images {
+		images[image.ID] = image
+	}
+	resolvedProfiles := make([]*catalog.ResolvedBuildContext, 0, len(buildCatalog.Profiles))
+	var rejected []string
+	for _, profile := range buildCatalog.Profiles {
+		image, exists := images[profile.ImageID]
+		if !exists || image.Provider != provider {
+			continue
+		}
+		zone := strings.TrimSpace(image.ExecutionZone)
+		if zone == "" {
+			zone = defaultExecutionZone
+		}
+		if _, supported := zones[zone]; !supported {
+			continue
+		}
+		resolved, err := buildCatalog.Resolve(catalog.ResolveRequest{ProfileID: profile.ID})
+		if err != nil {
+			if len(rejected) < 4 {
+				rejected = append(rejected, fmt.Sprintf("profile %q: %v", profile.ID, err))
+			}
+			continue
+		}
+		resolvedProfiles = append(resolvedProfiles, resolved)
+	}
+	return resolvedProfiles, rejected
+}
+
+func unresolvedExecutorProfilesError(kind, provider string, zones []string, rejected []string) error {
+	if len(rejected) > 0 {
+		return fmt.Errorf("no resolvable %s for provider %q and executor zones %v: %s",
+			kind, provider, zones, strings.Join(rejected, "; "))
+	}
+	return fmt.Errorf("no %s matches provider %q and executor zones %v", kind, provider, zones)
 }
 
 func workerKindCapabilities(labels []string, kind string) []string {

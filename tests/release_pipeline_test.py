@@ -1,5 +1,6 @@
 import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -605,19 +606,22 @@ printf '%s\\n' "${STUB_TIMESTAMP}"
     @classmethod
     def setUpClass(cls) -> None:
         cls.bash = None
-        candidates = ["/opt/homebrew/bin/bash", "/usr/local/bin/bash", shutil.which("bash"), "/bin/bash"]
+        candidates = ["/opt/homebrew/bin/bash", "/usr/local/bin/bash", "/run/current-system/sw/bin/bash", shutil.which("bash"), "/bin/bash"]
         for candidate in candidates:
             # The step scripts use mapfile, which bash 3.2 -- still /bin/bash on
             # macOS -- does not have.
-            if not candidate or not Path(candidate).exists():
+            if not candidate or not Path(candidate).exists() or not os.access(candidate, os.X_OK):
                 continue
-            probe = subprocess.run(
-                [candidate, "-c", 'mapfile -t lines < <(printf "ok\\n"); printf "%s" "${lines[0]}"'],
-                check=False,
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-            )
+            try:
+                probe = subprocess.run(
+                    [candidate, "-c", 'mapfile -t lines < <(printf "ok\\n"); printf "%s" "${lines[0]}"'],
+                    check=False,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                )
+            except OSError:
+                continue
             if probe.returncode == 0 and probe.stdout == "ok":
                 cls.bash = candidate
                 break

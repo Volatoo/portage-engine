@@ -2,6 +2,7 @@ package builder
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -142,6 +143,56 @@ func TestResolveExecutorCapabilitiesUsesRuntimeProvider(t *testing.T) {
 	}
 	if !containsCapability(labels, "provider:pve") {
 		t.Fatalf("runtime provider capability missing: %v", labels)
+	}
+}
+
+func TestExecutorStartupReportsMatchingProfileBundleExpiry(t *testing.T) {
+	buildCatalog, err := catalog.Load("../../configs/catalog.example.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range buildCatalog.Profiles {
+		buildCatalog.Profiles[i].Channel = "stable"
+	}
+	for i := range buildCatalog.Repositories {
+		buildCatalog.Repositories[i].Channel = "stable"
+	}
+	for i := range buildCatalog.Images {
+		buildCatalog.Images[i].Channel = "stable"
+	}
+	for i := range buildCatalog.MirrorBundles {
+		buildCatalog.MirrorBundles[i].Channel = "stable"
+		buildCatalog.MirrorBundles[i].CreatedAt = time.Now().UTC().Add(-48 * time.Hour)
+		buildCatalog.MirrorBundles[i].FreshUntil = time.Now().UTC().Add(-time.Hour)
+	}
+	for i := range buildCatalog.EgressPolicies {
+		buildCatalog.EgressPolicies[i].Channel = "stable"
+	}
+	if err := buildCatalog.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	manager := NewManager(&config.ServerConfig{CloudProvider: "pve", ExecutorZones: []string{"default"}})
+	manager.SetBuildCatalog(buildCatalog)
+	for _, check := range []struct {
+		name string
+		run  func() error
+	}{
+		{"capabilities", func() error { _, err := manager.resolveExecutorCapabilities(); return err }},
+		{"capacity pools", func() error { _, err := manager.resolveCapacityPools(); return err }},
+	} {
+		t.Run(check.name, func(t *testing.T) {
+			err := check.run()
+			if err == nil || !strings.Contains(err.Error(), "mirror bundle") ||
+				!strings.Contains(err.Error(), "fresh_until=") ||
+				!strings.Contains(err.Error(), buildCatalog.Profiles[0].ID) {
+				t.Fatalf("startup lost the profile rejection: %v", err)
+			}
+		})
+	}
+	unrelated := NewManager(&config.ServerConfig{CloudProvider: "gcp", ExecutorZones: []string{"default"}})
+	unrelated.SetBuildCatalog(buildCatalog)
+	if _, err := unrelated.resolveExecutorCapabilities(); err == nil || strings.Contains(err.Error(), "mirror bundle") {
+		t.Fatalf("unrelated provider inherited a PVE bundle rejection: %v", err)
 	}
 }
 
