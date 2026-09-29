@@ -466,7 +466,8 @@ func (c *Catalog) ResolveAt(req ResolveRequest, now time.Time) (*ResolvedBuildCo
 	bundle := c.mirrorBundlesByID[profile.MirrorBundleID]
 	egressPolicy := c.egressByID[profile.EgressPolicyID]
 	if profile.Channel != "compatibility" && (bundle.FreshUntil.IsZero() || !now.Before(bundle.FreshUntil)) {
-		return nil, fmt.Errorf("mirror bundle %q is stale at %s", bundle.ID, now.UTC().Format(time.RFC3339))
+		return nil, fmt.Errorf("mirror bundle %q is stale: fresh_until=%s, checked_at=%s",
+			bundle.ID, bundle.FreshUntil.UTC().Format(time.RFC3339), now.UTC().Format(time.RFC3339))
 	}
 	profileRepository := c.repositoriesByID[profile.ProfileRepositoryID]
 	profileParents := make([]ResolvedProfileParent, 0, len(profile.Parents))
