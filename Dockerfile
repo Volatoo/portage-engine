@@ -3,7 +3,7 @@
 # nothing that ships. The lockfile is copied on its own so a source-only change
 # reuses the install layer, and `npm ci` (not `npm install`) is what makes the
 # resolved tree the same one the lockfile records.
-FROM node:26.7.0-bookworm-slim@sha256:cd565714d4da3e84bfd341e31448f81d47c6362198f152345297c9c1154e6341 AS web-build
+FROM node:26.12.1-bookworm-slim@sha256:28147155d47dc31abe0a46e0d12b59b2fb3d0a2dcc5dc65fce76a074180b16fe AS web-build
 
 WORKDIR /app/web
 
